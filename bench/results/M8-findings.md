@@ -648,3 +648,88 @@ AOT dispatch redesign. They were evidence of an uncorrected
 difference in how the two CLIs take their input, amplified by a
 benchmark tool's own default shell wrapping. Once both of those were
 corrected, no gap remained to explain.
+
+## M10/M6 update: real nixpkgs evaluation, for the first time
+
+Every result above used `bench/workloads`, a set of small synthetic
+microbenchmarks. `ll` was not able to evaluate a real nixpkgs
+expression at all until this update. It aborted on the very first
+`let` in a real `default.nix`. The error was "op id 5 has no AOT
+handler." `ll` had only ported about 34 of 59 `IrOp` kinds. Those
+are the ones the microbenchmark suite exercises. Real nixpkgs needs
+most of the rest. That list includes `with`, `rec` with
+`__overrides`, `//`, string interpolation, `?`, `or`, and dynamic
+attribute access.
+
+Six independent agents ported the remaining ops in parallel, each in
+its own isolated git worktree. Each agent ported one cohesive group.
+One group covered scoping for `with` and `rec`. One covered `//` and
+`++`. One covered string and path interpolation. One covered `?`
+membership tests. One covered `or` and dynamic select. One covered a
+set of five lower-traffic ops. One foundational piece came first. Cell, LazyApp,
+and ThunkMap indirection are heap-object aliasing schemes real
+nixpkgs's `rec {}` and `mapAttrs`/`zipAttrsWith` use. These now
+resolve correctly in both `OP_VAR_REF` and `OP_SELECT`, through the
+vendored reference functions `asnix_resolve_cell_chain`,
+`asnix_resolve_lazyapp`, and `asnix_resolve_thunkmap`. Each of the
+six agents' new code went through a manual check. The check covered
+helper signatures, push and pop accounting, and correct use of
+`LL_GOTO` versus `LL_NEXT`. Only after that check did each piece get
+wired into the shared dispatch table. All 44 differential tests kept
+passing throughout.
+
+Two further gaps surfaced once real nixpkgs code actually ran.
+
+The first: `__functor`. An attrset with a `__functor` attribute is
+callable. Real nixpkgs's `lib.fix`, `lib.extends`, and overlay
+machinery use this constantly. It was out of scope for the whole
+M10 port. It is now added to both `ll_op_call` and `asnix_apply`.
+
+The second was a real bug, found with `valgrind`, not by guesswork.
+`asnix_apply`'s primop branch did not preserve an invariant that
+`builtins_list.c`'s curried-native stages depend on. A curried
+builtin such as `elemAt someList` is itself a PrimOp value. It
+captures `someList` inside itself. Calling it recovers that captured
+value by reading `args[-1]`. That read relies on `op_call.S`'s own
+calling convention. That convention always leaves the called value
+sitting one slot before its arguments, on `VALSTACK`. A curried
+stage can itself be handed to `map`, `filter`, or `genList` as the
+callback. When that happens, `asnix_apply` is reached instead, as a
+separate call path. It did not provide that same slot. `op_call.c`'s
+own primop branch got this right by
+accident, through its own `callee_slot` arithmetic. `asnix_apply`
+did not. The fix gives it the same self-capture slot.
+
+Verification covered all 74 real package attribute paths in
+`asnix`'s own `tests/nixpkgs-hash/attrs.txt` corpus. A few examples:
+`hello`, `bash`, `git`, `python3`, `rustc`, `gcc`, `llvm`, and
+`ripgrep`. These span compilers, interpreters, CLI tools, and GNU
+coreutils. All 74 now evaluate through `ll` and match `asnix`
+exactly. The check used `builtins.stringLength` on each package's
+real `outPath`, against a real nixpkgs checkout on this machine, not
+a fixture. Neither side crashed on any of the 74. `ffmpeg.outPath`
+itself, the specific target this update set out to check, evaluates
+correctly: a 60-character path, matching `asnix` exactly.
+
+Timing on that same `ffmpeg.outPath` eval used `hyperfine` at 15
+runs. The noise was low this time, with a standard deviation under 2
+percent, unlike the tiny microbenchmarks above where process startup
+noise dominated. `ll` took 946 ms. `asnix` took 831 ms. `ll` is 1.14
+times slower here. This is real, substantial work, close to a full
+second of actual evaluation, not a few hundred microseconds. This
+result is not noise the way the earlier microbenchmark gaps were.
+This file's own M10 sections already identified a per-hop register-
+placement cost, one this toolchain had no full fix for. This result
+is the clearest evidence yet of that same cost. At real nixpkgs
+scale, with many thousands of dispatch hops, that cost adds up to a
+measurable, genuine slowdown. `ll` still wins on most small,
+synthetic workloads.
+
+One thing was not attempted: a full NixOS system closure, such as a
+Plasma desktop configuration. That needs the entire NixOS module
+system to evaluate correctly, not just the Nix language itself. The
+module system means `lib.evalModules`, hundreds of modules, and
+assertions. That is a substantially larger undertaking than the
+op-porting done here, and it is likely to surface further gaps
+beyond this update's scope. This machine also has no local NixOS
+configuration to test against.
