@@ -733,3 +733,28 @@ assertions. That is a substantially larger undertaking than the
 op-porting done here, and it is likely to surface further gaps
 beyond this update's scope. This machine also has no local NixOS
 configuration to test against.
+
+## Real value printer, ported from asnix's main.c
+
+Until this point, `ll`'s own CLI printed only a raw integer, no
+matter what the evaluated result's real type was. The nixpkgs
+checks above used proxy values, such as string length and attribute
+count, to check correctness, instead of printing the real value.
+
+`src/llvm/ll_print.c` ports asnix's own printer from `src/c/main.c`,
+function for function: string escaping, attrset key quoting and
+sort order, `<PRIMOP>`/`<LAMBDA>`/`<PRIMOP-APP>` labels for
+callables, and `«repeated»` cycle detection for self-referential
+attrsets and lists. `ll_main.c` now calls `ll_print_value` in place
+of the old integer-only `printf`.
+
+Direct comparison against asnix's own raw output checks byte-for-
+byte parity. This is true across strings, lists, attrsets, paths,
+booleans, null, floats, primops, lambdas, and a self-referential
+attrset. `pkgs.ffmpeg-full.outPath` and `pkgs.ffmpeg-full.drvPath`
+now print as real, correctly quoted strings, identical between `ll`
+and asnix, not a proxy-checked integer. The 74-attribute nixpkgs-
+hash corpus was run again. This time it diffed the two evaluators'
+raw `outPath` output directly, instead of comparing string lengths.
+It passed 74 out of 74. All 44 difftest cases still pass with the
+new printer wired in.

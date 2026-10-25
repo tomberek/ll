@@ -8,10 +8,9 @@
  * asnix's own hand-written asm handlers are assembled once into
  * asnix's own binary.
  *
- * Printing is still int-only (asnix_int_value) -- M5's scope is making
- * `builtins`/closures/PrimOps reachable and callable, not a general
- * value printer (that's main.c's own ~200-line
- * print_string_contents/print_value_inner, not yet vendored). */
+ * Printing uses ll_print.c, a verbatim port of asnix's own main.c
+ * printer (quoted strings, attrsets sorted by key, <PRIMOP>/<LAMBDA>
+ * states, cycle detection) -- real Nix values, not just integers. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +22,7 @@
 #include "asnix/value.h"
 #include "ast.h"
 #include "compiler.h"
+#include "ll_print.h"
 #include "parser.h"
 #include "root_env.h"
 
@@ -80,6 +80,6 @@ int main(int argc, char **argv) {
                 ms_between(&t0, &t4));
     }
 
-    printf("%lld\n", (long long)asnix_int_value(result));
+    ll_print_value(result);
     return 0;
 }
