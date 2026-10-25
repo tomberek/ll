@@ -61,6 +61,31 @@ void *ll_handler_table[OP_COUNT] = {
     [OP_MK_ATTRS] = (void *)ll_op_mk_attrs,
     [OP_SELECT] = (void *)ll_op_select,
 
+    [OP_WITH] = (void *)ll_op_with,
+    [OP_WITH_TRY] = (void *)ll_op_with_try,
+    [OP_WITH_MISS] = (void *)ll_op_with_miss,
+    [OP_WITH_EXIT] = (void *)ll_op_with_exit,
+
+    [OP_UPDATE] = (void *)ll_op_update,
+    [OP_CONCAT] = (void *)ll_op_concat,
+
+    [OP_STR_CONCAT] = (void *)ll_op_str_concat,
+    [OP_PATH_CONCAT] = (void *)ll_op_path_concat,
+
+    [OP_HAS_ATTR] = (void *)ll_op_has_attr,
+    [OP_HAS_ATTR_IF] = (void *)ll_op_has_attr_if,
+    [OP_HAS_ATTR_DYNAMIC] = (void *)ll_op_has_attr_dynamic,
+
+    [OP_SELECT_OR] = (void *)ll_op_select_or,
+    [OP_SELECT_DYNAMIC] = (void *)ll_op_select_dynamic,
+    [OP_SELECT_DYNAMIC_OR] = (void *)ll_op_select_dynamic_or,
+
+    [OP_CHECK_FORMALS] = (void *)ll_op_check_formals,
+    [OP_ASSERT_FAIL] = (void *)ll_op_assert_fail,
+    [OP_INSERT_DYNAMIC_ATTR] = (void *)ll_op_insert_dynamic_attr,
+    [OP_REC_OVERRIDES_MERGE] = (void *)ll_op_rec_overrides_merge,
+    [OP_RESOLVE_SEARCH_PATH] = (void *)ll_op_resolve_search_path,
+
     [OP_HALT] = (void *)ll_op_halt,
 };
 

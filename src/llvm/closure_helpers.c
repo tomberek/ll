@@ -20,6 +20,7 @@
 
 #include "op_dispatch.h"
 #include "asnix/force_scratch.h"
+#include "builtins_shared.h"
 #include "ll_resolve.h"
 
 /* M82: nested-recursion depth for asnix_force_for_print, read/saved/
@@ -125,15 +126,30 @@ Value asnix_apply(Value fn, const Value *args, int64_t argc) {
             static const char msg[] = "asnix: apply argument count does not match arity, aborting\n";
             asnix_fatal(msg, sizeof(msg) - 1);
         }
-        /* M38: never mutate the caller's own args buffer -- build a
+        /* M38/M62: never mutate the caller's own args buffer -- build a
          * local forced copy instead. Primop arities are small (max 3
          * in this codebase today); 64 covers any realistic case with
-         * room to spare, fixed-size so this stays simple C. */
-        Value forced[64];
+         * room to spare, fixed-size so this stays simple C.
+         *
+         * scratch[0] holds `fn` itself (the called PrimOp Value), with
+         * the forced args starting at scratch+1 -- this is the "self"
+         * slot builtins_list.c's self_captures() reads via args[-1],
+         * exploiting the real invariant op_call.S's own primop call
+         * path gives it for free (the callee's own Value always sits
+         * immediately before args[0] on VALSTACK there). asnix_apply is
+         * a SEPARATE call path from ordinary OP_CALL -- reached when a
+         * curried-native stage (e.g. `builtins.elemAt someList`, itself
+         * a PrimOp capturing someList) is handed to map/filter/foldl'/
+         * genList as the callback -- so it must provide that same
+         * invariant itself, not rely on whatever happened to precede
+         * the caller's own buffer (which is often a bare local variable
+         * with nothing meaningful before it, e.g. genList2_impl's `&iv`). */
+        Value scratch[65];
+        scratch[0] = fn;
         const Value *use_args = args;
         if (!p->noforce) {
-            for (int64_t i = 0; i < argc; i++) forced[i] = asnix_force_for_print(args[i]);
-            use_args = forced;
+            for (int64_t i = 0; i < argc; i++) scratch[1 + i] = asnix_force_for_print(args[i]);
+            use_args = scratch + 1;
         }
         Value (*fn_ptr)(const Value *, int64_t) = (Value(*)(const Value *, int64_t))p->fn;
         Value result = fn_ptr(use_args, argc);
@@ -172,6 +188,10 @@ Value asnix_apply(Value fn, const Value *args, int64_t argc) {
         asnix_retsp_limit = saved_rlim;
         asnix_valstack_limit = saved_vlim;
         return result;
+    }
+
+    if (tag == ASNIX_TAG_ATTRS && argc == 1) {
+        return asnix_bshared_call_functor(fn, args[0]);
     }
 
     {

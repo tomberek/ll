@@ -1,13 +1,18 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_call.S -- see ~/.claude/plans/soft-wishing-engelbart.md
  *
- * Scope matches today's ll: Closure and PrimOp callees only, no
- * `__functor`/ATTRS-is-callable protocol (closure_helpers.c's
- * asnix_apply has never implemented that branch either). The closure
- * branch is inlined here (RetFrame push + musttail into the callee's
- * own body) rather than routed through asnix_apply, specifically so
- * native-stack depth never tracks ordinary Nix-level call depth -- see
- * the M10 plan's own "alternative rejected" note. */
+ * The closure branch is inlined here (RetFrame push + musttail into
+ * the callee's own body) rather than routed through asnix_apply,
+ * specifically so native-stack depth never tracks ordinary Nix-level
+ * call depth -- see the M10 plan's own "alternative rejected" note.
+ * The __functor branch (an attrset with a __functor attribute is
+ * callable, real nixpkgs's lib.fix/lib.extends/overlay machinery uses
+ * this pervasively) is a genuine C call, not a tail call -- control
+ * needs to come back here to push the result and continue dispatch,
+ * matching op_call.S's own .Lop_call_is_attrs (a real `call`, not a
+ * tail `jmp`, for exactly that reason). */
 #include "ops.h"
+
+#include "builtins_shared.h"
 
 Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t argc = ip->a;
@@ -62,6 +67,15 @@ Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
          * unforced entry). */
         result = asnix_force_for_print(result);
 
+        vs = callee_slot;
+        ll_check_valstack(vs);
+        vs[0] = result;
+        vs++;
+        LL_NEXT(ip, env, vs, pool, rs);
+    }
+
+    if (tag == ASNIX_TAG_ATTRS && argc == 1) {
+        Value result = asnix_bshared_call_functor(callee, callee_slot[1]);
         vs = callee_slot;
         ll_check_valstack(vs);
         vs[0] = result;

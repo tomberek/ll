@@ -55,6 +55,31 @@ Value ll_op_mk_list(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_select(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
+Value ll_op_with(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_with_try(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_with_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
+Value ll_op_update(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
+Value ll_op_str_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_path_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
+Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_has_attr_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
+Value ll_op_select_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_select_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_select_dynamic_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
+Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_resolve_search_path(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+
 Value ll_op_halt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 #endif /* LL_OPS_H */
