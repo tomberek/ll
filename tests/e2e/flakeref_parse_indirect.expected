@@ -1,0 +1,1 @@
+{ id = "nixpkgs"; ref = "nixos-24.05"; type = "indirect"; }

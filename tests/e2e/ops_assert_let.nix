@@ -1,0 +1,1 @@
+let x = 5; in assert x > 0; x * 2

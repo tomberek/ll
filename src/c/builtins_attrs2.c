@@ -1,0 +1,176 @@
+/* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
+/*
+ * filterAttrs, listToAttrs, attrByPath -- see builtins_attrs2.h. Verified
+ * against real `nix-instantiate --eval` (2.35.2) before being trusted;
+ * see each function's own comment for the specific expressions checked.
+ */
+#include "builtins_attrs2.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+
+#include "asnix/heap.h"
+#include "asnix/ir.h"
+#include "builtins_shared.h"
+#include "symtab.h"
+#include "value_util.h"
+
+/* ---------------------------------------------------------------------
+ * filterAttrs pred set -- verified: `builtins.filterAttrs (n: v: v > 1)
+ * { a = 1; b = 2; }` == { b = 2; }. `pred` is called as `pred name value`
+ * (two successive asnix_apply calls, matching every other curried-call-a-
+ * user-function builtin here) with the entry's *unforced* raw value --
+ * same lazy-pass-through-as-a-call-argument idiom builtins_attrs.c's own
+ * mapAttrs already relies on (the callee's own OP_VAR_REF forces it the
+ * moment its body actually reads the parameter -- see M6's "forcing
+ * happens inline in OP_VAR_REF/OP_SELECT" design, docs/architecture.md).
+ * Kept entries retain `set`'s existing ascending-sym-id order (only
+ * filtering, never reordering -- same invariant removeAttrs relies on).
+ * --------------------------------------------------------------------- */
+static Value filterAttrs2_impl(const Value *args, int64_t argc) {
+    (void)argc;
+    Value pred = args[0], set = args[1];
+    ASNIX_REQUIRE_ATTRS(set, "filterAttrs");
+    int64_t n = asnix_bshared_attrs_count(set);
+    uint32_t *syms = n > 0 ? malloc((size_t)n * sizeof(uint32_t)) : NULL;
+    Value *vals = n > 0 ? malloc((size_t)n * sizeof(Value)) : NULL;
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t sym = asnix_bshared_attrs_sym(set, i);
+        size_t len;
+        const char *name = asnix_sym_name(sym, &len);
+        Value name_val = asnix_make_string_value(name, len);
+        Value orig = asnix_bshared_attrs_value(set, i);
+        Value keep = asnix_bshared_apply2(pred, name_val, orig);
+        if (asnix_tag_of(keep) != ASNIX_TAG_IMM ||
+            (asnix_imm_subtag(keep) != ASNIX_IMM_TRUE && asnix_imm_subtag(keep) != ASNIX_IMM_FALSE)) {
+            asnix_bshared_fatal("filterAttrs", "predicate did not return a boolean");
+        }
+        if (asnix_imm_subtag(keep) == ASNIX_IMM_TRUE) {
+            syms[out_n] = sym;
+            vals[out_n] = orig;
+            out_n++;
+        }
+    }
+    /* `syms`/`vals` already ascend (inherited from `set`'s own order, only
+     * filtered in a single forward pass) -- asnix_bshared_make_attrs's own
+     * sort is a no-op here, same as removeAttrs's established argument. */
+    Value result = asnix_bshared_make_attrs(syms, vals, out_n);
+    free(syms);
+    free(vals);
+    return result;
+}
+static Value build_filterAttrs(void) { return asnix_bshared_make_curried_native((void *)filterAttrs2_impl, 2); }
+
+/* ---------------------------------------------------------------------
+ * listToAttrs list -- verified:
+ * `builtins.listToAttrs [{name="foo"; value=123;} {name="bar"; value=456;}
+ * {name="bar"; value=420;}]` == { bar = 456; foo = 123; } -- first
+ * occurrence of a duplicate name wins (confirmed directly: the result's
+ * `bar` is 456, from the *first* `{name="bar";...}`, not 420 from the
+ * second). Each list element must be an attrset with a string `name` and
+ * a `value`; `value` is passed through unforced (same lazy pass-through
+ * as catAttrs/getAttr above).
+ * --------------------------------------------------------------------- */
+static Value prim_listToAttrs(const Value *args, int64_t argc) {
+    (void)argc;
+    Value list = args[0];
+    ASNIX_REQUIRE_LIST(list, "listToAttrs");
+    int64_t n = asnix_bshared_list_count(list);
+    const Value *elems = asnix_bshared_list_elems(list);
+
+    uint32_t sym_name = asnix_intern("name", 4);
+    uint32_t sym_value = asnix_intern("value", 5);
+
+    uint32_t *syms = n > 0 ? malloc((size_t)n * sizeof(uint32_t)) : NULL;
+    Value *vals = n > 0 ? malloc((size_t)n * sizeof(Value)) : NULL;
+    int64_t out_n = 0;
+
+    for (int64_t i = 0; i < n; i++) {
+        /* Lazy list elements (M23's `map`, etc.) -- force before checking
+         * the tag, same class of fix M23's own concatLists needed. */
+        Value elem = asnix_force_for_print(elems[i]);
+        ASNIX_REQUIRE_ATTRS(elem, "listToAttrs");
+        int64_t name_idx = asnix_bshared_attrs_find(elem, sym_name);
+        if (name_idx < 0) asnix_bshared_fatal("listToAttrs", "an element is missing the 'name' attribute");
+        int64_t value_idx = asnix_bshared_attrs_find(elem, sym_value);
+        if (value_idx < 0) asnix_bshared_fatal("listToAttrs", "an element is missing the 'value' attribute");
+
+        Value name_v = asnix_force_for_print(asnix_bshared_attrs_value(elem, name_idx));
+        ASNIX_REQUIRE_STRING(name_v, "listToAttrs");
+        int64_t nlen;
+        const char *nbytes;
+        asnix_bshared_string_bytes(name_v, &nbytes, &nlen, "listToAttrs");
+        uint32_t sym = asnix_intern(nbytes, (size_t)nlen);
+
+        int dup = 0;
+        for (int64_t j = 0; j < out_n; j++) {
+            if (syms[j] == sym) { dup = 1; break; }
+        }
+        if (dup) continue; /* first occurrence wins */
+
+        syms[out_n] = sym;
+        vals[out_n] = asnix_bshared_attrs_value(elem, value_idx);
+        out_n++;
+    }
+
+    Value result = asnix_bshared_make_attrs(syms, vals, out_n);
+    free(syms);
+    free(vals);
+    return result;
+}
+static Value build_listToAttrs(void) { return asnix_bshared_make_primop((void *)prim_listToAttrs, 1); }
+
+/* ---------------------------------------------------------------------
+ * attrByPath path default set -- ported directly from real nixpkgs lib
+ * (lib/attrsets.nix, confirmed via
+ * `(builtins.unsafeGetAttrPos "attrByPath" lib).file`):
+ *
+ *   attrByPath = attrPath: default: set:
+ *     let attrByPath' = n: s:
+ *       if n == length attrPath then s
+ *       else let attr = elemAt attrPath n;
+ *            in if s ? ${attr} then attrByPath' (n+1) s.${attr} else default;
+ *     in attrByPath' 0 set;
+ *
+ * i.e. walk the path one component at a time; `s ? attr` is `false` (not
+ * an error) the moment `s` stops being an attrset, exactly like this
+ * project's own `OP_HAS_ATTR` -- so a path that runs into a non-attrset
+ * partway through just returns `default`, matching real Nix exactly
+ * (verified: `lib.attrByPath ["a" "b"] 99 { a = {}; }` == 99;
+ * `lib.attrByPath [] 99 { a = 1; }` == { a = 1; } -- the empty path
+ * returns the whole set unchanged).
+ * --------------------------------------------------------------------- */
+static Value attrByPath3_impl(const Value *args, int64_t argc) {
+    (void)argc;
+    Value path = args[0], deflt = args[1], set = args[2];
+    ASNIX_REQUIRE_LIST(path, "attrByPath");
+    int64_t n = asnix_bshared_list_count(path);
+    const Value *comps = asnix_bshared_list_elems(path);
+
+    Value cur = set;
+    for (int64_t i = 0; i < n; i++) {
+        if (asnix_tag_of(cur) != ASNIX_TAG_ATTRS) return deflt;
+        /* Lazy list elements (M23's `map`, etc.) -- force before checking
+         * the tag, same class of fix M23's own concatLists needed. */
+        Value comp = asnix_force_for_print(comps[i]);
+        ASNIX_REQUIRE_STRING(comp, "attrByPath");
+        int64_t clen;
+        const char *cbytes;
+        asnix_bshared_string_bytes(comp, &cbytes, &clen, "attrByPath");
+        uint32_t sym = asnix_intern(cbytes, (size_t)clen);
+        int64_t idx = asnix_bshared_attrs_find(cur, sym);
+        if (idx < 0) return deflt;
+        cur = asnix_force_for_print(asnix_bshared_attrs_value(cur, idx));
+    }
+    return cur;
+}
+static Value build_attrByPath(void) { return asnix_bshared_make_curried_native((void *)attrByPath3_impl, 3); }
+
+const AsnixBuiltinMiscDef ASNIX_ATTRS2_BUILTINS[] = {
+    { "filterAttrs", build_filterAttrs },
+    { "listToAttrs", build_listToAttrs },
+    { "attrByPath", build_attrByPath },
+};
+
+const size_t ASNIX_ATTRS2_BUILTINS_COUNT = sizeof(ASNIX_ATTRS2_BUILTINS) / sizeof(ASNIX_ATTRS2_BUILTINS[0]);

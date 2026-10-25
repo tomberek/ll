@@ -1,0 +1,1 @@
+builtins.tryEval (assert false; 1)

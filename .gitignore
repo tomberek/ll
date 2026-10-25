@@ -1,0 +1,6 @@
+*.o
+*.d
+*.a
+/ll
+/smoke
+/hello-jit

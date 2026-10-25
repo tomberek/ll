@@ -1,0 +1,1 @@
+(builtins.tryEval (throw "x")).success || (1 + 1 == 2)

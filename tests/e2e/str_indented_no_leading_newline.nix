@@ -1,0 +1,2 @@
+''inline start
+  second line''

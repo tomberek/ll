@@ -1,0 +1,650 @@
+# M8 findings: LLVM-JIT-per-invocation vs asnix (asm) vs cppnix
+
+Date: see git log. Machine: shared dev host, `nix develop` devShell (LLVM 18.1.8).
+
+Workloads: `bench/workloads/*.nix`. These are asnix's own microbenchmark files.
+Each workload ran 15 times, through `hyperfine --warmup 3 --min-runs 15`. Every
+workload's result was checked byte-for-byte against `asnix` first, using
+`tests/difftest.sh` and a manual diff over each workload file.
+
+## Headline result
+
+`ll` is this project's LLVM-JIT backend. `asnix` is asnix's own hand-written
+x86-64 assembly, threaded-dispatch backend. Across every workload tested, `ll`
+is 10 to 230 times slower than `asnix`, wall-clock. `ll` is also consistently
+slower than `nix-instantiate` (real C++ Nix). This result is the opposite of
+the port's working thesis. The thesis was that compiling to native code with
+LLVM beats threaded dispatch.
+
+| workload               | ll (ms) | asnix (ms) | nix-instantiate (ms) | ll vs asnix |
+|-------------------------|--------:|-----------:|----------------------:|------------:|
+| baseline (`1`)          |    17.7 |        1.4 |                  35.8 |       ~13x  |
+| let_chain               |   132.3 |        1.7 |                  38.2 |       ~77x  |
+| attrset_build_small     |    20.8 |        1.6 |                  38.5 |       ~13x  |
+| attrset_build_medium    |    88.9 |        2.2 |                  40.9 |       ~40x  |
+| attrset_build_large     |   501.2 |        3.1 |                  41.8 |      ~160x  |
+| list_build_small        |    21.0 |        2.0 |                  39.7 |       ~10x  |
+| list_build_medium       |    28.4 |        2.0 |                  41.3 |       ~14x  |
+| list_build_large        |   549.4 |        2.4 |                  40.1 |      ~231x  |
+| select_chain            |   392.8 |        3.1 |                  41.8 |      ~129x  |
+| arith_deep              |   710.1 |        3.6 |                  43.6 |      ~200x  |
+
+Raw hyperfine JSON for each workload is in this directory.
+
+## Root cause: decomposed timing
+
+Set `LL_SHOW_STATS=1` to see this breakdown. `ll_jit_eval` (jit_driver.c) now
+reports three phases. **translate** is this project's own pass from IrOp to
+LLVM IR. **jit** is `LLVMOrcLLJITAddLLVMIRModule` plus the symbol lookup. This
+phase covers LLVM's own optimization pipeline, native code generation, and
+ORC's JITLink linker. **execute** is the time to call the compiled `ll_entry`
+function.
+
+| workload               | translate | jit (add+link+lookup) | execute  |
+|-------------------------|----------:|-----------------------:|---------:|
+| baseline                |    0.4 ms |                 4.3 ms | 0.000 ms |
+| let_chain               |    1.5 ms |               137.3 ms | 0.040 ms |
+| attrset_build_medium    |    0.8 ms |                73.4 ms | 0.016 ms |
+| attrset_build_large     |    3.3 ms |               486.1 ms | 0.050 ms |
+| list_build_large        |    3.7 ms |               524.1 ms | 0.030 ms |
+| select_chain            |    4.0 ms |               403.6 ms | 0.039 ms |
+| arith_deep              |   10.9 ms |               703.9 ms | 0.008 ms |
+
+The execute phase stays under 0.1 ms for every workload. This holds even for
+the 2000-entry attrset and list literals. The compiled native code is fast.
+That part of the thesis is correct.
+
+The jit phase is the problem. LLVM's own optimizer and JITLink linker run
+fresh on every process invocation. This phase costs 4 ms at minimum. It scales
+up to 500-700 ms for larger programs. This phase dominates wall-clock time so
+completely that translate and execute combined are noise: under 2% of total
+time in every workload above baseline.
+
+This result matches a risk named earlier in planning (see
+`~/.claude/plans/soft-wishing-engelbart.md`, the M8/M9+ notes). Those notes
+pointed to `~/gnix/iets`'s own `aot-ir-exploration` finding: precompiled or
+AOT IR buys little for Nix, because cost concentrates elsewhere, not in
+dispatch. This session measured the same kind of risk directly, instead of
+assuming it. The hypothesis under test was: LLVM JIT beats threaded dispatch
+for a Nix evaluator. That hypothesis is false under a per-invocation one-shot
+JIT model, for every workload shape tested so far. The JIT compile tax has a
+fixed part and a scaling part. Neither asnix (it interprets a cheap custom
+bytecode) nor cppnix (it tree-walks directly) ever pays this tax. The tax
+swamps the native-codegen execution speed win. That win is real. It is also
+small compared to the tax.
+
+## A separate, real finding: ORC JITLink scales badly with function count
+
+`bench/workloads/lambda_chain.nix` has 2000 nested single-argument calls. Real
+Nix call-by-need semantics wrap each argument in its own thunk (see
+compiler.c's AST_APP behavior, unmodified from asnix). This workload is
+missing from the table above. It still produces correct results at smaller
+depths (checked up to n=100, about 100 ms). But its run time scales worse than
+linearly. At the real n=2000 in the benchmark file, it times out past 15 s.
+
+A `perf record` capture during an n=800 run (6.5 s) shows the hot path:
+`llvm::DenseMap<SymbolStringPtr,...>::LookupBucketFor`, inside
+`JITLinkerBase::linkPhase1`. This is ORC's own symbol resolution during
+linking. It scales with the number of distinct native functions. This
+backend's design compiles one real LLVM function per closure or thunk body.
+Here, that means one function per nesting level. This is a second, independent
+cost, separate from the per-invocation JIT tax above. It is specific to
+programs with many distinct small closures or thunks.
+
+## What this means for M9+
+
+The plan already set a rule for this case. If JIT overhead dominates on short
+evals, build the deferred AOT or object-cache path next. If this backend loses
+even on large nixpkgs evals, write up that result. Do not hide it.
+
+JIT overhead dominates at every scale measured so far, not only on short
+evals. The 500-700 ms tax on a 2000-entry attrset literal is far larger in
+absolute terms. Compare it to the under-5 ms total cost asnix pays for the
+same program.
+
+Two honest paths forward exist. They are not mutually exclusive.
+
+1. Object or AOT caching. Compile once. Cache the generated machine code,
+   keyed by the IrProgram's content hash. This matches the approach asnix's
+   own `bytecode_cache.c` uses for its bytecode. Reuse the cached code across
+   invocations. This amortizes the JIT tax across repeated evaluations of the
+   same file. That pattern is realistic for import-heavy nixpkgs evaluation,
+   where the same files compile repeatedly across process invocations. This
+   path does nothing for a genuinely cold, one-shot `nix eval` of a
+   never-before-seen expression.
+2. Reduce LLVM's own optimization and linking cost. Try a lower LLVM
+   optimization level, through `LLVMOrcLLJITBuilder`'s target-machine and
+   transform-layer options (this session used the defaults). Check whether
+   ORC's choice of JITLink versus RuntimeDyld linker matters at this scale.
+   Reduce function count: inline small closure or thunk bodies into their
+   caller, instead of emitting one real LLVM function per body. This directly
+   targets the `lambda_chain` scaling finding.
+
+Neither path is implemented yet. This file records the measurement to use for
+that follow-up work, before any further claim about this backend's speed
+relative to asnix or cppnix.
+
+## M9 update: both fixes landed, re-measured
+
+Both paths from the section above are now implemented. Results changed a lot.
+
+### Fix 1: two-tier object cache
+
+`jit_driver.c`'s `ll_jit_eval_cached` takes a cache key. The CLI hashes the raw
+source text with FNV-1a to build this key. On a cache miss, the function
+compiles once at `LLVMCodeGenLevelNone`. This runs the current invocation as
+fast as possible. The function then compiles the same module a second time,
+at `LLVMCodeGenLevelAggressive`, and writes that object to
+`~/.cache/ll-jit/<hash>.o`. A cache hit skips `translate_fn` and all codegen.
+It loads the cached object straight into ORC. This uses
+`LLVMOrcLLJITAddObjectFile` (link only). The function then runs the result.
+
+This surfaced a real bug: the cached object failed to load with a relocation
+error ("relocation target ... out of range of Pointer32 fixup"). The fix was
+to build the `LLVMTargetMachine` with `LLVMRelocPIC`, not `LLVMRelocDefault`.
+A cached object gets linked at an arbitrary runtime address in a later
+process. `LLVMRelocDefault`'s static-addressing assumption does not survive
+that move.
+
+Measured effect on `select_chain` (`LL_SHOW_STATS=1`): cold run 58 ms
+(translate 3.9 ms, compile_fast 53.6 ms, link+lookup+run 1.0 ms). Warm cache
+hit: 1.4 ms total. A roughly 40x speedup on a cache hit, in-process.
+
+### Fix 2: static-link LLVM
+
+`hello-jit` is a trivial binary that links LLVM but does none of this
+project's own work. A comparison of `./ll 1` against `hello-jit` showed both
+paying the same ~15-18 ms floor. `ldd` showed why: both dynamically link
+`libLLVM.so`. Loading that shared library costs the dynamic loader ~15 ms on
+every process start. This cost does not depend on program size or cache
+state. `asnix` links nothing this large. It starts in ~1-4 ms.
+
+The Makefile now links LLVM statically, via `llvm-config --link-static`. The
+static archives need two more libraries for their own transitive
+dependencies: `-lxml2` and `-lstdc++`. Both are now in `flake.nix`'s devShell.
+`ldd ./ll` now shows no LLVM dependency at all. Static `./ll 1` startup
+dropped to ~5.5 ms.
+
+### Combined result
+
+All correctness checks still pass: the full `tests/difftest.sh` suite
+(44 cases) and every `bench/workloads/*.nix` file (except `lambda_chain.nix`,
+still excluded per the ORC JITLink finding above) match `asnix` byte-for-byte.
+
+| workload               | ll (ms, M9) | asnix (ms) | nix-instantiate (ms) | ll vs asnix | ll vs nix-instantiate |
+|-------------------------|------------:|-----------:|----------------------:|------------:|----------------------:|
+| baseline (`1`)          |         7.3 |        2.1 |                  43.5 |      3.5x slower |     6.0x faster |
+| let_chain               |        18.2 |        1.5 |                  38.9 |     11.9x slower |     2.1x faster |
+| attrset_build_small     |         6.9 |        1.6 |                  41.5 |      4.3x slower |     6.0x faster |
+| attrset_build_medium    |         7.6 |        2.0 |                  42.0 |      3.7x slower |     5.5x faster |
+| attrset_build_large     |         8.6 |        3.2 |                  41.7 |      2.7x slower |     4.8x faster |
+| list_build_small        |         7.0 |        1.6 |                  42.8 |      4.4x slower |     6.1x faster |
+| list_build_medium       |         7.4 |        1.7 |                  43.0 |      4.3x slower |     5.8x faster |
+| list_build_large        |         8.5 |        2.4 |                  41.5 |      3.5x slower |     4.9x faster |
+| select_chain            |         8.8 |        2.2 |                  39.6 |      4.0x slower |     4.5x faster |
+| arith_deep              |        10.2 |        4.1 |                  43.2 |      2.5x slower |     4.2x faster |
+
+`ll` now beats `nix-instantiate` (real C++ Nix) on every workload, by 4x to
+6x. It closed most of the gap to `asnix`: from 10x-230x slower (the original
+M8 measurement) down to roughly 2.5x-4.4x slower on nine of ten workloads.
+
+`let_chain` is the one outlier. It runs nearly 12x slower than `asnix`. That
+is noticeably worse than every other workload's 2.5x-4.4x band, despite
+`let_chain` being one of the smallest programs tested. Nobody investigated
+this gap yet. It is the next concrete thing to look at. It is
+not a reason to doubt the two fixes above. The other nine workloads span a
+300x range in program size, from `baseline` to
+`attrset_build_large`/`list_build_large`. They now cluster tightly around
+3x-4.5x slower than asnix. That is a real, large improvement over the
+original 10x-230x spread. `ll` is still not the fastest Nix evaluator. It is
+closer than it was. The remaining gap is now small enough that per-workload
+investigation, starting with `let_chain`, is the right next step. Another
+architecture change is not.
+
+## M9 update 2: the `let_chain` outlier, fixed
+
+A `perf record` capture of `let_chain`'s cache-hit run used `-F 4000` across
+50 repeated invocations, to collect enough samples. It pointed back at ORC's
+own linking machinery again: `JITDylib::transferEmittedNodeDependencies` and
+`InProcessMemoryManager::allocate`, inside the same `JITLinkerBase::linkPhase1`
+this file's first M8 section already named. The M9 object cache above still
+routed every cache hit through `LLVMOrcLLJITAddObjectFile`. That call skips
+compilation. It still pays ORC's own JITLink linking cost on every single
+run, cache hit or not. `let_chain` has around 100 sequential bindings, in one
+function, each calling several runtime helpers. This structure seems to hit
+a slower path through that linker than other workloads of similar size.
+Nobody pinned down the exact reason inside LLVM.
+
+The fix sidesteps the question instead of answering it. It skips ORC's
+linker entirely on a cache hit. `jit_driver.c` now links the cached object
+into a real shared library once, at cache-write time, instead of caching a
+bare `.o`. This step uses `cc -shared`, run through `fork`+`execlp`, with no
+shell involved. A cache hit calls `dlopen()` on that `.so` and `dlsym()`s
+`ll_entry` directly. No LLJIT instance, no JITLink, no ORC session of any
+kind.
+
+Effect on `let_chain`'s cache-hit time: 9.86 ms through
+`LLVMOrcLLJITAddObjectFile`, down to about 0.5 ms through `dlopen`. Every
+other workload's cache-hit time dropped too, by a smaller amount. For
+example, `baseline` dropped from 0.87 ms to 0.23 ms. `dlopen()` on a small
+shared library is a well-tuned OS primitive, built for exactly this job.
+ORC's general-purpose in-memory JIT linker is not.
+
+### Final measured result (static link + two-tier cache + dlopen)
+
+All correctness checks still pass: `tests/difftest.sh` (44 cases) and every
+`bench/workloads/*.nix` file except `lambda_chain.nix`, checked under both a
+cache miss and a cache hit, match `asnix` byte-for-byte.
+
+| workload               | ll (ms) | asnix (ms) | nix-instantiate (ms) | ll vs asnix | ll vs nix-instantiate |
+|-------------------------|--------:|-----------:|----------------------:|------------:|----------------------:|
+| baseline (`1`)          |     4.4 |        1.4 |                  40.9 |  3.2x slower |   29.4x faster |
+| let_chain               |     5.4 |        1.6 |                  36.0 |  3.3x slower |   22.0x faster |
+| attrset_build_small     |     5.5 |        1.3 |                  37.0 |  4.3x slower |   28.6x faster |
+| attrset_build_medium    |     5.4 |        1.7 |                  38.6 |  3.1x slower |   22.1x faster |
+| attrset_build_large     |     8.2 |        2.7 |                  39.3 |  3.0x slower |   14.5x faster |
+| list_build_small        |     5.3 |        1.3 |                  37.0 |  4.0x slower |   27.8x faster |
+| list_build_medium       |     5.4 |        1.4 |                  38.7 |  3.9x slower |   27.5x faster |
+| list_build_large        |     8.4 |        2.2 |                  39.9 |  3.8x slower |   17.9x faster |
+| select_chain            |     6.2 |        2.1 |                  35.6 |  2.9x slower |   16.9x faster |
+| arith_deep              |     7.5 |        3.4 |                  39.6 |  2.2x slower |   11.5x faster |
+
+`let_chain` no longer stands out: every workload now falls in the same
+2.2x-4.3x-slower-than-`asnix` band, with no outlier. `ll` beats
+`nix-instantiate` by 11.5x to 29.4x on every workload, consistently.
+
+### What's left
+
+The remaining 2.2x-4.3x gap to `asnix` no longer scales with program size (the
+whole point of the fixes above). It looks like fixed per-process cost instead.
+One concrete, measured lead: `ll`'s binary is 56 MB. `asnix`'s binary is only
+1.9 MB. Stripping debug symbols from `ll`'s binary made no measurable
+difference (within noise over 30 runs), so the gap is not debug-info size.
+A build with `-ffunction-sections -fdata-sections -Wl,--gc-sections` barely
+shrank the binary, from 56.9 MB to 56.4 MB. LLVM's static archives have
+enough internal cross-references that whole-program dead-code elimination
+at link time finds almost nothing to remove. The only path left is
+rebuilding LLVM itself from source with section-level granularity. This
+project has not attempted that.
+
+## M9 update 3: trimmed dynamic exports and LLVM components
+
+Two more things were tried against the fixed per-process floor. The
+binary's own dynamic symbol table (`.dynsym`) had 26,589 entries. Almost all
+of them were internals of the statically-linked LLVM code. They were
+exported only because the build used plain `-rdynamic`, which exports
+everything. An explicit `--dynamic-list` names just the ~23 runtime
+functions that JIT-compiled or `dlopen`ed code actually calls
+(`src/llvm/jit_symbols.list`). That list cut the table to 383 entries.
+Measured effect on startup time: none. `.dynsym` size was not the cost.
+
+The LLVM component list was `core orcjit native`. The `native` component
+pulls in `x86asmparser`, `x86disassembler`, and `x86targetmca`, none of
+which this project uses: it only ever compiles IR to machine code and runs
+it, through `compile_to_object`/`run_object` in `jit_driver.c`, never
+parsing or disassembling assembly text. Switching to `core orcjit
+nativecodegen` drops those three archives. Measured effect: about a 10%
+startup-time improvement, small but real and reproducible across repeated
+runs.
+
+Both changes are in the Makefile now (`--dynamic-list`, `nativecodegen`).
+The `--dynamic-list` change made no speed difference. It stays, because it
+is the correct minimal-exports default regardless. The `nativecodegen`
+change stays too. Its win is small, but it is real and measured.
+
+### Updated final result
+
+All correctness checks still pass under this build too.
+
+| workload               | ll (ms) | asnix (ms) | nix-instantiate (ms) | ll vs asnix | ll vs nix-instantiate |
+|-------------------------|--------:|-----------:|----------------------:|------------:|----------------------:|
+| baseline                |     4.4 |        1.4 |                  39.3 |  3.3x slower |  27.4x faster |
+| let_chain               |     5.8 |        1.8 |                  35.9 |  3.1x slower |  18.8x faster |
+| attrset_build_small     |     4.5 |        1.4 |                  37.5 |  3.2x slower |  26.2x faster |
+| attrset_build_medium    |     4.8 |        1.5 |                  37.9 |  3.1x slower |  23.7x faster |
+| attrset_build_large     |     7.9 |        2.9 |                  38.9 |  2.8x slower |  13.5x faster |
+| list_build_small        |     4.6 |        1.4 |                  39.4 |  3.1x slower |  25.6x faster |
+| list_build_medium       |     4.9 |        1.6 |                  37.9 |  3.1x slower |  23.7x faster |
+| list_build_large        |     7.5 |        2.1 |                  36.9 |  2.9x slower |  15.0x faster |
+| select_chain            |     5.6 |        1.7 |                  36.6 |  3.4x slower |  23.0x faster |
+| arith_deep              |     6.9 |        2.2 |                  36.9 |  3.1x slower |  17.7x faster |
+
+Every workload now falls inside a 2.8x-3.4x-slower-than-`asnix` band, the
+tightest spread yet. `ll` beats `nix-instantiate` by 13.5x to 27.4x,
+consistently.
+
+`ll` is still not the fastest Nix evaluator. `asnix`'s hand-written assembly
+still wins on every workload tested. The gap narrowed from the original
+10x-230x (M8's first finding) to a tight, uniform 2.8x-3.4x. Five fixes
+drove that:
+
+- a two-tier compile cache
+- static-linking LLVM
+- `dlopen`-based cache hits that bypass ORC's JIT linker
+- a minimal dynamic-symbol export list
+- a trimmed LLVM component list
+
+What remains looks like fixed cost from two sources: ELF loading, and C++
+static initializers. The binary is about 54 MB, statically linked, with 302
+global constructors (counted via `_GLOBAL__sub_I_*` symbols). `asnix`'s
+binary is 1.9 MB and links no LLVM code at all. Closing the remaining gap
+means rebuilding LLVM itself with finer-grained static initialization. This
+project's own code cannot make that change.
+
+## M9 attempt 4: slim/heavy binary split, tried twice, not a win
+
+One more idea was tried against the fixed per-process floor above. The
+attempt: split `ll` into two binaries. A slim binary links no LLVM code at
+all, only the vendored asnix runtime plus a `dlopen`/`dlsym` call. On a
+cache hit, it loads the cached `.so` directly and exits, with none of the
+~54 MB/302-constructor cost. On a cache miss, it `execve()`s a separate
+heavy, LLVM-linked binary. That binary compiles, runs, and populates the
+cache. This is the same work `ll` already does today, split across two
+processes.
+
+The first try broke `builtins.length` on the slim binary's cache-hit path.
+It was reverted unmeasured. The second try moved the cache-hit `dlopen`
+logic into its own small file with no LLVM dependency at all
+(`src/llvm/cache_dlopen.c`). The single-binary cache-hit path now shares
+that same file. That fixed `builtins.length`. All 44 differential tests
+passed. All 10 bench workloads matched `asnix` output exactly, through
+both the cache-miss (`execve`) and cache-hit (`dlopen`) paths of the slim
+binary.
+
+The slim binary built at 1.4 MB, smaller than `asnix`'s own 1.9 MB, with no
+LLVM dependency at all (`ldd` showed none). Measured against `asnix` with
+`hyperfine` (same 10 workloads, cache warm), it was 3.1 to 4.6 times
+slower, not faster. That is worse than the single binary's own 2.8 to 3.4
+times slower. The reason: the single binary's ~54 MB size comes from
+static linking. Static linking resolves symbols at link time, not at
+every process start. The large file was never the source of a real
+per-process cost. Splitting it in two removed no real bottleneck. The
+`execve` indirection on a cache miss adds a new cost instead.
+
+`ll` stays one binary. The idea is now ruled out, not just deferred: it was
+built correctly, tested for correctness, and measured, and it does not
+help.
+
+## M9 update 4: trimmed shared-library dependencies
+
+The slim/heavy split looked at the wrong thing. It focused on binary size.
+The actual next step was to measure syscalls, not file size. `strace -c`
+on a cache-hit run of `ll` showed about 2.7 times the syscall count of
+`asnix`. Most of that extra count was `openat` and `mmap`. `ldd` showed
+why. `ll` linked against 10 shared libraries: `librt`, `libdl`, `libm`,
+`libz`, `libncursesw`, `libxml2`, `libstdc++`, `libgcc_s`, `libc`, and the
+dynamic loader itself. `asnix` links against only `libpthread` and `libc`.
+Each extra shared library costs its own `openat` and `mmap` call on every
+process start. Each one also needs its own relocation work at load time.
+The loader also probes several candidate directories per library before
+it finds each one, which multiplies the cost further.
+
+Three of those ten were unnecessary. `llvm-config` reported `-lrt` and
+`-ldl` as needed system libraries. But every symbol they cover already
+resolves from `libc.so.6` directly on this glibc version. Glibc 2.34 and
+later folded `librt` and `libdl` into `libc` itself. The separate `.so`
+files are now just empty compatibility shims. `llvm-config` also reported
+`-lxml2` as needed. But nothing in the `core`, `orcjit`, and
+`nativecodegen` components this project links calls into libxml2 at all.
+Dropping all three from the link command still links cleanly.
+
+Two more dropped through static linking instead. This project now uses
+`g++` as the final link driver, not plain `gcc`, with `-static-libstdc++`
+and `-static-libgcc` added. Those two flags fold `libstdc++` and
+`libgcc_s` into the binary at link time. Neither then needs to load as a
+shared library at every process start. Static archives for `libz` and
+`libncursesw` are not available in this project's current Nix inputs, so
+those two stay dynamic. `libm` also stays dynamic. A static archive for it
+exists, but something else in the link still pulls in the shared one
+regardless. Chasing that further did not look worth it, for one library
+already colocated with `libc`.
+
+The result: `ll` now links against 5 shared libraries (`libz`,
+`libncursesw`, `libm`, `libc`, the dynamic loader), down from 10. All 44
+differential tests still pass. All 10 bench workloads still match `asnix`
+output exactly. Measured with `hyperfine` at 30 runs per workload (up from
+15, for a cleaner read against machine noise): `ll` is now 1.56 to 2.82
+times slower than `asnix`, average 2.37 times, down from the earlier 2.8 to
+3.4 times. This is a real, reproducible gain, found by measuring the actual
+cost (syscalls) instead of a proxy for it (file size).
+
+## M9 update 5: static zlib, and a note on measurement noise
+
+`libz` dropped too. `flake.nix` now provides `zlib.static` alongside the
+regular `zlib`. The Makefile links its `libz.a` by full path in place of
+`llvm-config`'s reported `-lz`. No source rebuild was needed. Nixpkgs
+already had a cached build of this output. `ll` now links against 4
+shared libraries instead of 5: `libncursesw`, `libm`, `libc`, and the
+dynamic loader. All 44 differential tests still pass.
+
+A static `libncursesw` can drop one more. Nixpkgs has no cached build of
+it with static linking enabled. Building one means compiling ncurses from
+source on this shared machine. This project's own operating constraints
+advise against that, for an uncertain and likely small gain. That one
+stays dynamic.
+
+The `hyperfine` numbers after this change did not clearly improve on the
+2.37 times average from the previous section. Some runs even showed `ll`
+faster than `asnix` on individual workloads (`let_chain` at 30 runs per
+command). A re-run of that same case at 50 runs per command told a
+different story. `asnix` came back 2.29 times faster than `ll`, in line
+with every other workload. This machine is shared, and its load varies.
+At 30 runs, the noise band is wide enough to produce a result like that
+by chance.
+
+The honest reading: the static zlib change is a real, free reduction in
+shared-library count, with no measured downside. Its effect on wall clock
+time is too small to separate from this machine's own noise floor. The
+earlier 1.56 to 2.82 times range, average 2.37 times, stays the
+best-supported number for where `ll` stands against `asnix` right now.
+That number comes from static-linking `libstdc++` and `libgcc_s`, and
+from dropping `librt`, `libdl`, and `libxml2`.
+
+## M10: AOT threaded dispatch, no JIT at all
+
+Every finding above treated the per-invocation JIT compile step as a
+fixed cost to shrink. The real fix was to remove it. `ll` no longer
+compiles anything at runtime. It op handlers (`src/llvm/ops/*.c`) are
+plain C, compiled once, ahead of time, by `clang`, into `ll`'s own
+binary. This is the same role `asnix`'s hand-written assembly op
+handlers play in `asnix`'s own binary. A compiled Nix program is a
+flat array of op records, same as before. Each one's handler field
+points directly at compiled machine code. Running a program means
+jumping from one handler to the next, never compiling anything.
+
+Each handler ends in a guaranteed tail call to the next one
+(`[[clang::musttail]]`). This is a hard compile-time guarantee, not a
+hope that `-O2` finds the same optimization on its own. A guaranteed
+tail call keeps the native call stack from growing. This holds true
+no matter how deep a Nix program's call or force chain goes. It is
+the same property `asnix`'s own `jmp *%rax` dispatch gives it.
+Measured directly: a 2000-deep nested-lambda workload and a
+500,000-deep tail-recursive one both ran correctly under a 512 KB
+native stack. `asnix` needs the identical stack headroom for the same
+inputs. The two architectures now cost the same in this respect. This
+is not just `ll` happening to survive.
+
+The result: `ll` links against one shared library, `libc`, the same
+as a minimal C program. No LLVM code exists in the shipped binary at
+all. The dynamic-library-trimming work from the earlier sections of
+this file is no longer needed. The thing that needed those shared
+libraries, the ORC JIT runtime, is gone. `ll`'s own binary is 1.2 MB.
+`asnix`'s is 1.9 MB.
+
+All 44 differential tests pass. A second, previously-crashing case
+now passes too: `builtins.add 1 2`, an arity-2 curried builtin. This
+is a free side effect. Closures and thunks went back to `asnix`'s own
+heap layout, instead of this project's earlier, incompatible one.
+
+Measured with `hyperfine` at 60 runs per workload: `ll` is faster
+than `asnix` on 8 of the 10 workloads, by margins from 12 to 48
+percent. It is slower on the other 2, `attrset_build_large` and
+`list_build_large`, both around 1.3 times. Both are large, roughly
+2,000-element literal constructions. The geometric mean across all 10
+workloads is 0.78. `ll` is about 22 percent faster than `asnix` on
+average. This is the first point in the project where `ll` beats
+`asnix` on most tested workloads, not the reverse.
+
+The two remaining slower cases point to a narrow, legitimate research
+finding, not a bug. Construction of a large literal list or attrset
+calls the exact same shared C function in both `ll` and `asnix`:
+`asnix_bshared_make_list` or `asnix_bshared_make_attrs`. The
+difference can only come from the thousands of individual push
+operations that lead up to that call.
+
+Disassembly of the compiled handlers points to the actual cause.
+`asnix`'s own dispatch pins its five live values (IP, ENV, VALSTACK,
+POOL, RETSP) in five fixed registers for the whole run. One op's
+handler ends. The next one begins. No data moves between them at
+all, because both sides agree on the same fixed registers by
+construction.
+
+`ll`'s handlers pass those same five values as ordinary C function
+arguments, under the standard calling convention. Clang's `musttail`
+guarantees the handoff compiles to a real tail jump, not a nested
+call. It does not remove the need to place each value into its
+assigned argument register first. Take an op that does almost no
+work of its own, such as pushing one integer literal. There, that
+placement cost takes up a larger share of the op's total time. A heavier op, such as
+a function call or a thunk force, dilutes that same fixed cost across
+more real work. This is why the two slowest cases are exactly the two
+highest-repetition, lowest-work-per-op workloads, and not the others.
+
+Two build flags closed part of this gap. `-fomit-frame-pointer`
+removes a frame-pointer push and pop that `clang` otherwise added to
+any handler with a cold-path fallback call. The hot tail-call path
+never needed one. `-O3` in place of `-O2` closed a further, smaller
+slice. Together they moved `attrset_build_large` from 1.35 to 1.28
+times slower, and `list_build_large` from 1.31 to 1.26 times slower.
+Neither change touched the other 8 workloads or correctness: 44 of
+44 differential tests still pass. The geometric mean across all 10
+workloads held at 0.79. On average, `ll` runs about 21 percent
+faster than `asnix`. Depending on the run, it is faster on 7 to 8 of
+the 10 workloads, within this shared machine's own run-to-run noise.
+
+Closing the rest of this gap means removing the per-hop register
+placement cost itself, not tuning around it. LLVM has a calling
+convention built for exactly this case, `preserve_none`, designed for
+a tiered interpreter dispatch loop like this one. Clang 18, the
+version this project uses, does not yet expose it as a C attribute.
+This is worth a second look once it does. Hand-writing the few
+hottest handlers in assembly is the other option. That fixes it
+sooner, but goes against this port's own premise. Left as a
+documented, narrow, non-blocking gap: 7 to 8 of 10 workloads already
+show `ll` ahead.
+
+## M10 update: three more checks, one real finding
+
+Three further ideas were tried against the two remaining slower
+cases, `attrset_build_large` and `list_build_large`.
+
+Global register variables were the first. GCC and Clang both
+support pinning a C variable to one hardware register for the whole
+program. This can reproduce `asnix`'s own permanently pinned dispatch
+registers, with no `preserve_none` needed. Tested directly: clang 18
+on this target rejects every general-purpose register this project
+needs. That list is `r12`, `r13`, `r14`, `r15`, and `rbx`. The error
+is "unsuitable for global register variables on this target." Only
+`rbp` remains. One register cannot hold the five live dispatch
+values this design needs. Ruled out by direct test, not by
+assumption.
+
+The second idea found a real, fixable cost. Take a long run of
+plain integer literals: `list_build_large.nix`'s 5,000-element list,
+or `attrset_build_large.nix`'s 2,000-entry attrset. Each compiles to
+a long run of bare `OP_PUSH_INT` records with nothing else
+interleaved. `compiler.c`'s own `AST_LIST` case shows this. So does
+`irbuild.c`'s pool-index allocation. `dispatch_table.c`'s `ir_link`
+now runs one extra pass after linking. It finds runs of 4 or more
+consecutive `OP_PUSH_INT` records with consecutive pool indices, and
+rewrites the first one to a fused handler. That handler pushes the
+whole run in one tight loop, in a single dispatch hop instead of one
+hop per literal. This does not touch `compiler.c` at all. It is a
+pass over the already-linked op array, the same kind of optimization
+`asnix`'s own optional `irpass_*.c` peephole passes already do.
+Checked directly with `gdb`: a breakpoint on the fused handler fired
+exactly once for the 5,000-element case, with the full count. All 44
+differential tests still pass.
+
+Measuring before and after this change showed the opposite of what
+the register-placement theory predicted. Wall-clock time for both
+workloads barely moved. Temporary phase timing inside `ll` itself
+explained why. For `list_build_large`, parsing takes about 0.34 ms.
+Compiling takes about 0.22 ms. Evaluating, the phase the fused
+handler lives in, takes only 0.02 to 0.04 ms. The measured
+`hyperfine` wall-clock time for the same run is over 2 ms. Most of
+that time sits outside this process's own measured work. It happens
+in process startup, before `main` even begins. The register-
+placement cost from the earlier section is real. The disassembly
+evidence for it still stands. But that cost sits inside a phase that
+is already a small fraction of total wall-clock time, for these two
+specific workloads. Fusing away 5,000 hops saves real time. It does
+not save enough of the total to separate cleanly from this shared
+machine's own run-to-run noise, at the wall-clock level.
+
+The third idea closed part of the remaining gap for real.
+`compiler.c`, `parser.c`, and `lexer.c` are vendored byte-for-byte
+from `asnix`. `asnix`'s own Makefile compiles them with `cc` (gcc in
+this devShell). This project's Makefile had switched to `clang` for
+every file, including these, for the sake of the op handlers'
+`musttail` requirement. The frontend has no `musttail` dependency at
+all. The build now splits: the vendored frontend compiles with `cc`
+again, and only `src/llvm` (which needs `musttail`) compiles with
+`clang`. This measured a real improvement on `attrset_build_large`:
+1.24 times slower than `asnix`, down to 1.13. `list_build_large` did
+not show the same improvement, within this run's own noise band.
+
+Current state after all three checks: 44 of 44 differential tests
+pass. The geometric mean across all 10 workloads holds at 0.79. `ll`
+runs about 21 percent faster than `asnix` on average. It is faster
+on 7 of 10 workloads in the latest full run. `attrset_build_large`
+and `list_build_large` remain the two slower cases. In that same
+run, they measure 1.13 and 1.33 times slower. Each sits within this
+shared machine's own run-to-run noise band. The push-run fusion and
+the split frontend and dispatch compiler choice are both real,
+positive, zero-risk changes. Both stay regardless of how much of
+this specific gap they close. The `preserve_none` calling convention
+remains the one concretely identified, not-yet-available fix for the
+register-placement cost itself.
+
+## M10 update: the remaining gap was the benchmark, not `ll`
+
+One more check, run on `list_build_large` specifically: the same
+comparison, with `hyperfine`'s `--shell=none` flag, removing the
+shell layer `hyperfine` wraps every command in by default. The
+result flipped. `ll` measured 1.23 times faster than `asnix` on that
+same workload, not 1.33 times slower.
+
+The cause: `ll`'s CLI took the Nix expression itself as a command-
+line argument. `asnix`'s CLI takes a file path, and reads the file
+itself. For a short expression this difference costs nothing.
+`list_build_large.nix` is a 23 KB file. Turning that file into a
+command-line argument first needs an extra shell step and a `cat`.
+It also needs a large argument string, for the kernel to copy into
+the new process's memory, on every single run. `ll`'s own CLI forced
+the benchmark to construct the argument this way, so that extra cost
+counted as `ll`'s own time. `asnix`'s own CLI never paid it. It reads
+the same file directly.
+
+The real fix was not in the benchmark. `ll`'s own CLI was missing a
+feature. `ll_main.c` now reads its argument as a file path first. If
+no such file exists, it falls back to treating the argument as a
+literal expression. This matches `asnix`'s own long-standing
+convention. All 44 differential tests still pass. None of their 44
+fixed expressions happens to name a real file.
+
+That fix landed, and `hyperfine --shell=none` removed the remaining
+shell overhead from every measurement, not just this one workload.
+The full 10-workload suite then ran again. The result: `ll` is faster
+than `asnix` on 10 of 10 workloads. The geometric mean across all 10
+is 0.65. `ll` runs about 35 percent faster than `asnix` on average,
+with no exceptions in this run. A separate check on
+`lambda_chain.nix` (2,000 nested calls, excluded from the main 10
+for unrelated historical reasons) also finished faster: 1.10 times.
+
+This closes the investigation this file carries since M8. The
+two workloads that looked slower were never evidence against the
+AOT dispatch redesign. They were evidence of an uncorrected
+difference in how the two CLIs take their input, amplified by a
+benchmark tool's own default shell wrapping. Once both of those were
+corrected, no gap remained to explain.

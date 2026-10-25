@@ -1,0 +1,1 @@
+let x = { a = 5; }; in x ? a.b

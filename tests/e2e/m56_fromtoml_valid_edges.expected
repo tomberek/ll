@@ -1,0 +1,1 @@
+{ binlead = 1; hexlead = 1; negzero = 0; octlead = 1; underscored = 1000000; zero = 0; }

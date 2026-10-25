@@ -1,0 +1,1 @@
+fromTOML "a = 1"

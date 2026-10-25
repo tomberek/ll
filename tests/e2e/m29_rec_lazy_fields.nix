@@ -1,0 +1,1 @@
+(rec { a = abort "forced!"; b = 2; }).b

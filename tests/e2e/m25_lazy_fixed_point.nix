@@ -1,0 +1,1 @@
+let f = x: { a = 1; }; self = f self; in self.a

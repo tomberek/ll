@@ -1,0 +1,122 @@
+# Correctness corpus for `make test-nixpkgs-hash` (see Makefile) -- real
+# nixpkgs attribute paths whose `outPath`/`drvPath` are checked against
+# real `nix-instantiate --eval --strict`, byte-for-byte, non-gating (like
+# test-nix-conformance: reports pass/fail, never fails the build on its
+# own). Added after M76 (real string context) when the user asked for
+# the standing d.nix bug-chase to have an actual regression test, not
+# just ad hoc manual comparisons each session -- the project had gone
+# through M58-M76 chasing `hello.outPath` parity with zero automated
+# checks of the real, large-scale target itself, only small synthetic
+# fixtures (tests/e2e/m74_input_*/m75_*/m76_*).
+#
+# One attribute path per line (resolved against tests/nixpkgs-hash/pkgs.nix,
+# `import /home/tbereknyei/nixpkgs/default.nix {}` -- same hardcoded path
+# convention as the repo root's own d.nix/e.nix). Both `.outPath` and
+# `.drvPath` are checked for each. Lines starting with `#` are comments.
+# A crash (nonzero asnix exit) and a hash MISMATCH are both reported as
+# failures, distinguished in the output -- both are real correctness bugs,
+# just different symptoms.
+#
+# M84: expanded from the original 4-package smoke corpus (hello/hello.src/
+# bash/curl) into a much broader, deliberately diverse sweep -- picked to
+# spread across categories rather than just adding more of the same shape:
+#   - common CLI tools (ripgrep, fd, bat, jq, tree, fzf, tmux, git, htop,
+#     neovim, rsync, openssh, which, less, nano, vim, fish, zsh, yarn)
+#   - GNU coreutils-family / classic Unix tools (coreutils, findutils,
+#     diffutils, patch, gnugrep, gnused, gawk, gnutar, gzip, bzip2, xz,
+#     zstd)
+#   - compilers/toolchains (gcc, clang, llvm, rustc, go, jdk)
+#   - scripting-language interpreters (python3, python311, perl, ruby,
+#     nodejs)
+#   - common C libraries, several with multi-output derivations (zlib,
+#     openssl -- bin/dev/man, libxml2, sqlite, pcre2, ncurses, readline,
+#     glibc, util-linux)
+#   - build-system tooling (cmake, pkg-config, autoconf, automake,
+#     libtool, ninja, meson)
+#   - a GUI/graphics stack slice, pulled in densely multi-output and
+#     propagated-deps territory (boost, cairo, pixman, freetype,
+#     fontconfig, harfbuzz, glib, gtk3)
+#   - fetcher-based / fixed-output derivations beyond the pre-existing
+#     hello.src (curl.src, git.src, python3.src -- each a different
+#     fetcher-shaped source)
+#   - nix itself (a large, real-world multi-output C++ derivation)
+# See docs/architecture.md's M84 scope notes for the actual pass/fail
+# count and what (if anything) this sweep found beyond M83's ffmpeg fix.
+# `ffmpeg`/`sdl2-compat`/`prefetch-npm-deps` are deliberately NOT in this
+# list: `ffmpeg.outPath` alone takes several seconds to evaluate (a much
+# larger closure than anything else here) and is already tracked
+# separately by the repo root's `d.nix` plus M82/M83's own notes.
+hello
+hello.src
+bash
+curl
+curl.src
+git
+git.src
+python3
+python3.src
+python311
+perl
+ruby
+nodejs
+go
+rustc
+gcc
+clang
+llvm
+jdk
+ripgrep
+fd
+bat
+jq
+tree
+fzf
+tmux
+htop
+neovim
+rsync
+openssh
+which
+less
+nano
+vim
+fish
+zsh
+yarn
+coreutils
+findutils
+diffutils
+patch
+gnugrep
+gnused
+gawk
+gnutar
+gzip
+bzip2
+xz
+zstd
+zlib
+openssl
+libxml2
+sqlite
+pcre2
+ncurses
+readline
+glibc
+util-linux
+cmake
+pkg-config
+autoconf
+automake
+libtool
+ninja
+meson
+boost
+cairo
+pixman
+freetype
+fontconfig
+harfbuzz
+glib
+gtk3
+nix

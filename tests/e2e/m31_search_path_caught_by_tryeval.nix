@@ -1,0 +1,1 @@
+let try = x: def: let r = builtins.tryEval x; in if r.success then r.value else def; in try (toString <nixpkgs-overlays-asnix-test>) "fallback"

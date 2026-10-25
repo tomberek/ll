@@ -1,0 +1,1 @@
+let f = import ./m18_bareglobals_fixtures/identity.nix; in f 5

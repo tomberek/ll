@@ -1,0 +1,1 @@
+{ aDrvPath = "/nix/store/7g5giqf764p3y3zv7a8rqsy9sqqq5kw4-a.drv"; aOutPath = "/nix/store/f37kxm5wf98b2s839zaiybv38zil0s40-a"; bDrvPath = "/nix/store/n2gl5gv2n8980c52hly1c5d95jxyjs3h-b.drv"; bOutPath = "/nix/store/4bcpp52bhq3g1l44b927m0s8rnxzgwvl-b"; }

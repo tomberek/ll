@@ -1,0 +1,1 @@
+builtins.compareVersions builtins.nixVersion "2.18" >= 0
