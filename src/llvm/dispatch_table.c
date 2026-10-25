@@ -45,9 +45,11 @@ void *ll_handler_table[OP_COUNT] = {
     [OP_FRAME_ALLOC] = (void *)ll_op_frame_alloc,
     [OP_FRAME_SET] = (void *)ll_op_frame_set,
     [OP_FRAME_EXIT] = (void *)ll_op_frame_exit,
+    [OP_FRAME_GET] = (void *)ll_op_frame_get,
 
     [OP_VAR_REF] = (void *)ll_op_var_ref,
     [OP_VAR_REF_RAW] = (void *)ll_op_var_ref_raw,
+    [OP_VAR_REF_CELL] = (void *)ll_op_var_ref_cell,
 
     [OP_LAMBDA] = (void *)ll_op_lambda,
     [OP_MK_THUNK] = (void *)ll_op_mk_thunk,

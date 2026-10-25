@@ -20,6 +20,7 @@
 
 #include "op_dispatch.h"
 #include "asnix/force_scratch.h"
+#include "ll_resolve.h"
 
 /* M82: nested-recursion depth for asnix_force_for_print, read/saved/
  * restored by builtins.tryEval (builtins_tryeval.c) -- moved here
@@ -45,9 +46,18 @@ static Value ll_apply_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
 }
 static IrOp ll_apply_sentinel = {.handler = (void *)ll_apply_epilogue, .a = 0, .b = 0};
 
-/* Value asnix_force_for_print(Value v) -- see include/asnix/ir.h. */
+/* Value asnix_force_for_print(Value v) -- see include/asnix/ir.h.
+ * Also resolves Cell/LazyApp/ThunkMap indirection (ll_resolve.c)
+ * before checking the THUNK tag on each loop iteration, matching
+ * asnix's own force.S (which handles all of these, not just Thunk --
+ * see that file's .Lforce_check_cell/_lazyapp/_thunkmap labels). This
+ * is the one force/resolve entry point every vendored builtin and
+ * op_select.c's own force-the-selected-entry call already goes
+ * through, so making it fully general here is what makes every other
+ * caller correct for free. */
 Value asnix_force_for_print(Value v) {
     for (;;) {
+        v = ll_resolve_indirection(v);
         if ((v.raw & ASNIX_TAG_MASK) != ASNIX_TAG_THUNK) return v;
 
         Thunk *t = (Thunk *)ll_untag(v);

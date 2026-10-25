@@ -39,9 +39,11 @@ Value ll_op_jmp(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_frame_alloc(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_frame_set(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_frame_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_frame_get(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 Value ll_op_lambda(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 Value ll_op_mk_thunk(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);

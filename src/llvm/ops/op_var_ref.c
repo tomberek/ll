@@ -1,14 +1,22 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_var_ref.S -- see ~/.claude/plans/soft-wishing-engelbart.md
  *
- * Scope matches today's ll, not full asnix: no Cell/LazyApp/ThunkMap
- * unwrapping (those are heap.h kinds this backend's compiler never
- * produces here -- see heap.h's own comments). Only the THUNK-forcing
- * state machine is ported. */
+ * Resolves Cell/LazyApp/ThunkMap indirection (ll_resolve.c) before
+ * checking the THUNK tag, matching op_var_ref.S's own
+ * check-cell/chase/re-check-thunk loop: resolving one indirection can
+ * reveal a Thunk that itself needs forcing, so the two checks
+ * alternate until a genuine ground value or an UNFORCED thunk is
+ * found. A FORCED thunk's cached value is never itself a Cell (see
+ * op_var_ref.S's own .Lvar_ref_forced comment for the invariant proof)
+ * so that path skips straight to push, same as the asm. */
 #include "ops.h"
+
+#include "../ll_resolve.h"
+#include "value_util.h"
 
 Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
     Value raw = asnix_env_lookup(env, depth, slot);
+    raw = ll_resolve_indirection(raw);
 
     if ((raw.raw & ASNIX_TAG_MASK) != ASNIX_TAG_THUNK) {
         ll_check_valstack(vs);
@@ -69,6 +77,29 @@ Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *
     Value raw = asnix_env_lookup(env, depth, slot);
     ll_check_valstack(vs);
     vs[0] = raw;
+    vs++;
+    LL_NEXT(ip, env, vs, pool, rs);
+}
+
+/* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_var_ref_cell.S --
+ * pushes a Cell wrapping a pointer straight at the target Env slot
+ * (not its value), emitted only by compiler.c's try_cell_ref for a
+ * bare-variable sub-expression about to be thunked -- see heap.h's
+ * ASNIX_CELL_MARKER comment. Same depth-walk env.h's own
+ * asnix_env_lookup does internally, replicated here because this op
+ * needs the slot's ADDRESS, not its dereferenced value; env.h's own
+ * asnix_env_arena_base/ASNIX_ENV_WITH_TAG are both already vendored
+ * and declared for exactly this kind of walk. */
+Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+    int64_t depth = ip->a, slot = ip->b;
+    Env *e = env;
+    for (int64_t d = 0; d < depth; d++) {
+        uintptr_t up = e->up & ~(uintptr_t)ASNIX_ENV_WITH_TAG;
+        e = (Env *)((uint8_t *)asnix_env_arena_base + up);
+    }
+    Value cell = asnix_make_cell_value(&e->values[slot]);
+    ll_check_valstack(vs);
+    vs[0] = cell;
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);
 }

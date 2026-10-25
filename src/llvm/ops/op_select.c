@@ -1,8 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_select.S -- see ~/.claude/plans/soft-wishing-engelbart.md
  *
- * Scope matches today's ll: no Cell unwrapping (documented gap there
- * too). Uses asnix_bshared_attrs_probe, which already handles both a
- * flat Attrs and a lazy `//` UnionHdr internally. */
+ * Cell/LazyApp/ThunkMap unwrapping happens inside asnix_force_for_print
+ * itself (closure_helpers.c), which this already calls on the
+ * selected entry -- no separate resolve call needed here. Uses
+ * asnix_bshared_attrs_probe, which already handles both a flat Attrs
+ * and a lazy `//` UnionHdr internally. */
 #include "ops.h"
 #include "builtins_shared.h"
 
