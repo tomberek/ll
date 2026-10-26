@@ -1584,3 +1584,59 @@ likely outside the scope of any single round: such a change touches
 every op handler, every builtin, and every heap-object kind at
 once. No further investigation is planned here unless a future
 round is explicitly scoped to that scale of change.
+
+## Correction: callgrind's instruction count misled this document once
+
+Every earlier section here trusted callgrind's instruction count as
+the primary speed metric. That trust was correct for every
+`ll`-vs-`ll` and `ll`-vs-`asnix` comparison in this file. Both sides
+are single-threaded there, both share the same architecture, and
+callgrind's simulated count tracked real hardware closely. It was
+not correct for the one `ll`-vs-`iets` comparison reported earlier.
+Callgrind showed `ll` running fewer instructions than `iets`, 6.66
+billion against 7.49 billion, while losing on wall clock. This
+document used that gap to argue that instruction count alone did
+not explain the loss.
+
+`perf stat` tells a different story. This round pinned it to one
+physical core, to rule out this machine's hybrid P-core/E-core
+scheduling as a confound. Three repeated runs each showed under 1%
+run-to-run variance.
+
+- Instructions: `ll` 5.82 billion, `iets` 5.28 billion. `iets` runs
+  fewer, not more, on real hardware.
+- Cycles per instruction: `ll` 1.68, `iets` 1.95. `iets` also uses
+  each cycle more effectively.
+- Page faults: `ll` 123,336, `iets` 26,749 to 75,915 depending on
+  measurement context. `iets` faults four to five times less.
+- Cache-miss rate: `ll` 48.9%, `iets` 44.1%, on top of `iets` also
+  making 9% fewer cache references in absolute terms.
+- Branch-miss rate: `ll` 2.75%, `iets` 2.32%.
+
+`iets` wins on every one of these, not just wall clock. The earlier
+claim that `ll` is instruction-cheaper but memory-expensive was
+wrong. Valgrind's callgrind simulates a generic pipeline. Real
+silicon schedules `iets`'s own multi-threaded runtime differently
+(mimalloc background threads). `iets`'s own stats report 3 threads
+even under `--workers 1`. The discrepancy
+is specific to measuring a multi-threaded binary under callgrind.
+It is not a general flaw in this project's own callgrind-based
+methodology. The `ll`-vs-`asnix` work stays single-threaded on both
+sides and remains trustworthy.
+
+The real picture is simpler than the one reported earlier. `iets`'s
+lead is not "wins on memory, loses on raw computation." It wins on
+computation too. The likely common cause is the same memory-
+footprint gap this whole investigation chases. Writing fewer bytes
+needs fewer store instructions. Touching fewer pages needs fewer
+page faults. A smaller working set needs fewer cache misses, which
+raises the instructions-per-cycle rate on everything else. Two
+numbers point the same direction as the attrset, thunk, and Cell
+gaps already measured in this document: peak RSS (`ll` 468MB,
+`iets` 308MB, a 1.52x gap) and the page-fault count. Closing more
+of the remaining memory gap likely closes part of the real
+instruction and cycle gap too. It does not trade against it the way
+this document's own earlier framing assumed. Future `ll`-vs-`iets`
+comparisons must use `perf stat`, pinned to one core. Callgrind
+stays the faster, cheaper tool, but only for same-architecture
+`ll`-vs-`ll`/`asnix` comparisons.
