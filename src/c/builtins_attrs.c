@@ -170,17 +170,6 @@ static void sorted_name_order(Value attrs, int64_t n, int64_t *order) {
     free(entries);
 }
 
-static int64_t attrs_find(Value attrs, uint32_t sym) {
-    int64_t lo = 0, hi = attrs_count(attrs);
-    while (lo < hi) {
-        int64_t mid = lo + (hi - lo) / 2;
-        uint32_t s = attrs_entry_sym(attrs, mid);
-        if (s == sym) return mid;
-        if (s < sym) lo = mid + 1; else hi = mid;
-    }
-    return -1;
-}
-
 /* ---- curried-arity-2 plumbing ----
  *
  * hashString (builtins.c) curries its true-arity-2 signature by having
@@ -264,7 +253,12 @@ static Value prim_hasAttr_apply2(const Value *args, int64_t argc) {
     require_string(args[0], "hasAttr");
     require_attrs(args[1], "hasAttr");
     uint32_t sym = asnix_intern(string_bytes(args[0]), (size_t)string_len(args[0]));
-    return attrs_find(args[1], sym) >= 0 ? ASNIX_TRUE : ASNIX_FALSE;
+    /* perf: a single-key lookup never needs the whole set materialized --
+     * asnix_bshared_attrs_probe (already used by OP_SELECT, M93) walks a
+     * lazy union's leaves directly and never allocates, matching the
+     * same fix applied to derivation.c's asnix_collect_input_refs. */
+    Value unused;
+    return asnix_bshared_attrs_probe(args[1], sym, &unused) ? ASNIX_TRUE : ASNIX_FALSE;
 }
 
 static Value prim_hasAttr(const Value *args, int64_t argc) {
@@ -281,13 +275,15 @@ static Value prim_getAttr_apply2(const Value *args, int64_t argc) {
     require_string(args[0], "getAttr");
     require_attrs(args[1], "getAttr");
     uint32_t sym = asnix_intern(string_bytes(args[0]), (size_t)string_len(args[0]));
-    int64_t idx = attrs_find(args[1], sym);
-    if (idx < 0) {
+    /* perf: same fix as hasAttr just above -- a single-key lookup never
+     * needs the whole set materialized. */
+    Value val;
+    if (!asnix_bshared_attrs_probe(args[1], sym, &val)) {
         fprintf(stderr, "asnix: getAttr: attribute '%.*s' missing\n",
                 (int)string_len(args[0]), string_bytes(args[0]));
         exit(1);
     }
-    return attrs_entry_value(args[1], idx);
+    return val;
 }
 
 static Value prim_getAttr(const Value *args, int64_t argc) {
