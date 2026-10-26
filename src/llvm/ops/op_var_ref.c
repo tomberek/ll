@@ -11,6 +11,7 @@
 #include "ops.h"
 
 #include "../ll_resolve.h"
+#include "tryeval.h"
 #include "value_util.h"
 
 LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
@@ -42,8 +43,16 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
         asnix_fatal(msg, sizeof(msg) - 1);
     }
     if (state_tag == ASNIX_THUNK_STATE_FAILED) {
+        /* M82: matches op_var_ref.S's own .Lvar_ref_reraise -- route
+         * through asnix_tryeval_raise_or_fatal (tryeval.c), not
+         * asnix_fatal directly, so re-forcing a thunk whose first
+         * evaluation failed inside an active builtins.tryEval
+         * re-raises (catchable again) instead of unconditionally
+         * aborting the whole process. Falls back to exactly
+         * asnix_fatal's own write+exit(1) behavior when no tryEval is
+         * active. */
         static const char msg[] = "asnix: re-evaluation of a thunk whose first evaluation failed, aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+        asnix_tryeval_raise_or_fatal(msg, sizeof(msg) - 1); /* _Noreturn */
     }
 
     /* UNFORCED: state_word IS the clean IrProgram* (low tag bits 0). */

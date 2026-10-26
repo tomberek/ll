@@ -23,6 +23,7 @@
 #include "asnix/stats.h"
 #include "builtins_shared.h"
 #include "ll_resolve.h"
+#include "tryeval.h"
 
 /* M82: nested-recursion depth for asnix_force_for_print, read/saved/
  * restored by builtins.tryEval (builtins_tryeval.c) -- moved here
@@ -142,8 +143,16 @@ Value asnix_force_for_print(Value v) {
             asnix_fatal(msg, sizeof(msg) - 1);
         }
         if (state_tag == ASNIX_THUNK_STATE_FAILED) {
+            /* M82: matches force.S's own .Lforce_reraise -- route
+             * through asnix_tryeval_raise_or_fatal (tryeval.c), not
+             * asnix_fatal directly, so re-forcing a thunk whose first
+             * evaluation failed inside an active builtins.tryEval
+             * re-raises (catchable again) instead of unconditionally
+             * aborting the whole process. Falls back to exactly
+             * asnix_fatal's own write+exit(1) behavior when no tryEval
+             * is active. */
             static const char msg[] = "asnix: re-evaluation of a thunk whose first evaluation failed, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+            asnix_tryeval_raise_or_fatal(msg, sizeof(msg) - 1); /* _Noreturn */
         }
 
         v = ll_force_thunk_slow(t, state_word);
