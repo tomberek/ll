@@ -37,40 +37,14 @@ int64_t asnix_apply_depth = 0;
  * asnix_apply is not a preserve_none handler, so this isn't about
  * register-spill pressure; it's just the ordinary cost of a real call
  * (push/pop + call/ret) versus a few inlined instructions for the
- * overwhelmingly common case. Same trick as op_dispatch.h's own
- * ll_arena_alloc (already landed for the general asnix_arena): inline
- * the bump-allocator fast path, fall back to the real out-of-line
- * asnix_env_alloc only when the arena isn't initialized yet or this
- * allocation would overflow it. asnix_env_arena_cur/_end are normally
- * file-local to src/asm/env_arena.S -- exported (see that file) purely
- * so this static inline can read/bump them directly without a call,
- * mirroring asnix_env_alloc's own env.S logic: size =
- * ASNIX_ENV_OFF_VALUES + nslots*8, rounded up to a multiple of 4 (this
- * fast path bypasses asnix_env_arena_alloc entirely, so it redoes that
- * same round_up_4 itself -- see env_arena.S's own header comment for
- * why 4, not 8), plus the NULL-safe `up` compression asnix_env_alloc's
- * own general-purpose entry point does (unlike the hot-path op
- * handlers, which only ever see a non-NULL current ENV). asnix_env_arena_cur/
- * _end are already declared (as uint8_t *) by op_dispatch.h, included
- * above -- no separate extern needed here. */
-static inline Env *ll_env_alloc_fast(Env *up, int64_t nslots) {
-    uint8_t *cur = asnix_env_arena_cur;
-    if (cur == NULL) return asnix_env_alloc(up, nslots); /* arena not yet initialized */
-
-    uint64_t n = (uint64_t)ASNIX_ENV_OFF_VALUES + (uint64_t)nslots * 8;
-    uint64_t n4 = (n + 3) & ~(uint64_t)3;
-    uint8_t *new_cur = cur + n4;
-    if (new_cur > asnix_env_arena_end) return asnix_env_alloc(up, nslots);
-
-    asnix_env_arena_cur = new_cur;
-    asnix_stats_env++;
-    asnix_stats_env_elements += (uint64_t)nslots;
-
-    Env *e = (Env *)cur;
-    e->up = up ? (uint32_t)((uintptr_t)up - (uintptr_t)asnix_env_arena_base) : 0;
-    return e;
-}
-
+ * overwhelmingly common case. Reuses op_dispatch.h's own ll_env_alloc
+ * (already landed there for op_frame.c/op_call.c/op_with.c's identical
+ * need) instead of keeping a second, near-duplicate inline copy here --
+ * the two were originally developed in parallel, isolated worktrees
+ * that couldn't see each other's edits, and merged into master without
+ * deduplicating; now that both live in the same file's include graph
+ * (closure_helpers.c already #includes "op_dispatch.h"), there's no
+ * reason for asnix_apply not to call the shared one directly. */
 static LL_OP_ATTR Value ll_force_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
@@ -177,6 +151,113 @@ Value asnix_force_for_print(Value v) {
     }
 }
 
+/* M10 ll port, same spirit as ll_force_thunk_slow's own split above:
+ * asnix_apply's Closure branch is the only one of its three live
+ * branches (PrimOp/Closure/Attrs-functor) that needs a real nested
+ * dispatch context (own VALSTACK/RETSP, env allocation, a sentinel
+ * RetFrame) -- asnix's own hand-written apply.S reflects that
+ * directly: the PrimOp branch spills its small forced-args copy to a
+ * plain stack scratch buffer (no callee-saved registers survive its
+ * calls), and the Attrs/__functor branch is a bare tail-jmp with NO
+ * prologue at all, while ONLY the Closure branch (apply.S's own
+ * .Lapply_is_closure) pushes all six callee-saved registers. Before
+ * this split, compiling all three branches into ONE function made
+ * clang pick the UNION of every branch's register needs for a single
+ * shared prologue/epilogue -- paid even by a plain primop call (e.g.
+ * `builtins.elemAt someList` invoked through `map`) or the attrset
+ * __functor path, neither of which asnix's own asm burdens this way
+ * (confirmed via `objdump -d --disassemble=asnix_apply`: before this
+ * split, every path through the compiled function pushed/popped all
+ * six of %rbp/%r15/%r14/%r13/%r12/%rbx, where asnix's own asm only
+ * does that on .Lapply_is_closure). Pure code motion, no logic
+ * change -- same statements, same order, just split out of the
+ * branch into its own `noinline` function so clang can shrink-wrap
+ * the outer function's prologue around the (comparatively rare) real
+ * Closure call instead of every path through asnix_apply. */
+static __attribute__((noinline)) Value ll_apply_closure_slow(Value fn, const Value *args, int64_t argc) {
+    Closure *c = (Closure *)ll_untag(fn);
+    if (c->arity != argc) {
+        static const char msg[] = "asnix: apply argument count does not match arity, aborting\n";
+        asnix_fatal(msg, sizeof(msg) - 1);
+    }
+
+    void *saved_vlim = asnix_valstack_limit;
+    void *saved_rlim = asnix_retsp_limit;
+
+    Value *vs = (Value *)asnix_apply_scratch_valstack(asnix_apply_depth);
+    RetFrame *rs = (RetFrame *)asnix_apply_scratch_retstack(asnix_apply_depth);
+    asnix_valstack_limit = (char *)vs + ASNIX_FORCE_VALSTACK_BYTES;
+    asnix_retsp_limit = (char *)rs + ASNIX_FORCE_RETSTACK_BYTES;
+    asnix_apply_depth++;
+
+    Env *new_env = ll_env_alloc(c->up, argc);
+    for (int64_t i = 0; i < argc; i++) new_env->values[i] = args[i];
+
+    rs[0].ip = &ll_apply_sentinel;
+    rs[0].env = NULL;
+    rs[0].pool = NULL;
+    rs[0].force_target = NULL;
+
+    IrProgram *prog = c->prog;
+    IrOp *ip0 = prog->ops;
+    Value result = ((LLOpFn)ip0->handler)(ip0, new_env, vs, prog->pool, rs + 1);
+
+    asnix_apply_depth--;
+    asnix_retsp_limit = saved_rlim;
+    asnix_valstack_limit = saved_vlim;
+    return result;
+}
+
+/* M10 ll port, same split as ll_apply_closure_slow just above: the
+ * PrimOp branch's own forced-args copy loop calls asnix_force_for_print
+ * (and the primop's own fn pointer) several times, so clang must keep
+ * fn/args/argc alive in callee-saved registers across those calls --
+ * real register pressure, but PrimOp-only. Left inline in asnix_apply
+ * (pre-split), this pressure leaked into the Attrs/__functor branch and
+ * the type/arity error branches too (none of which make any call that
+ * needs a register to survive it -- asnix's own apply.S reflects this:
+ * .Lapply_is_attrs is a bare tail-jmp with no prologue at all), because
+ * one compiled function pays the UNION of every branch's register
+ * needs for a single shared prologue/epilogue. Pure code motion, no
+ * logic change -- same statements, same order, just split out so
+ * clang can shrink-wrap asnix_apply's own prologue around only the
+ * branches that actually need it. */
+static __attribute__((noinline)) Value ll_apply_primop_slow(Value fn, const Value *args, int64_t argc) {
+    PrimOp *p = (PrimOp *)ll_untag(fn);
+    if (p->arity != argc) {
+        static const char msg[] = "asnix: apply argument count does not match arity, aborting\n";
+        asnix_fatal(msg, sizeof(msg) - 1);
+    }
+    /* M38/M62: never mutate the caller's own args buffer -- build a
+     * local forced copy instead. Primop arities are small (max 3
+     * in this codebase today); 64 covers any realistic case with
+     * room to spare, fixed-size so this stays simple C.
+     *
+     * scratch[0] holds `fn` itself (the called PrimOp Value), with
+     * the forced args starting at scratch+1 -- this is the "self"
+     * slot builtins_list.c's self_captures() reads via args[-1],
+     * exploiting the real invariant op_call.S's own primop call
+     * path gives it for free (the callee's own Value always sits
+     * immediately before args[0] on VALSTACK there). asnix_apply is
+     * a SEPARATE call path from ordinary OP_CALL -- reached when a
+     * curried-native stage (e.g. `builtins.elemAt someList`, itself
+     * a PrimOp capturing someList) is handed to map/filter/foldl'/
+     * genList as the callback -- so it must provide that same
+     * invariant itself, not rely on whatever happened to precede
+     * the caller's own buffer (which is often a bare local variable
+     * with nothing meaningful before it, e.g. genList2_impl's `&iv`). */
+    Value scratch[65];
+    scratch[0] = fn;
+    const Value *use_args = args;
+    if (!p->noforce) {
+        for (int64_t i = 0; i < argc; i++) scratch[1 + i] = asnix_force_for_print(args[i]);
+        use_args = scratch + 1;
+    }
+    Value (*fn_ptr)(const Value *, int64_t) = (Value(*)(const Value *, int64_t))p->fn;
+    Value result = fn_ptr(use_args, argc);
+    return asnix_force_for_print(result);
+}
+
 /* Value asnix_apply(Value fn, const Value *args, int64_t argc) -- see
  * include/asnix/ir.h. Scope matches today's ll: Closure and PrimOp
  * only, no __functor/ATTRS-is-callable protocol. */
@@ -184,73 +265,11 @@ Value asnix_apply(Value fn, const Value *args, int64_t argc) {
     uint64_t tag = fn.raw & ASNIX_TAG_MASK;
 
     if (tag == ASNIX_TAG_PRIMOP) {
-        PrimOp *p = (PrimOp *)ll_untag(fn);
-        if (p->arity != argc) {
-            static const char msg[] = "asnix: apply argument count does not match arity, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
-        }
-        /* M38/M62: never mutate the caller's own args buffer -- build a
-         * local forced copy instead. Primop arities are small (max 3
-         * in this codebase today); 64 covers any realistic case with
-         * room to spare, fixed-size so this stays simple C.
-         *
-         * scratch[0] holds `fn` itself (the called PrimOp Value), with
-         * the forced args starting at scratch+1 -- this is the "self"
-         * slot builtins_list.c's self_captures() reads via args[-1],
-         * exploiting the real invariant op_call.S's own primop call
-         * path gives it for free (the callee's own Value always sits
-         * immediately before args[0] on VALSTACK there). asnix_apply is
-         * a SEPARATE call path from ordinary OP_CALL -- reached when a
-         * curried-native stage (e.g. `builtins.elemAt someList`, itself
-         * a PrimOp capturing someList) is handed to map/filter/foldl'/
-         * genList as the callback -- so it must provide that same
-         * invariant itself, not rely on whatever happened to precede
-         * the caller's own buffer (which is often a bare local variable
-         * with nothing meaningful before it, e.g. genList2_impl's `&iv`). */
-        Value scratch[65];
-        scratch[0] = fn;
-        const Value *use_args = args;
-        if (!p->noforce) {
-            for (int64_t i = 0; i < argc; i++) scratch[1 + i] = asnix_force_for_print(args[i]);
-            use_args = scratch + 1;
-        }
-        Value (*fn_ptr)(const Value *, int64_t) = (Value(*)(const Value *, int64_t))p->fn;
-        Value result = fn_ptr(use_args, argc);
-        return asnix_force_for_print(result);
+        return ll_apply_primop_slow(fn, args, argc);
     }
 
     if (tag == ASNIX_TAG_CLOSURE) {
-        Closure *c = (Closure *)ll_untag(fn);
-        if (c->arity != argc) {
-            static const char msg[] = "asnix: apply argument count does not match arity, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
-        }
-
-        void *saved_vlim = asnix_valstack_limit;
-        void *saved_rlim = asnix_retsp_limit;
-
-        Value *vs = (Value *)asnix_apply_scratch_valstack(asnix_apply_depth);
-        RetFrame *rs = (RetFrame *)asnix_apply_scratch_retstack(asnix_apply_depth);
-        asnix_valstack_limit = (char *)vs + ASNIX_FORCE_VALSTACK_BYTES;
-        asnix_retsp_limit = (char *)rs + ASNIX_FORCE_RETSTACK_BYTES;
-        asnix_apply_depth++;
-
-        Env *new_env = ll_env_alloc_fast(c->up, argc);
-        for (int64_t i = 0; i < argc; i++) new_env->values[i] = args[i];
-
-        rs[0].ip = &ll_apply_sentinel;
-        rs[0].env = NULL;
-        rs[0].pool = NULL;
-        rs[0].force_target = NULL;
-
-        IrProgram *prog = c->prog;
-        IrOp *ip0 = prog->ops;
-        Value result = ((LLOpFn)ip0->handler)(ip0, new_env, vs, prog->pool, rs + 1);
-
-        asnix_apply_depth--;
-        asnix_retsp_limit = saved_rlim;
-        asnix_valstack_limit = saved_vlim;
-        return result;
+        return ll_apply_closure_slow(fn, args, argc);
     }
 
     if (tag == ASNIX_TAG_ATTRS && argc == 1) {
