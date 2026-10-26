@@ -1142,3 +1142,147 @@ documented position-tracking gap, not a new one. All 44 difftest
 cases, the 74-package nixpkgs-hash sweep, and a byte-identical
 `ffmpeg-full.outPath` diff against asnix stayed green through every
 step of this work.
+
+## The attrset-allocation gap with iets: two real fixes, two honest negatives
+
+`iets`, a separate Rust Nix evaluator, uses about half the peak
+memory of `ll`/`asnix` on the same real workload,
+`pkgs.ffmpeg-full.outPath`. This section explains why, using memory
+instrumentation already present in both projects
+(`ASNIX_SHOW_STATS=1` and `IETS_STATS=2`) plus `/usr/bin/time -v` for
+peak RSS. `iets` is not a correctness reference here. It is a
+performance comparison only.
+
+Attrset allocation accounts for 65.7MB of the gap. `asnix`/`ll`
+builds 119.9MB of attrset entries on this benchmark, where `iets`'s
+equivalent categories sum to 54.3MB. Most of this gap traces to the
+`//` operator. Three agents, each in an isolated worktree,
+investigated three separate parts of the gap in parallel.
+
+### Fix 1: permanent garbage in the lazy-union materialize path
+
+A chain of small `//` operations can defer into a lazy union (asnix's
+own M88 design, see `attrs_update.c`). Reading the union's full set
+of keys later calls `asnix_bshared_attrs_resolve`. This function
+merges the union's leaves bottom-up, in pairs, and halves the work
+list each round. Every round's output used to go into a real,
+permanent `asnix_arena_alloc` call, even though only the FINAL
+round's output is ever read again. On the real benchmark, this
+wasted 1.5 million entries, about 18.5MB, checked by counting.
+
+An earlier attempt this session replaced the pairwise merge with a
+single-pass merge across all leaves at once, a K-way merge. The
+K-way merge eliminated the garbage cleanly, -3.4% peak RSS. But it
+cost more raw instructions, +2.4%. One pass scans every leaf cursor
+for each output entry. That does more comparisons than the old
+two-way merge, for workloads with few leaves. The K-way version was
+reverted.
+
+The fix that worked keeps the exact same two-way merge algorithm. It
+redirects every round except the last into one of up to six
+dedicated, transient scratch buffers, plain `malloc`, not the
+arena. Each round gets its own buffer. It never ping-pongs between
+two buffers. An entry carried over unmerged from an earlier round
+must stay valid into a later round. Reusing a buffer across
+non-adjacent rounds corrupts that entry. The last round writes
+straight into the one real, correctly-sized, permanent allocation.
+The function frees all scratch buffers before it returns.
+
+Two further instruction-count regressions had to be fixed before
+this design paid off. The merge helper needed
+`__attribute__((noinline))`, to match how `asnix_attrs_eager_merge`
+is already compiled. Without that attribute, the compiler folded the
+helper into its caller, and pushed its 12-byte `memcpy` calls into
+slower `__memcpy_chk` calls. The last round's extra copy, from
+scratch buffer into the final allocation, was removed by writing
+that last round directly into the final allocation instead. Final
+measured result: instructions +0.015%, noise level. Peak RSS
+-3.57%, about 18.8MB, matching the predicted garbage almost exactly.
+
+The fix passed four gates:
+
+- all 44 difftest cases
+- the 74-package nixpkgs-hash sweep
+- a byte-identical ffmpeg diff against asnix
+- the full external conformance sweep (655 pass, 3 fail, 148 skip,
+  unchanged)
+
+It also passed several hand-written edge cases: 1, 2, 3, 5, 64, and
+70-leaf unions, duplicate keys across leaves, and empty-attrset
+unions. The merge landed on master at commit 8d5ef22.
+
+### Fix 2: a redundant copy in removeAttrs and mapAttrs
+
+A separate agent surveyed every attrset-producing operation other
+than `//`: literal `{...}`/`rec {...}` construction, `removeAttrs`,
+`mapAttrs`, `listToAttrs`, `filterAttrs`, `intersectAttrs`, and
+`zipAttrsWith`. Most of these were already tight. Literal
+construction already writes straight into its final buffer.
+`listToAttrs`, `filterAttrs`, and `intersectAttrs` use
+`malloc`-and-free scratch, which the never-free arena does not
+retain.
+
+`removeAttrs` and `mapAttrs`, in `builtins_attrs.c`, both built a
+symbols-and-values scratch pair in the permanent arena. Each one
+filled the pair, then handed it to a helper that allocated a SECOND
+permanent buffer and copied every entry across again. On the
+never-free arena, the first buffer became permanent garbage the
+moment the copy finished. The fix writes directly into one real
+allocation in both cases. `removeAttrs` allocates for the worst
+case, nothing removed, and shrinks the recorded count afterward.
+`mapAttrs`, a plain one-to-one map with no over-allocation question,
+writes straight into one final buffer on both its code paths.
+Measured result: instructions -0.10%, an improvement. Peak RSS
+-1.50%, about 7.9MB. The fix passed the same four gates and landed
+on master at commit 69fddcc.
+
+A two-pass variant of the `removeAttrs` fix was also tried: count
+survivors first, then allocate exactly that size, with no worst-case
+tail slack at all. It cost more instructions, +0.267%, for less
+memory benefit than the single-pass version above. The two-pass
+variant was discarded.
+
+### Two honest negatives
+
+A third agent measured whether `asnix_attrs_eager_merge`'s own
+direct `//` path wastes allocation slack the same way the
+materialize path did. This path handles the 92,218 calls that do not defer into a
+lazy union, about 52MB. It does not waste meaningful slack: only
+1.8% of this path's own allocated entries go unused to duplicate
+keys, about 940KB total. `iets`'s own equivalent function computes
+an exact output size first, with a counting pre-pass, before it
+allocates. That is a genuine architecture difference from `ll`'s own
+worst-case-then-slack approach. The same two-pass approach, built in
+`ll` and
+measured honestly, cost +0.50% more instructions for only -0.26%
+RSS, a worse trade than the existing approach. It was reverted, not
+merged.
+
+A separate background task ported `iets`'s own curry-chain-
+flattening mechanism into `ll_op_call`. The mechanism binds every
+argument of a nested single-argument lambda chain directly, without
+allocating an intermediate closure for each stage. It was correct,
+with 220,369 fast-path hits, checked directly, on the real
+benchmark. But it
+produced no measurable speedup: 0.008% on instructions, no
+significant change on wall clock. The avoided closure allocation is
+small next to the environment allocation that still happens the
+same way on both paths, which dominates the real cost. It was not
+merged.
+
+### Combined result
+
+Merging fix 1 and fix 2 onto master, with no conflicts since they
+touch different files, produced a combined result on the real
+benchmark: instructions 6,646,404,613 to 6,639,065,037, -0.11%, a
+small improvement, not a regression. Peak RSS 527,260KB to
+500,324KB, -5.1%, about 26.3MB of the original 65.7MB attrset gap
+with `iets`. All four correctness gates stayed green after the
+merge.
+
+The remaining 39.4MB of the gap is not yet explained. The direct
+`//` path's own 52MB allocation is already tight, as shown above.
+Most of the remaining gap must sit in categories this round did not
+reach in detail. Some of it can also come from a difference between
+asnix's own baseline shape for a flat attrset entry and `iets`'s
+equivalent.
