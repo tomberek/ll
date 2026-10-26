@@ -1,4 +1,9 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
+/* strchrnul (used by lex_normal's line-comment skip below) is a GNU
+ * extension, not ISO C -- needs an explicit feature-test macro under
+ * -std=c11 (same reason eval_file.c defines _DEFAULT_SOURCE for
+ * realpath()). */
+#define _DEFAULT_SOURCE
 #include "lexer.h"
 
 #include <assert.h>
@@ -749,7 +754,12 @@ static Token lex_normal(Lexer *lx) {
             continue;
         }
         if (c == '#') { /* line comment, a harmless real-Nix-ism to allow in fixtures */
-            while (src[i] && src[i] != '\n') i++;
+            /* perf: strchrnul finds '\n' or the string's own terminating
+             * '\0', whichever comes first -- exactly this loop's own
+             * stopping condition, in one SIMD-accelerated glibc call
+             * instead of a byte-at-a-time scan. Real nixpkgs files are
+             * full of line comments (license headers, inline notes). */
+            i = (size_t)(strchrnul(src + i, '\n') - src);
             lx->pos = i;
             continue;
         }
@@ -764,7 +774,19 @@ static Token lex_normal(Lexer *lx) {
                                                * anyway ('*' isn't a path_char), but comments should
                                                * never compete with path-literal scanning regardless. */
             i += 2;
-            while (src[i] && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            /* perf: same strchrnul idea as the line comment above, one
+             * level removed -- jump straight to the next star (or the
+             * terminating NUL) instead of checking every byte by hand,
+             * then verify it is really the closing star-slash and not
+             * just a star inside the comment's own text; if not, skip
+             * past it and keep searching. Still stops in the identical
+             * state (at the closing delimiter's own star, or at NUL) as
+             * the byte-at-a-time loop this replaces. */
+            for (;;) {
+                i = (size_t)(strchrnul(src + i, '*') - src);
+                if (!src[i] || src[i + 1] == '/') break;
+                i++;
+            }
             if (!src[i]) {
                 fprintf(stderr, "asnix: unterminated block comment\n");
                 exit(1);
