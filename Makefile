@@ -95,5 +95,252 @@ src/c/%.o: src/c/%.c
 clean:
 	rm -f ll libll.a $(LIB_OBJS) $(DEPS) src/llvm/ll_main.o src/llvm/ll_main.d
 
+# --- Profile-Guided Optimization (PGO): opt-in, NOT part of `make ll`/`all` ---
+#
+# Why opt-in: profile data goes stale as code changes, and baking a
+# multi-step, training-data-dependent pipeline into the default build is
+# the wrong default for a project still under active development. Run
+# `make pgo` by hand (and re-run it after any change to src/llvm/** worth
+# re-training on); it is not wired into `all`/`test`/CI.
+#
+# What gets instrumented/optimized: ONLY the clang-compiled files that
+# $(CC) builds under the generic `%.o: %.c`/`%.o: %.S` rules above
+# (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c) -- i.e. exactly the
+# files `-fprofile-instr-generate`/`-fprofile-instr-use` can apply to in
+# the first place. The vendored frontend (src/c/*.c, FRONTEND_CC/gcc) and
+# the asm shims (src/asm/*.S, also built with FRONTEND_CC) don't go
+# through clang's `-fprofile-instr-*` machinery at all -- gcc doesn't
+# understand those flags -- so they're compiled identically to the normal
+# `make ll` build in both PGO passes below, just mirrored into their own
+# object directories so `make ll` and `make pgo` never clobber each
+# other's .o files.
+#
+# Pipeline (standard clang PGO recipe), all driven by `make pgo`:
+#   1. pgo-instrumented: build $(PGO_GEN_BIN) with -fprofile-instr-generate
+#   2. pgo-train:        run it over the training set (bench/workloads/*.nix
+#                         + a fixed, deliberately-mixed set of real nixpkgs
+#                         attrs -- see PGO_TRAIN_ATTRS below), each run
+#                         writing its own *.profraw via LLVM_PROFILE_FILE's
+#                         %p (pid)/%m (per-binary signature) so concurrent
+#                         runs never clobber each other
+#   3. pgo-merge:         llvm-profdata merge *.profraw -> merged.profdata
+#   4. pgo-build:         rebuild $(PGO_BIN) with -fprofile-instr-use=...
+#
+# Training set is deliberately NOT ffmpeg-full.outPath -- that is this
+# project's held-out correctness/performance target; training on it would
+# make any speedup an overfitting artifact rather than a real result. See
+# bench/results/M8-findings.md for how $(PGO_BIN) compared to plain `ll`.
+PGO_DIR        := .pgo
+PGO_RAW_DIR    := $(PGO_DIR)/profraw
+PGO_PROFDATA   := $(PGO_DIR)/merged.profdata
+PGO_GEN_OBJDIR := $(PGO_DIR)/obj-gen
+PGO_USE_OBJDIR := $(PGO_DIR)/obj-use
+PGO_GEN_BIN    := ll-pgo-gen
+PGO_BIN        := ll-pgo
+
+LLVM_PROFDATA  ?= llvm-profdata
+
+PGO_GEN_FLAG   := -fprofile-instr-generate
+PGO_USE_FLAG   := -fprofile-instr-use=$(PGO_PROFDATA)
+
+PGO_GEN_ASM_OBJS := $(addprefix $(PGO_GEN_OBJDIR)/,$(ASM_SRCS:.S=.o))
+PGO_GEN_C_OBJS   := $(addprefix $(PGO_GEN_OBJDIR)/,$(C_LIB_SRCS:.c=.o))
+PGO_GEN_MAIN_OBJ := $(PGO_GEN_OBJDIR)/src/llvm/ll_main.o
+PGO_GEN_OBJS     := $(PGO_GEN_ASM_OBJS) $(PGO_GEN_C_OBJS) $(PGO_GEN_MAIN_OBJ)
+PGO_GEN_DEPS     := $(PGO_GEN_OBJS:.o=.d)
+
+PGO_USE_ASM_OBJS := $(addprefix $(PGO_USE_OBJDIR)/,$(ASM_SRCS:.S=.o))
+PGO_USE_C_OBJS   := $(addprefix $(PGO_USE_OBJDIR)/,$(C_LIB_SRCS:.c=.o))
+PGO_USE_MAIN_OBJ := $(PGO_USE_OBJDIR)/src/llvm/ll_main.o
+PGO_USE_OBJS     := $(PGO_USE_ASM_OBJS) $(PGO_USE_C_OBJS) $(PGO_USE_MAIN_OBJ)
+PGO_USE_DEPS     := $(PGO_USE_OBJS:.o=.d)
+
+# Training workloads: all ten synthetic microbenchmarks, plus a fixed,
+# deliberately-mixed (small/medium/large, different domains) set of real
+# nixpkgs attrs, evaluated the same way tests/nixpkgs-hash's correctness
+# sweep does: `let pkgs = import /home/tbereknyei/nixpkgs/default.nix {};
+# in pkgs.<attr>.outPath`. Deliberately excludes ffmpeg-full (see above).
+PGO_TRAIN_WORKLOADS := $(wildcard bench/workloads/*.nix)
+PGO_TRAIN_ATTRS := hello coreutils git cmake openssl glib boost python3 nodejs gcc
+
+.PHONY: pgo pgo-instrumented pgo-train pgo-merge pgo-build pgo-clean pgo-train-clean
+
+pgo: pgo-build
+
+pgo-instrumented: $(PGO_GEN_BIN)
+
+$(PGO_GEN_BIN): $(PGO_GEN_OBJS)
+	$(CC) $(LDFLAGS) $(PGO_GEN_FLAG) -o $@ $(PGO_GEN_OBJS)
+
+# frontend/asm objects (FRONTEND_CC): same flags as `make ll`'s own
+# src/asm/%.o and src/c/%.o rules, just mirrored into $(PGO_GEN_OBJDIR).
+$(PGO_GEN_OBJDIR)/src/asm/%.o: src/asm/%.S
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(PGO_GEN_OBJDIR)/src/c/%.o: src/c/%.c
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+# clang-compiled objects: these get instrumented.
+$(PGO_GEN_OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PGO_GEN_FLAG) -c -o $@ $<
+
+$(PGO_GEN_OBJDIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PGO_GEN_FLAG) -c -o $@ $<
+
+# Step 2: train. LLVM_PROFILE_FILE's %p/%m let every run (one per
+# workload/attr) write its own *.profraw instead of overwriting a single
+# default.profraw -- see `clang -cc1 --help`'s -fprofile-instrument-path.
+pgo-train: $(PGO_GEN_BIN)
+	@mkdir -p $(PGO_RAW_DIR)
+	@rm -f $(PGO_RAW_DIR)/*.profraw
+	@for f in $(PGO_TRAIN_WORKLOADS); do \
+		echo "pgo-train: $$f"; \
+		LLVM_PROFILE_FILE="$(PGO_RAW_DIR)/%p-%m.profraw" ./$(PGO_GEN_BIN) "$$f" >/dev/null 2>&1 || \
+			echo "pgo-train: WARNING: $$f exited nonzero, profile for this run may be partial/missing"; \
+	done
+	@for a in $(PGO_TRAIN_ATTRS); do \
+		echo "pgo-train: pkgs.$$a.outPath"; \
+		LLVM_PROFILE_FILE="$(PGO_RAW_DIR)/%p-%m.profraw" ./$(PGO_GEN_BIN) \
+			"let pkgs = import /home/tbereknyei/nixpkgs/default.nix {}; in pkgs.$$a.outPath" >/dev/null 2>&1 || \
+			echo "pgo-train: WARNING: pkgs.$$a.outPath exited nonzero, profile for this run may be partial/missing"; \
+	done
+
+# Step 3: merge. $(PGO_PROFDATA) is a real file target (not phony) so the
+# $(PGO_USE_OBJDIR)/%.o rules below can order-only-depend on it directly --
+# under parallel make (-j), a *.PHONY sibling prerequisite of `pgo-build`
+# (alongside $(PGO_BIN)) would NOT guarantee pgo-merge finishes before the
+# use-pass .o's start compiling, since make is free to run independent
+# prerequisites of the same target concurrently. Depending on the file
+# itself gives a real edge in the dependency graph instead.
+pgo-merge: $(PGO_PROFDATA)
+
+$(PGO_PROFDATA): pgo-train
+	@mkdir -p $(dir $@)
+	$(LLVM_PROFDATA) merge -o $@ $(PGO_RAW_DIR)/*.profraw
+
+# Step 4: rebuild with the merged profile.
+pgo-build: $(PGO_BIN)
+
+$(PGO_BIN): $(PGO_USE_OBJS)
+	$(CC) $(LDFLAGS) $(PGO_USE_FLAG) -o $@ $(PGO_USE_OBJS)
+
+$(PGO_USE_OBJDIR)/src/asm/%.o: src/asm/%.S
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(PGO_USE_OBJDIR)/src/c/%.o: src/c/%.c
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+# $(PGO_PROFDATA) is a NORMAL prerequisite here (not order-only): these
+# .o's are the ones clang bakes the profile into, so when a re-run of
+# `make pgo` regenerates merged.profdata (pgo-train is .PHONY, so it --
+# and therefore $(PGO_PROFDATA) -- reruns every invocation), every
+# clang-compiled object must be recompiled against the fresh profile,
+# not just whichever .c files happened to change.
+$(PGO_USE_OBJDIR)/%.o: %.c $(PGO_PROFDATA)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PGO_USE_FLAG) -c -o $@ $<
+
+$(PGO_USE_OBJDIR)/%.o: %.S $(PGO_PROFDATA)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(PGO_USE_FLAG) -c -o $@ $<
+
+pgo-train-clean:
+	rm -rf $(PGO_RAW_DIR)
+
+pgo-clean:
+	rm -rf $(PGO_DIR) $(PGO_GEN_BIN) $(PGO_BIN)
+
+# --- -march=native (opt-in, for ll's own clang-compiled code only) -----
+#
+# Measured: a real, modest wall-clock win on pkgs.ffmpeg-full.outPath --
+# but this machine is shared, and plain, unpinned `hyperfine` runs on it
+# were noisy enough to flip sign run to run (one pair of early runs
+# showed a misleadingly large ~1.09x-1.11x; later unpinned runs under
+# heavier load showed ~1.02x the WRONG way). Pinning both sides to the
+# same core (`taskset -c N`) to remove scheduling noise gave a
+# consistent, repeatable ~1.04x speedup in both A/B orderings -- that's
+# the number to trust, not the first noisy one. No correctness
+# regression (44/44 difftest, byte-identical ffmpeg-full output vs
+# asnix). Scoped the same way thin-LTO was tried (and reverted, see
+# below): only the clang-compiled files under the generic `%.o: %.c`/
+# `%.o: %.S` rules (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c),
+# NOT the FRONTEND_CC(gcc)-compiled vendored frontend.
+#
+# Why this is its OWN opt-in target (`make ll-native`) rather than a
+# default-on flag on `ll` itself: -march=native bakes in the BUILD
+# machine's exact CPU feature set -- the resulting binary can SIGILL on
+# any other CPU. That's a correctness-adjacent tradeoff (not just a
+# staleness one like PGO's), so it must never be silently the default.
+# Builds into its own object directory/binary name, same reasoning as
+# PGO above: a plain CFLAGS override on the existing `ll`/libll.a object
+# paths would silently mix native and non-native .o's across successive
+# `make ll` / `make ll-native` runs without a `make clean` in between,
+# since make only tracks file mtimes, not which flags produced them.
+#
+# IMPORTANT, nix-specific gotcha: nixpkgs' own clang wrapper treats
+# `-march=native`/`-mtune=native` as an "impure flag" and SILENTLY DROPS
+# IT (just a `warning: Skipping impure flag ... because
+# NIX_ENFORCE_NO_NATIVE is set`, not an error) unless NIX_ENFORCE_NO_NATIVE
+# is unset/empty in the environment. Forgetting this makes `make
+# ll-native` silently produce the exact same binary as `make ll` --
+# verify with e.g. `objdump -d ll-native | grep vpermb` (an AVX512-VBMI
+# instruction absent from the generic -O3 build) if in doubt. Usage:
+#   NIX_ENFORCE_NO_NATIVE= make ll-native
+NATIVE_DIR    := .native
+NATIVE_OBJDIR := $(NATIVE_DIR)/obj
+NATIVE_BIN    := ll-native
+NATIVE_FLAG   := -march=native
+
+NATIVE_ASM_OBJS  := $(addprefix $(NATIVE_OBJDIR)/,$(ASM_SRCS:.S=.o))
+NATIVE_C_OBJS    := $(addprefix $(NATIVE_OBJDIR)/,$(C_LIB_SRCS:.c=.o))
+NATIVE_MAIN_OBJ  := $(NATIVE_OBJDIR)/src/llvm/ll_main.o
+NATIVE_OBJS      := $(NATIVE_ASM_OBJS) $(NATIVE_C_OBJS) $(NATIVE_MAIN_OBJ)
+NATIVE_DEPS      := $(NATIVE_OBJS:.o=.d)
+
+.PHONY: native-clean
+
+$(NATIVE_BIN): $(NATIVE_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(NATIVE_OBJS)
+
+$(NATIVE_OBJDIR)/src/asm/%.o: src/asm/%.S
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(NATIVE_OBJDIR)/src/c/%.o: src/c/%.c
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(NATIVE_OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NATIVE_FLAG) -c -o $@ $<
+
+$(NATIVE_OBJDIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NATIVE_FLAG) -c -o $@ $<
+
+native-clean:
+	rm -rf $(NATIVE_DIR) $(NATIVE_BIN)
+
+# --- thin LTO: tried, reverted, NOT a target here ------------------------
+# Tried `-flto=thin` on the same clang-compiled-files-only scope as
+# -march=native above (compile with -flto=thin, link with clang
+# -flto=thin so lld runs the ThinLTO backend over the mix of LLVM-bitcode
+# .o's from src/llvm/** and plain native .o's from the FRONTEND_CC-
+# compiled frontend). Passed both correctness gates (44/44 difftest,
+# byte-identical ffmpeg-full output), but gave NO measurable win on
+# pkgs.ffmpeg-full.outPath wall-clock -- if anything, a ~1.03x slowdown,
+# well within hyperfine's run-to-run noise on this shared machine. Not
+# wired in as a target; if revisited, re-measure rather than assume this
+# still holds after other changes to src/llvm/**.
+
+-include $(NATIVE_DEPS)
+-include $(PGO_GEN_DEPS)
+-include $(PGO_USE_DEPS)
 -include $(DEPS)
 -include src/llvm/ll_main.d
