@@ -53,6 +53,27 @@ OPT    ?= -O3
 CFLAGS = -std=c11 -Wall -Wextra -g $(OPT) $(INC) -MMD -MP -U_FORTIFY_SOURCE -fno-stack-protector -fomit-frame-pointer -fzero-call-used-regs=skip -fno-stack-clash-protection -Wa,--noexecstack
 LDFLAGS :=
 
+# M146 port (from asnix, never ported here before now): statically
+# link mimalloc into the final `ll` executable as a process-wide
+# override of malloc/free/calloc/realloc -- same mechanism, same
+# "no source change needed" proof (mimalloc's static archive already
+# exports standard-named malloc/free/calloc/realloc symbols) asnix's
+# own Makefile already uses in production. This project's own
+# flake.nix already exports `ASNIX_MIMALLOC_LIB` for exactly this
+# (shellHook sets it, matching asnix's own devShell convention) --
+# this Makefile just never consumed it. Falls back to a portable
+# system-mimalloc link probe outside the flake's devShell, then to
+# plain glibc malloc if neither is available -- never a hard build
+# failure either way.
+ifdef ASNIX_MIMALLOC_LIB
+MIMALLOC_LDLIBS := $(ASNIX_MIMALLOC_LIB) -lpthread
+else
+MIMALLOC_PROBE := $(shell printf 'int main(void){return 0;}' | $(CC) -xc - -lmimalloc -o /dev/null 2>/dev/null && echo yes)
+ifeq ($(MIMALLOC_PROBE),yes)
+MIMALLOC_LDLIBS := -lmimalloc -lpthread
+endif
+endif
+
 MAKEFLAGS += -j$(shell nproc 2>/dev/null || echo 4)
 
 ASM_SRCS := $(wildcard src/asm/*.S)
@@ -75,7 +96,7 @@ test: ll
 	bash tests/difftest.sh
 
 ll: src/llvm/ll_main.o libll.a
-	$(CC) $(LDFLAGS) -o $@ src/llvm/ll_main.o -L. -lll
+	$(CC) $(LDFLAGS) -o $@ src/llvm/ll_main.o -L. -lll $(MIMALLOC_LDLIBS)
 
 libll.a: $(LIB_OBJS)
 	ar rcs $@ $(LIB_OBJS)
