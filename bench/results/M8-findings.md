@@ -981,3 +981,93 @@ on workloads that exercise dispatch, by a wide and consistent
 margin. A real-world nixpkgs evaluation is not such a workload. It
 is dominated by other costs this project does not touch, and asnix
 stays a little ahead there, honestly measured.
+
+## LLVM-specific capabilities: two real wins, three honest negatives
+
+A research pass asked a narrow question. What can `ll` exploit now
+that it is compiled by clang, that asnix cannot have at all. asnix
+has no compiler reading a profile, since it is hand-written
+assembly. Five ideas came out of that pass. Two agents implemented
+and measured all of them, each in its own worktree. The result is
+two real, kept wins and three honest negative results, all measured
+rather than assumed.
+
+Profile-guided optimization is the first real win, and the headline
+item. A new, opt-in `make pgo` target runs the standard clang
+pipeline. It builds an instrumented binary. It runs that binary over
+a training set, the ten synthetic workloads plus ten real nixpkgs
+packages chosen for size and domain variety. It merges the resulting
+profile data. It rebuilds with that profile fed back in. The
+training set deliberately excludes `ffmpeg-full.outPath` itself, the
+project's held-out measurement target, so the result is not an
+overfitting artifact. Measured on that held-out expression, the
+profile-guided binary runs 6,609,724,718 instructions against the
+plain build's 6,646,004,511, a real, deterministic 0.55 percent
+reduction. Wall-clock showed no reliable signal. `ffmpeg-full.outPath`
+spends most of its time in shared frontend and builtin work that
+PGO's clang-only scope cannot touch. This is consistent with the
+smaller, dispatch-only slice improving by more than the overall 0.55
+percent, but that breakdown was not directly measured. Do not treat
+it as checked.
+
+`-march=native` is the second real win, and the larger of the two. A
+new, opt-in `make ll-native` target builds the clang-compiled files
+for this specific machine's CPU instead of a generic x86-64 target.
+`objdump` checked this directly: zero AVX register uses in the
+generic build, twenty-one in the native one. Early, unpinned
+`hyperfine` comparisons on this shared machine were noisy. They were
+noisy enough to flip sign between runs, from a misleading 1.09-1.11
+times faster to the opposite direction under higher load. Pinning
+both sides to the same CPU core with `taskset`, and testing both
+orderings, fixed this. The result is a consistent, real 1.04 times
+wall-clock improvement on `ffmpeg-full.outPath`. This comes with an
+explicit, documented tradeoff. The binary is tied to the build
+machine's own CPU. It can fail outright on a different one. It is
+never the default for that reason.
+
+Thin LTO, scoped only to the clang-compiled files, gave no
+measurable win, roughly 1.03 times slower, within noise. The agent
+reverted it and left a plain negative-result note in the Makefile.
+
+`__builtin_expect` branch hints, applied to every unambiguously-cold
+branch across the op handlers (fatal errors, stack overflow checks,
+type mismatches), gave a clear, repeatable regression. 6,661,804,998
+instructions against a freshly measured baseline of 6,645,949,556, a
+0.239 percent increase, checked twice. Bisection traced almost all of
+it to four small helpers. Those helpers are inlined into nearly
+every single op handler: the valstack and retsp overflow checks, and
+the arena and env allocator fast paths. The likely explanation: if a
+branch's taken side calls a `noreturn`-attributed function, clang
+already treats that branch as cold by default. The explicit hint was
+redundant on its own for that reason. Its earlier-pass lowering then
+fought with that later, more precise analysis, once inlined this
+pervasively under the already tight register pressure `preserve_none`
+creates. The agent reverted the change in full. Nothing from it is
+left in the tree.
+
+A sixth idea came from a separate request, not this research pass's
+own list, and went through two further implementations. The idea:
+fuse consecutive identical ops at `ir_link` time, the same technique
+the existing `OP_PUSH_INT_RUN` fusion already uses. One attempt
+generalized this to attribute-selection chains. The other generalized
+it to the `OP_FRAME_GET`-then-`OP_MK_ATTRS` sequence every `rec {}`
+literal compiles to. Both were implemented correctly. Both passed
+the full correctness suite plus dedicated edge cases. Both measured
+as small, repeatable regressions rather than wins: 10 million and
+10.4 million more instructions on `ffmpeg-full.outPath`. The select-
+chain case traced to `ir_link`'s own lookahead cost. That cost runs
+unconditionally on every `OP_SELECT`, fusing or not, and outweighs
+the runtime savings from the cases that did fuse. The attrset case
+has no fully checked cause. One plausible, unchecked guess: the
+larger, loop-bodied replacement handler interacts less favorably
+with `preserve_none` than the sum of the small handlers it replaces.
+Neither change is merged. The attrset attempt's worktree stays at
+`/tmp/ll-worktree-fused-attrs` (branch `fused-frame-get-mk-attrs`)
+for anyone who wants to dig into the real cause before trying again.
+The select-chain attempt was fully reverted and removed.
+
+The lesson across all five of these attempts: the `OP_PUSH_INT_RUN`
+fusion's success does not generalize by analogy alone. Every one of
+these five ideas looked plausible from first principles. Two held up
+under measurement. Three did not, for three different, mostly-
+understood reasons. Measure before trusting any of them.
