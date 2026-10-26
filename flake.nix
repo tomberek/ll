@@ -56,6 +56,11 @@
             # explicitly so `llvm-profdata` on PATH is always the one
             # that understands clang 19's profile data.
             llvmPackages_19.llvm
+            # lld, for `make ll-flto` (full LTO across the clang-compiled
+            # files, src/llvm/**): neither gold nor bfd (binutils' own
+            # linker, already on PATH above) carries the LLVM bitcode LTO
+            # plugin, so a `clang -flto=full` link needs lld specifically.
+            llvmPackages_19.lld
           ];
           shellHook = ''
             export LL_ROOT=$(pwd)

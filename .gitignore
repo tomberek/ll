@@ -15,3 +15,6 @@
 # machine-specific, not source.
 /.native/
 /ll-native
+# Full LTO build artifacts (see Makefile's `ll-flto` target).
+/.flto/
+/ll-flto

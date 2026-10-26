@@ -327,20 +327,70 @@ $(NATIVE_OBJDIR)/%.o: %.S
 native-clean:
 	rm -rf $(NATIVE_DIR) $(NATIVE_BIN)
 
-# --- thin LTO: tried, reverted, NOT a target here ------------------------
-# Tried `-flto=thin` on the same clang-compiled-files-only scope as
-# -march=native above (compile with -flto=thin, link with clang
-# -flto=thin so lld runs the ThinLTO backend over the mix of LLVM-bitcode
-# .o's from src/llvm/** and plain native .o's from the FRONTEND_CC-
-# compiled frontend). Passed both correctness gates (44/44 difftest,
-# byte-identical ffmpeg-full output), but gave NO measurable win on
-# pkgs.ffmpeg-full.outPath wall-clock -- if anything, a ~1.03x slowdown,
-# well within hyperfine's run-to-run noise on this shared machine. Not
-# wired in as a target; if revisited, re-measure rather than assume this
-# still holds after other changes to src/llvm/**.
+# --- Full LTO (make ll-flto): opt-in, NOT part of `make ll`/`all` -------
+#
+# `-flto=thin` (the parallelized, summary-based cross-TU analysis) was
+# tried first and found nothing: passed both correctness gates but gave
+# no measurable win on pkgs.ffmpeg-full.outPath, if anything a ~1.03x
+# slowdown within hyperfine's noise on this shared machine. `-flto=full`
+# (whole-program analysis, not just per-TU summaries) found a real one:
+# 0.41% fewer instructions on the same held-out expression (callgrind,
+# deterministic, reproduced on rerun), ~1.01x wall-clock -- directionally
+# consistent with the Ir count but not independently conclusive on its
+# own given hyperfine's noise floor on this machine. Full LTO's usual
+# slow-monolithic-link downside doesn't bite at this codebase's size
+# (link time here is a fraction of a second).
+#
+# Same scope as -march=native above: only the clang-compiled files
+# (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c) get -flto=full;
+# the FRONTEND_CC(gcc)-compiled vendored frontend (src/c/*.c, src/asm/*.S)
+# is compiled identically to `make ll`, same reasoning as PGO/native
+# above (gcc doesn't emit LLVM bitcode, so there's nothing to LTO there
+# even if it understood the flag). The LINK step mixes LLVM-bitcode .o's
+# (from the clang+flto compiles) with plain ELF .o's (from the gcc
+# compiles) -- clang's own flto driver logic handles that mix correctly,
+# but the link itself needs `-fuse-ld=lld`: neither gold nor bfd (the
+# binutils linker already in this devShell) carries the LLVM bitcode LTO
+# plugin lld has built in. `nix develop`'s own `llvmPackages_19.lld`
+# (flake.nix) is what provides it.
+FLTO_DIR    := .flto
+FLTO_OBJDIR := $(FLTO_DIR)/obj
+FLTO_BIN    := ll-flto
+FLTO_FLAG   := -flto=full
+
+FLTO_ASM_OBJS := $(addprefix $(FLTO_OBJDIR)/,$(ASM_SRCS:.S=.o))
+FLTO_C_OBJS   := $(addprefix $(FLTO_OBJDIR)/,$(C_LIB_SRCS:.c=.o))
+FLTO_MAIN_OBJ := $(FLTO_OBJDIR)/src/llvm/ll_main.o
+FLTO_OBJS     := $(FLTO_ASM_OBJS) $(FLTO_C_OBJS) $(FLTO_MAIN_OBJ)
+FLTO_DEPS     := $(FLTO_OBJS:.o=.d)
+
+.PHONY: flto-clean
+
+$(FLTO_BIN): $(FLTO_OBJS)
+	$(CC) $(LDFLAGS) -fuse-ld=lld $(FLTO_FLAG) -o $@ $(FLTO_OBJS)
+
+$(FLTO_OBJDIR)/src/asm/%.o: src/asm/%.S
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(FLTO_OBJDIR)/src/c/%.o: src/c/%.c
+	@mkdir -p $(dir $@)
+	$(FRONTEND_CC) $(CFLAGS) -c -o $@ $<
+
+$(FLTO_OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(FLTO_FLAG) -c -o $@ $<
+
+$(FLTO_OBJDIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(FLTO_FLAG) -c -o $@ $<
+
+flto-clean:
+	rm -rf $(FLTO_DIR) $(FLTO_BIN)
 
 -include $(NATIVE_DEPS)
 -include $(PGO_GEN_DEPS)
 -include $(PGO_USE_DEPS)
+-include $(FLTO_DEPS)
 -include $(DEPS)
 -include src/llvm/ll_main.d
