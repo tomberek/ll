@@ -1772,6 +1772,67 @@ prototype. See `heap.h`'s `ASNIX_FORMALSMAP_MARKER` comment for the
 full design, and `op_misc.c`'s `ll_op_mk_formalsmap` for the
 handler.
 
+## A correction: the branch-miss gap is not a settled, inherent cost
+
+Earlier in this session, the remaining branch-miss gap against iets
+was called an inherent cost of indirect-jump threaded dispatch.
+ll/asnix sees about 27.8 million branch misses on the standard
+benchmark. iets sees about 19.6 million. That claim never had real
+evidence from iets's own code. A deep investigation found the real
+mechanism, and the claim was wrong.
+
+iets is not a bytecode VM with safe CALL/RET dispatch. It is a
+tree-walking recursive evaluator. Its own `eval` function dispatches
+on an IR node's kind through a jump table, the same kind of indirect
+jump ll/asnix uses for each op. Disassembly of the compiled iets
+binary showed this directly: the jump table serves around 34
+node kinds from one instruction address. ll/asnix spreads a similar
+number of targets across many separate dispatch sites instead of
+one. Which pattern predicts worse is not settled by this alone.
+
+A real, different asymmetry does exist. ll/asnix never uses a
+hardware CALL/RET for op-to-op or Nix-level call control flow, by
+design. This is the whole point of threaded dispatch: a Nix call/
+force chain never grows the native stack. iets's recursive evaluator
+does use real CALL/RET for this, through the compiled binary's own
+GOT-indirect call sites. Whether this specific difference explains
+the branch-miss gap is still open. Treat the branch-miss gap as
+unexplained, not as an inherent, unfixable cost, until a direct
+measurement settles it.
+
+## A tried and reverted idea: skip the Env allocation for unused lambda parameters
+
+When the body never references a lambda parameter, iets's own
+compiler marks it dead. It then skips allocating an environment slot
+for that parameter at call time. ll always allocates and binds
+every parameter's slot. This happens whether or not the body ever
+reads it. Porting iets's
+check looked like a safe, narrow win: fewer environment allocations,
+no change to Value representation or dispatch.
+
+The idea failed for a different reason than the ATerm cache did.
+Pinned `perf stat` on `ffmpeg-full.outPath` found instructions UP
+0.82% (matched by callgrind too, both consistent across three
+runs each), not down.
+
+The cause is where the compiler spends its own work. `ll`/`asnix`
+compile a whole imported file's AST into IR in one eager pass,
+before any thunk ever forces. A real `pkgs.ffmpeg-full.outPath` eval
+pulls in essentially the whole of nixpkgs this way. The new liveness
+scan ran once for every lambda in that whole source tree. It ran
+whether or not this one derivation's build path ever calls that
+lambda. The runtime saving (skipping one roughly-10-instruction arena
+bump per call) only ever paid off for a lambda that is both unused-
+parameter-shaped and actually called. On this benchmark, the
+compile-time cost, paid for every lambda in all of nixpkgs,
+outweighed the runtime saving, paid for only a fraction of them.
+
+Reverted (git checkout, not left in the tree). Both 44 of 44
+difftest cases and 14 hand-built cases matched before and after. The
+hand-built cases covered curry chains, shadowing, pattern-lambda
+defaults, `with`, dynamic attribute names, and `map`/`foldl'`. This
+was never a correctness question either.
+
 ## A tried and reverted idea: a cross-derivation ATerm escape cache
 
 The escape cache in `aterm.c` only shares work within one
