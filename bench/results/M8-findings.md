@@ -1807,3 +1807,47 @@ re-attempt a content-keyed cache for this exact cost, ATerm escaping,
 without a real change in the tradeoff. A cheaper content hash, or a
 workload with a much higher cross-derivation hit rate, changes that
 balance.
+
+## A missing port, found by comparing branch misses against asnix
+
+A fresh `ll`-vs-`iets` comparison on `ffmpeg-full.outPath` used
+pinned `perf stat`. It found `ll` with 31.7 million branch misses
+against `iets`'s 19.5 million, a much larger relative gap than the
+instruction-count gap alone. `asnix`, built from the same lineage
+and using the same threaded-dispatch design as `ll`, had only 27.7
+million. Two evaluators that use the same dispatch architecture do
+not usually differ by that much on branch misses, from the
+architecture alone. This pointed at something specific to `ll`, not
+a shared cost.
+
+`perf record -e branch-misses` on both binaries found the gap spread
+across glibc's own allocator functions. `_int_malloc`, `cfree`, and
+`malloc` together carried about 2.48 million branch misses in `ll`.
+The equivalent allocator functions in `asnix` carried about 0.90
+million. `asnix`'s own Makefile already links mimalloc, a faster
+allocator, as a process-wide override, from an earlier milestone
+(M146) that measured a real win there. `ll`'s own `flake.nix` already
+exports the same `ASNIX_MIMALLOC_LIB` variable asnix's Makefile
+consumes, but `ll`'s Makefile never read it. The milestone was never
+ported, not a result of any measurement against `ll` itself.
+
+The fix ports the same Makefile logic `asnix` already uses. If
+`ASNIX_MIMALLOC_LIB` is set, the build links that static archive.
+Otherwise, it probes for a system-installed mimalloc. Either way,
+this needs no source change, because mimalloc's own archive already
+exports standard `malloc`/`free`/`calloc`/`realloc` symbols.
+Measured on `ffmpeg-full.outPath` (pinned `perf stat`, three runs
+each):
+
+- instructions: down 6.66%
+- cycles: down 5.93%
+- wall clock: down 6.4%
+- branch misses: down 11.56%, from 31.5 million to 27.9 million,
+  closing nearly all of the gap with `asnix`'s own 27.7 million
+- peak RSS: up 2.4%, about 10 MB
+- minor page faults: down 3.9%, despite the higher RSS
+
+The RSS increase is a known mimalloc tradeoff (larger upfront
+segment reservations), not a new regression this fix introduced.
+Verified: 44/44 difftest, all 148 nixpkgs-hash pairs, a byte-
+identical `ffmpeg-full.outPath` diff against `asnix`.
