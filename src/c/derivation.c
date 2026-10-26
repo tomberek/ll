@@ -977,14 +977,49 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
     v = asnix_force_for_print(v);
     int tag = asnix_tag_of(v);
     if (tag == ASNIX_TAG_ATTRS) {
+        /* perf: the overwhelmingly common case here IS a genuine
+         * derivation (every derivation value reachable from a real
+         * `outPath`/`drvPath` string coercion has these three fields,
+         * see the invariant comment below) -- probe for all three
+         * directly via asnix_bshared_attrs_probe (a bounded multi-leaf
+         * walk, heap.h's UnionHdr, no allocation) instead of fully
+         * resolving `v` first. This was exactly the call site M88's own
+         * design doc flagged as highest-risk: reached directly from
+         * asnix_prim_derivation on a real mkDerivation attrset, the
+         * shape heavy `//`-chaining produces, previously paying a full
+         * materialize here just to look up three known keys. Falls
+         * through to the full resolve()-based scan below only when the
+         * probe can't find all three fields -- the rarer case (not a
+         * derivation at all), which genuinely needs to enumerate every
+         * entry for the json_mode/__toString/outPath fallbacks. */
+        uint32_t sym_type_fast = asnix_intern("type", 4);
+        uint32_t sym_drvpath_fast = asnix_intern("drvPath", 7);
+        uint32_t sym_outname_fast = asnix_intern("outputName", 10);
+        Value type_probe, drvpath_probe, outname_probe;
+        if (asnix_bshared_attrs_probe(v, sym_type_fast, &type_probe) &&
+            asnix_bshared_attrs_probe(v, sym_drvpath_fast, &drvpath_probe) &&
+            asnix_bshared_attrs_probe(v, sym_outname_fast, &outname_probe)) {
+            Value type_val = asnix_force_for_print(type_probe);
+            if (asnix_tag_of(type_val) != ASNIX_TAG_PTR) return;
+            int64_t tlen;
+            const char *tbytes = asnix_ptr_bytes(type_val, &tlen);
+            if (tlen != 10 || memcmp(tbytes, "derivation", 10) != 0) return;
+            Value drvpath_val = asnix_force_for_print(drvpath_probe);
+            Value outname_val = asnix_force_for_print(outname_probe);
+            int64_t dlen, olen;
+            const char *dbytes = asnix_ptr_bytes(drvpath_val, &dlen);
+            const char *obytes = asnix_ptr_bytes(outname_val, &olen);
+            char *dpath = dup_cstr(dbytes, (size_t)dlen);
+            char *oname = dup_cstr(obytes, (size_t)olen);
+            input_ref_add_built(out, dpath, oname);
+            free(dpath);
+            free(oname);
+            return;
+        }
         /* M88: `v` may be a lazy union header (heap.h) rather than a flat
          * Attrs -- resolve to the flat form FIRST so every raw `base`/
          * `count`/`entry` read below (and the `idx_*`/raw re-index pattern
-         * right after) operates on one consistent flat array. This
-         * function is exactly the kind of call site M88's design doc
-         * flagged as highest-risk: it's reached directly from
-         * asnix_prim_derivation on a real mkDerivation attrset, which is
-         * precisely the shape heavy `//`-chaining produces. */
+         * right after) operates on one consistent flat array. */
         v = asnix_bshared_attrs_resolve(v);
         const char *base = (const char *)(v.raw & ~0x7ULL);
         int64_t count = *(const int64_t *)(base + ASNIX_ATTRS_OFF_COUNT);
