@@ -19,7 +19,7 @@
  * with ASNIX_ENV_WITH_TAG so OP_WITH_TRY/a depth-relative var-ref walk
  * can recognize it later. */
 LL_OP_ATTR Value ll_op_with(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
-    Env *frame = asnix_env_alloc(env, 1);
+    Env *frame = ll_env_alloc(env, 1);
     frame->up |= ASNIX_ENV_WITH_TAG;
     vs--;
     ll_env_set(frame, 0, vs[0]);

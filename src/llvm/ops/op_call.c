@@ -26,7 +26,7 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
             static const char msg[] = "asnix: call argument count does not match arity, aborting\n";
             asnix_fatal(msg, sizeof(msg) - 1);
         }
-        Env *new_env = asnix_env_alloc(c->up, argc);
+        Env *new_env = ll_env_alloc(c->up, argc);
         for (int64_t i = 0; i < argc; i++) new_env->values[i] = callee_slot[1 + i];
 
         vs = callee_slot; /* pop callee+args in one shot */

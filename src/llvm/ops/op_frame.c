@@ -4,7 +4,7 @@
 
 LL_OP_ATTR Value ll_op_frame_alloc(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t nslots = ip->a;
-    env = asnix_env_alloc(env, nslots); /* slots left uninitialized -- every slot is
+    env = ll_env_alloc(env, nslots); /* slots left uninitialized -- every slot is
                                           * written by an OP_FRAME_SET before anything
                                           * can read it (see compiler.c) */
     LL_NEXT(ip, env, vs, pool, rs);

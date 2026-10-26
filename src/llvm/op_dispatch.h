@@ -157,6 +157,56 @@ static inline void *ll_arena_alloc(uint64_t n) {
     return cur;
 }
 
+/* env_arena.S's own bump-pointer state -- asm-only today (like
+ * stacklimits.S's globals above), no C header declares cur/end
+ * (env.h only exposes asnix_env_arena_base, needed by every up-
+ * decompression site across the codebase); asnix_stats_env/_elements
+ * DO already have extern declarations (stats.h), but are re-declared
+ * here too rather than pulling in a whole new include for two counters,
+ * matching how this file prefers local, narrowly-scoped externs (see
+ * stacklimits.S's globals just above). */
+extern uint8_t *asnix_env_arena_cur;
+extern uint8_t *asnix_env_arena_end;
+extern uint64_t asnix_stats_env;
+extern uint64_t asnix_stats_env_elements;
+
+/* Inlined fast path for env_arena.S's own bump allocator -- the
+ * SEPARATE, dedicated, bounded Env arena (env_arena.S/env.h's own
+ * comment on why Env gets its own arena instead of sharing the general
+ * asnix_arena ll_arena_alloc above wraps), mirroring asnix_env_alloc's
+ * (env.S) logic exactly: size = ASNIX_ENV_OFF_VALUES + nslots*8, rounded
+ * up to 4 (NOT 8 -- Env is never a tagged Value, env.h/env_arena.S's own
+ * comments), bump-allocate from asnix_env_arena_cur/_end, bump
+ * asnix_stats_env/_elements, then compress (NULL-safe) and write `up`
+ * into the new Env's ASNIX_ENV_OFF_UP field. OP_FRAME_ALLOC (op_frame.c),
+ * OP_CALL's closure branch (op_call.c), and OP_WITH (op_with.c) all call
+ * this as a real, non-tail call mid-handler -- same register-spill
+ * problem ll_arena_alloc above fixes for the general arena (confirmed
+ * via `objdump -d --disassemble=ll_op_frame_alloc`). The slow path
+ * (arena not yet lazily initialized -- cur==0 -- or this allocation
+ * doesn't fit before `end`) falls back to the real, unchanged
+ * asnix_env_alloc, so the one-time lazy init (mmap'ing the arena) and
+ * the hard ASNIX_ENV_ARENA_SIZE cap-exceeded abort stay centralized
+ * there exactly as before. */
+static inline Env *ll_env_alloc(Env *up, int64_t nslots) {
+    uint8_t *cur = asnix_env_arena_cur;
+    if (cur == NULL) {
+        return asnix_env_alloc(up, nslots);
+    }
+    uint64_t size = (uint64_t)ASNIX_ENV_OFF_VALUES + (uint64_t)nslots * 8;
+    uint64_t n4 = (size + 3) & ~(uint64_t)3;
+    uint8_t *new_cur = cur + n4;
+    if (new_cur > asnix_env_arena_end) {
+        return asnix_env_alloc(up, nslots);
+    }
+    asnix_env_arena_cur = new_cur;
+    asnix_stats_env++;
+    asnix_stats_env_elements += (uint64_t)nslots;
+    Env *e = (Env *)cur;
+    e->up = up ? (uint32_t)((uintptr_t)up - (uintptr_t)asnix_env_arena_base) : 0;
+    return e;
+}
+
 /* Guaranteed-tail-call dispatch to the next op, advancing IP by one
  * record first -- the direct C equivalent of dispatch.S's universal
  * NEXT tail ("IP += 16; jmp *(IP->handler)"). Must be the LAST
