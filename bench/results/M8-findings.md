@@ -1833,6 +1833,35 @@ hand-built cases covered curry chains, shadowing, pattern-lambda
 defaults, `with`, dynamic attribute names, and `map`/`foldl'`. This
 was never a correctness question either.
 
+## A real win: vectorized ATerm/JSON escape scanning
+
+ll's escape scanner for both the ATerm (`.drv`) format and JSON used
+scalar bit-twiddling, eight bytes per step. The same investigation
+that found the branch-miss correction above also read iets's own
+scanner (`bytescan.rs`). iets uses real vector hardware instructions
+instead, sixteen bytes per step.
+
+A git history check on iets found a sharper reason to act on this.
+iets itself once had the identical scalar scanner, down to the same
+fuzz-test name ll's own code comment cites as its source. A later
+iets commit replaced that scanner with the vector version. ll's own
+port was never updated to track that change.
+
+The fix adds a vector path for x86-64 and 32-bit x86. SSE2 is part
+of the baseline instruction set on both, so the build needs no extra
+flag. The existing scalar scanner stays as the fallback, for every
+other target and for the last few bytes of any string. Measured on
+`ffmpeg-full.outPath`: instructions down 1.56% to 1.84% (callgrind
+and pinned `perf stat` agree), wall clock down 3.9%.
+
+The fix passed 44 of 44 difftest cases, 148 of 148 nixpkgs-hash
+pairs, and a byte-identical `ffmpeg-full.outPath` diff against
+`asnix`. It also passed 440 generated cases. Each one placed an
+escaped byte at a random position, in strings of every length from
+0 to 39. That length range crosses the scanner's own 16-byte step
+boundary. Hand-built cases at exact 8, 16, and 32-byte lengths
+passed too.
+
 ## A tried and reverted idea: a cross-derivation ATerm escape cache
 
 The escape cache in `aterm.c` only shares work within one
