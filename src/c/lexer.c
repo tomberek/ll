@@ -750,7 +750,15 @@ static Token lex_normal(Lexer *lx) {
         }
 
         if (cc_space(c)) {
-            lx->pos = i + 1;
+            /* perf: skip the whole run of whitespace in one tight loop
+             * instead of bouncing back through the outer dispatch (the
+             * '\0'/'#'/block-comment/path-literal checks above) once
+             * per space character -- real nixpkgs source is mostly
+             * indentation and blank lines. cc_space('\0') is false (see
+             * CHAR_CLASS above), so this stops at end of input exactly
+             * like the outer loop's own '\0' case would. */
+            do { i++; } while (cc_space(src[i]));
+            lx->pos = i;
             continue;
         }
         if (c == '#') { /* line comment, a harmless real-Nix-ism to allow in fixtures */
