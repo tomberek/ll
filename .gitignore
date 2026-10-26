@@ -4,3 +4,14 @@
 /ll
 /smoke
 /hello-jit
+# PGO build artifacts (see Makefile's `pgo` target) -- training-data-
+# dependent, not source.
+*.profraw
+*.profdata
+/.pgo/
+/ll-pgo
+/ll-pgo-gen
+# -march=native build artifacts (see Makefile's `ll-native` target) --
+# machine-specific, not source.
+/.native/
+/ll-native
