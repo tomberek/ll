@@ -356,6 +356,44 @@
 #define ASNIX_THUNKMAP_SIZE           32
 #define ASNIX_THUNKMAP_MAX_IDX        0xFFFF /* idx must fit in the packed word's top 16 bits */
 
+/* FormalsMap (`ll`-only, no asnix equivalent): same
+ * high-bit-pointer-tagging trick as ThunkMap just above, applied to a
+ * DIFFERENT per-call-shared computation -- binding a pattern-matched
+ * lambda's REQUIRED formals (`{a, b, ...}:`, no default value) without
+ * allocating a separate Thunk per formal. A required formal's binding is
+ * always exactly "select this already-known-present field from the call's
+ * own attrset argument, forced" -- no arbitrary user code to run (unlike
+ * ThunkMap's callback `f`), so the resolver below is a fixed, native
+ * sequence, not a re-entry into the bytecode interpreter.
+ *
+ *   FormalsMapDesc:
+ *     { int64_t marker == ASNIX_FORMALSMAP_MARKER (-7);
+ *       Value  arg;   // the call's own attrset argument (OP_CHECK_FORMALS
+ *                      // already validated every required field present)
+ *       const int64_t *syms;  // compile-time-shared, one entry per formal
+ *                              // POSITION (same order as the fieldframe's
+ *                              // own Env slots) -- only ever read at a
+ *                              // position this mechanism actually covers
+ *       Env   *env; }   // the callee's own fieldframe -- memoization
+ *                       // writes back into env->values[idx] directly,
+ *                       // there is no separate "out" object the way
+ *                       // ThunkMap's per-element Attrs entry is
+ *   packed element word (lives in env->values[idx], written by the
+ *   OP_FRAME_SET sequence the same way a Thunk pointer would be):
+ *     desc_ptr | (idx << 48) | ASNIX_TAG_PTR
+ *
+ * Memoization mirrors ThunkMap's own "self-mutate the slot this packed
+ * word came from" trick exactly (heap.h's ASNIX_THUNKMAP_MARKER comment,
+ * point 1-3), just targeting env->values[idx] instead of an Attrs entry.
+ */
+#define ASNIX_FORMALSMAP_MARKER    (-7)
+#define ASNIX_FORMALSMAP_OFF_MARKER 0
+#define ASNIX_FORMALSMAP_OFF_ARG    8
+#define ASNIX_FORMALSMAP_OFF_SYMS   16
+#define ASNIX_FORMALSMAP_OFF_ENV    24
+#define ASNIX_FORMALSMAP_SIZE       32
+#define ASNIX_FORMALSMAP_MAX_IDX    0xFFFF
+
 /* List: {int64_t count; Value elems[count];} */
 #define ASNIX_LIST_OFF_COUNT 0
 #define ASNIX_LIST_OFF_ELEMS 8

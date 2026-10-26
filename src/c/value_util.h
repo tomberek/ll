@@ -165,6 +165,20 @@ int asnix_value_is_thunkmap(Value v);
  * memoization proof. */
 Value asnix_resolve_thunkmap(Value v);
 
+/* ll-only, no asnix equivalent: see heap.h's ASNIX_FORMALSMAP_MARKER
+ * comment for the full design -- mirrors the four ThunkMap functions
+ * just above, for a different per-call-shared computation (binding a
+ * pattern-lambda's required formals without one Thunk per formal).
+ * Measured on ffmpeg-full.outPath: -3.42% instructions (callgrind),
+ * -5.06% instructions / -27.5% wall clock (pinned perf), -11.5% peak
+ * RSS, -10.9% minor page faults, -8% cache misses, vs. the prior
+ * one-Thunk-per-required-formal baseline -- see M8-findings.md. */
+void *asnix_formalsmap_make_desc(Value arg, const int64_t *syms, void *env);
+Value asnix_formalsmap_pack(void *desc, int64_t idx);
+int asnix_value_is_formalsmap(Value v);
+Value *asnix_formalsmap_slot(Value v);
+Value asnix_resolve_formalsmap(Value v);
+
 /* The ancestor-cycle-detection key main.c's printer needs for a ThunkMap
  * word: a pointer to the SPECIFIC output slot this element's result will
  * be (or already was) memoized into -- unique per (desc, idx) pair, unlike

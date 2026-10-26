@@ -3,12 +3,17 @@
  * Five independent, lower-traffic ops, all deferred (same as asnix's own
  * asm) to a single vendored C helper each -- this file is just SysV/
  * dispatch glue, no hand-rolled logic duplicating what the vendored
- * helpers already do. */
+ * helpers already do. Plus one ll-only op with no asnix equivalent,
+ * OP_MK_FORMALSMAP, added right after its closest relative,
+ * OP_CHECK_FORMALS (see that op's own FormalsMap comment below). */
 #include "ops.h"
 
 #include "builtins_shared.h"
 #include "attrs_update.h"
 #include "tryeval.h"
+#include "value_util.h" /* asnix_formalsmap_make_desc/_pack */
+#include "env_helpers.h" /* ll_env_frame_exit, to reach the arg frame */
+#include "../ll_resolve.h" /* ll_resolve_indirection, to unwrap the arg slot */
 
 /* asnix_resolve_search_path_value (compiler.c) is non-static (asm calls
  * it directly via `call` with no header -- see op_resolve_search_path.S)
@@ -75,6 +80,48 @@ LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *poo
             asnix_bshared_cf_extra_fatal(sym); /* _Noreturn */
         found:;
         }
+    }
+
+    LL_NEXT(ip, env, vs, pool, rs);
+}
+
+/* OP_MK_FORMALSMAP (ll-only, no asnix equivalent -- see ir.h/heap.h): no
+ * VALSTACK effect at all -- `env` is already the fieldframe this op's own
+ * compiled body belongs to (same convention OP_FRAME_SET already relies
+ * on), and the call's own attrset argument always lives at depth 1,
+ * slot 0 from here (ll_env_frame_exit's own "decompress `up`" helper,
+ * same mechanism OP_FRAME_EXIT uses, reused here just to READ the
+ * enclosing frame rather than to leave it). Must run after
+ * OP_CHECK_FORMALS (which already validated every one of these syms is
+ * present) and after OP_FRAME_ALLOC (so `env` is a real, live frame to
+ * write into), before any OP_FRAME_SET for a formal this op itself
+ * covers. */
+LL_OP_ATTR Value ll_op_mk_formalsmap(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+    int64_t nf = ip->a;
+    int64_t pool_idx = ip->b;
+    Env *argframe = ll_env_frame_exit(env);
+
+    /* The call's argument is lazy (a Thunk-tagged slot, or a Cell/
+     * ThunkMap/etc chain over one), and OP_CHECK_FORMALS -- emitted just
+     * before this op -- forces it on VALSTACK for validation but never
+     * writes the forced result back into argframe->values[0]. Reading
+     * that slot raw would hand the descriptor an unresolved Thunk
+     * pointer instead of the ground Attrs, so unwrap it exactly like
+     * OP_VAR_REF's own FORCED branch does: resolve any Cell/ThunkMap
+     * indirection, then, if what's left is a Thunk, it is guaranteed
+     * already FORCED (by OP_CHECK_FORMALS moments earlier), so pull the
+     * cached ground value straight out of its `env` field. */
+    Value arg = argframe->values[0];
+    arg = ll_resolve_indirection(arg);
+    if ((arg.raw & ASNIX_TAG_MASK) == ASNIX_TAG_THUNK) {
+        Thunk *t = (Thunk *)ll_untag(arg);
+        arg.raw = t->env;
+    }
+
+    void *desc = asnix_formalsmap_make_desc(arg, &pool[pool_idx], env);
+    for (int64_t i = 0; i < nf; i++) {
+        if (pool[pool_idx + i] == -1) continue; /* this formal uses the ordinary thunk path instead */
+        env->values[i] = asnix_formalsmap_pack(desc, i);
     }
 
     LL_NEXT(ip, env, vs, pool, rs);

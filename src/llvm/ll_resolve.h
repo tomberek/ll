@@ -49,6 +49,10 @@ static inline Value ll_resolve_indirection(Value v) {
             v = asnix_resolve_thunkmap(v);
             continue;
         }
+        if (marker == ASNIX_FORMALSMAP_MARKER) { /* ll-only, see heap.h */
+            v = asnix_resolve_formalsmap(v);
+            continue;
+        }
         return v;
     }
 }

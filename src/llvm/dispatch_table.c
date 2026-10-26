@@ -78,6 +78,7 @@ void *ll_handler_table[OP_COUNT] = {
     [OP_SELECT_DYNAMIC_OR] = (void *)ll_op_select_dynamic_or,
 
     [OP_CHECK_FORMALS] = (void *)ll_op_check_formals,
+    [OP_MK_FORMALSMAP] = (void *)ll_op_mk_formalsmap,
     [OP_ASSERT_FAIL] = (void *)ll_op_assert_fail,
     [OP_INSERT_DYNAMIC_ATTR] = (void *)ll_op_insert_dynamic_attr,
     [OP_REC_OVERRIDES_MERGE] = (void *)ll_op_rec_overrides_merge,

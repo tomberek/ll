@@ -331,6 +331,20 @@ size_t ib_check_formals(IrBuilder *b, int64_t required_count, const uint32_t *re
     return ib_emit(b, OP_CHECK_FORMALS, required_count, (int64_t)pool_idx);
 }
 
+/* ll-only, no asnix equivalent, see ir.h's OP_MK_FORMALSMAP comment:
+ * `syms[i]` is the formal at POSITION i's symbol id if it uses this
+ * mechanism (a required formal, no default), or -1 if it does not (an
+ * optional-with-default formal, left to the ordinary per-formal thunk
+ * path the caller still emits separately). */
+size_t ib_mk_formalsmap(IrBuilder *b, int64_t nf, const int64_t *syms) {
+    size_t pool_idx = (size_t)-1;
+    for (int64_t i = 0; i < nf; i++) {
+        size_t idx = ib_pool_add(b, syms[i]);
+        if (i == 0) pool_idx = idx;
+    }
+    return ib_emit(b, OP_MK_FORMALSMAP, nf, (int64_t)pool_idx);
+}
+
 size_t ib_select_or(IrBuilder *b, uint32_t sym) {
     return ib_emit(b, OP_SELECT_OR, 0, (int64_t)sym);
 }

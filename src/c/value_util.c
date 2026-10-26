@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include "asnix/arena.h"
+#include "asnix/env.h" /* Env, for asnix_resolve_formalsmap's writeback */
 #include "asnix/heap.h"
 #include "asnix/ir.h" /* asnix_force_for_print, asnix_apply */
 #include "asnix/stats.h"
@@ -235,6 +236,71 @@ Value asnix_resolve_thunkmap(Value v) {
      * returned successfully; an exception unwinding past the call above
      * never reaches this line at all, so there is no partial state to
      * clean up -- same reasoning as asnix_resolve_lazyapp above). */
+    *slot = result;
+    return result;
+}
+
+/* ll-only, no asnix equivalent: see heap.h's ASNIX_FORMALSMAP_MARKER
+ * comment for the full design. Mirrors thunkmap_desc_of/idx_of above --
+ * same packing scheme, same ASNIX_PTR_BASE_MASK. */
+static void *formalsmap_desc_of(Value v) {
+    return (void *)(uintptr_t)(v.raw & ASNIX_PTR_BASE_MASK);
+}
+
+static int64_t formalsmap_idx_of(Value v) {
+    return (int64_t)(v.raw >> 48);
+}
+
+void *asnix_formalsmap_make_desc(Value arg, const int64_t *syms, void *env) {
+    void *mem = asnix_arena_alloc(ASNIX_FORMALSMAP_SIZE);
+    *(int64_t *)((char *)mem + ASNIX_FORMALSMAP_OFF_MARKER) = ASNIX_FORMALSMAP_MARKER;
+    *(Value *)((char *)mem + ASNIX_FORMALSMAP_OFF_ARG) = arg;
+    *(const int64_t **)((char *)mem + ASNIX_FORMALSMAP_OFF_SYMS) = syms;
+    *(void **)((char *)mem + ASNIX_FORMALSMAP_OFF_ENV) = env;
+    return mem;
+}
+
+Value asnix_formalsmap_pack(void *desc, int64_t idx) {
+    uint64_t p = (uint64_t)(uintptr_t)desc;
+    return (Value){ .raw = p | ((uint64_t)idx << 48) | ASNIX_TAG_PTR };
+}
+
+int asnix_value_is_formalsmap(Value v) {
+    if (asnix_tag_of(v) != ASNIX_TAG_PTR) return 0;
+    const void *base = formalsmap_desc_of(v);
+    return *(const int64_t *)((const char *)base + ASNIX_FORMALSMAP_OFF_MARKER) == ASNIX_FORMALSMAP_MARKER;
+}
+
+Value *asnix_formalsmap_slot(Value v) {
+    void *desc = formalsmap_desc_of(v);
+    int64_t idx = formalsmap_idx_of(v);
+    Env *env = *(Env **)((char *)desc + ASNIX_FORMALSMAP_OFF_ENV);
+    return &env->values[idx];
+}
+
+Value asnix_resolve_formalsmap(Value v) {
+    Value *slot = asnix_formalsmap_slot(v);
+    if (slot->raw != v.raw) {
+        /* Already forced by some earlier reference to this same formal --
+         * same bit-identical memoization proof as ThunkMap's own. */
+        return *slot;
+    }
+    void *desc = formalsmap_desc_of(v);
+    int64_t idx = formalsmap_idx_of(v);
+    Value arg = *(Value *)((char *)desc + ASNIX_FORMALSMAP_OFF_ARG);
+    const int64_t *syms = *(const int64_t **)((char *)desc + ASNIX_FORMALSMAP_OFF_SYMS);
+    uint32_t sym = (uint32_t)syms[idx];
+    /* OP_CHECK_FORMALS already validated this exact sym is present on
+     * `arg` before this frame's own body could ever run -- this mechanism
+     * only ever covers a REQUIRED formal (no default), so there is no
+     * missing-field case to handle here, unlike a general select. */
+    int64_t found = asnix_bshared_attrs_find(arg, sym);
+    Value raw_value = asnix_bshared_attrs_value(arg, found);
+    /* Match OP_SELECT's own forcing exactly -- a plain required-formal
+     * binding compiles to a bare `arg.field` select, which always forces
+     * its result (op_select.c's own ll_op_select calls
+     * asnix_force_for_print on the selected entry before pushing it). */
+    Value result = asnix_force_for_print(raw_value);
     *slot = result;
     return result;
 }

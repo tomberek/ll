@@ -485,6 +485,21 @@ enum {
     OP_HAS_ATTR_IF, /* a = byte delta to else (patched via ib_patch_delta); b = symbol id
                       * (same a/b roles as OP_WITH_TRY/OP_SELECT_OR) -- pops a value, same
                       * never-forces/never-fatal-on-non-attrset semantics as plain OP_HAS_ATTR */
+    OP_MK_FORMALSMAP, /* ll-only, no asnix equivalent: a = formal count (nf), b = pool index
+                        * of an nf-length array of symbol ids, one per formal POSITION (same
+                        * order as the fieldframe's own slots); a sentinel -1 marks a formal
+                        * with a default (not covered by this mechanism, left for the
+                        * ordinary per-formal thunk path). No VALSTACK effect at all -- `env`
+                        * is already the fieldframe this op's own compiled body belongs to
+                        * (OP_FRAME_ALLOC just switched it), and the call's attrset argument
+                        * lives one frame up, at depth 1 slot 0, reached via env->up. Emitted
+                        * right after OP_FRAME_ALLOC and before any OP_FRAME_SET, immediately
+                        * following OP_CHECK_FORMALS in the same compiled lambda-pattern body
+                        * -- writes one packed FormalsMap word directly into env->values[i]
+                        * for every formal this op covers, skipping the thunk/OP_FRAME_SET
+                        * pair entirely for those slots. See heap.h's ASNIX_FORMALSMAP_MARKER
+                        * comment for the full design and op_misc.c's ll_op_mk_formalsmap for
+                        * the handler. */
     OP_COUNT
 };
 

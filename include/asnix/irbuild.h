@@ -214,6 +214,9 @@ size_t ib_has_attr_dynamic(IrBuilder *b);
 size_t ib_check_formals(IrBuilder *b, int64_t required_count, const uint32_t *required_syms_sorted,
                          int64_t total_count, const uint32_t *all_syms_sorted);
 
+/* ll-only, no asnix equivalent: see ir.h's OP_MK_FORMALSMAP comment. */
+size_t ib_mk_formalsmap(IrBuilder *b, int64_t nf, const int64_t *syms);
+
 /* `expr.attr or default`: emits with a placeholder delta (operand `a`,
  * patched via ib_patch_delta, same convention as ib_if/ib_jmp/ib_with_try)
  * and the fixed symbol id `sym` (operand `b`) -- see OP_SELECT_OR in ir.h. */

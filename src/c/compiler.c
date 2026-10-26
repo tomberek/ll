@@ -1314,6 +1314,27 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             /* -- The letrec-capable field frame. -- */
             ib_frame_alloc(body_b, (int64_t)nf);
 
+            /* ll-only, no asnix equivalent, see ir.h's OP_MK_FORMALSMAP
+             * comment: one shared descriptor for every REQUIRED (no
+             * default) formal, instead of one Thunk each. Must run here,
+             * right after ib_frame_alloc and before any per-formal
+             * ib_frame_set below -- same "frame exists before anything
+             * writes into it" ordering ib_check_formals/ib_frame_alloc
+             * above already established for the thunk-based path. */
+            {
+                int formalsmap_on_stack = (nf <= ASNIX_COMPILE_SCRATCH_MAX);
+                int64_t fm_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                int64_t *fm_syms = formalsmap_on_stack ? fm_syms_stack : malloc((nf ? nf : 1) * sizeof(int64_t));
+                for (size_t i = 0; i < nf; i++) {
+                    fm_syms[i] = node->as.lambda.formals[i].default_
+                                     ? -1
+                                     : (int64_t)asnix_intern(node->as.lambda.formals[i].name,
+                                                              node->as.lambda.formals[i].name_len);
+                }
+                ib_mk_formalsmap(body_b, (int64_t)nf, fm_syms);
+                if (!formalsmap_on_stack) free(fm_syms);
+            }
+
             const char **field_names = nf_on_stack ? field_names_stack : malloc((nf ? nf : 1) * sizeof(char *));
             size_t *field_name_lens = nf_on_stack ? field_name_lens_stack : malloc((nf ? nf : 1) * sizeof(size_t));
             for (size_t i = 0; i < nf; i++) {
@@ -1323,12 +1344,21 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             ScopeFrame fieldframe = { .up = &argframe, .names = field_names, .name_lens = field_name_lens, .count = nf };
 
             for (size_t i = 0; i < nf; i++) {
+                /* A required (no default) formal already got its slot
+                 * written directly by ib_mk_formalsmap above -- nothing
+                 * left to compile or frame_set here, same way a Cell-
+                 * aliased bare variable elsewhere skips the thunk path
+                 * entirely. Only an optional-with-default formal reaches
+                 * the rest of this loop body. */
+                if (node->as.lambda.formals[i].default_ == NULL) continue;
+
                 /* Each field's thunk body resolves names against
                  * `fieldframe` (siblings, incl. itself and later fields --
                  * letrec) with `argframe` one level up (the raw attrset,
                  * and -- if given -- its `@` alias). Built from synthetic
                  * AST nodes so it goes through the exact same compile_expr
-                 * paths as hand-written source would. */
+                 * paths as hand-written source would: `if arg ? field then
+                 * arg.field else default`. */
                 Ast *arg_var = asnix_ast_new(AST_VAR);
                 arg_var->as.var.name = arg_names[0];
                 arg_var->as.var.name_len = arg_name_lens[0];
@@ -1338,25 +1368,19 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 select_node->as.select.attr = node->as.lambda.formals[i].name;
                 select_node->as.select.attr_len = node->as.lambda.formals[i].name_len;
 
-                Ast *field_body;
-                if (node->as.lambda.formals[i].default_ == NULL) {
-                    field_body = select_node; /* required: plain `arg.field` (aborts if missing, but
-                                                * OP_CHECK_FORMALS above already guaranteed it's present) */
-                } else {
-                    Ast *arg_var2 = asnix_ast_new(AST_VAR);
-                    arg_var2->as.var.name = arg_names[0];
-                    arg_var2->as.var.name_len = arg_name_lens[0];
-                    Ast *has_node = asnix_ast_new(AST_HAS_ATTR);
-                    has_node->as.has_attr.target = arg_var2;
-                    has_node->as.has_attr.attr = node->as.lambda.formals[i].name;
-                    has_node->as.has_attr.attr_len = node->as.lambda.formals[i].name_len;
+                Ast *arg_var2 = asnix_ast_new(AST_VAR);
+                arg_var2->as.var.name = arg_names[0];
+                arg_var2->as.var.name_len = arg_name_lens[0];
+                Ast *has_node = asnix_ast_new(AST_HAS_ATTR);
+                has_node->as.has_attr.target = arg_var2;
+                has_node->as.has_attr.attr = node->as.lambda.formals[i].name;
+                has_node->as.has_attr.attr_len = node->as.lambda.formals[i].name_len;
 
-                    Ast *if_node = asnix_ast_new(AST_IF);
-                    if_node->as.if1.cond = has_node;
-                    if_node->as.if1.then_ = select_node;
-                    if_node->as.if1.else_ = node->as.lambda.formals[i].default_;
-                    field_body = if_node;
-                }
+                Ast *if_node = asnix_ast_new(AST_IF);
+                if_node->as.if1.cond = has_node;
+                if_node->as.if1.then_ = select_node;
+                if_node->as.if1.else_ = node->as.lambda.formals[i].default_;
+                Ast *field_body = if_node;
 
                 if (try_cell_ref(body_b, field_body, &fieldframe)) {
                     /* nothing more to do -- OP_VAR_REF_CELL already emitted */

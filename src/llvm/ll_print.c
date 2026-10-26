@@ -161,6 +161,30 @@ static int print_peel_wrappers(Value *v_out, int *pushed_out) {
             v = asnix_resolve_thunkmap(v);
             continue;
         }
+        if (asnix_value_is_formalsmap(v)) { /* ll-only, see heap.h */
+            /* NOT asnix_formalsmap_slot(v): that's the bare env slot this
+             * descriptor memoizes into, which is the exact same address a
+             * `try_cell_ref`-emitted Cell wrapping this same formal (e.g.
+             * inside a list literal) already pushed one peel step up --
+             * colliding there flagged even the very first resolution as a
+             * false cycle (caught by a hand-built test printing the same
+             * required formal multiple times in one list literal). v.raw
+             * (tag bits set, idx packed into bits 48-63) is never bit-
+             * identical to a bare 8-byte-aligned pointer, so it can't
+             * collide with the Cell layer's own key, while still being
+             * identical across genuinely repeated resolutions of this
+             * same (descriptor, idx) pair. */
+            const void *slot_addr = (const void *)(uintptr_t)v.raw;
+            if (!print_active_push(slot_addr)) {
+                for (int i = 0; i < pushed; i++) print_active_pop();
+                printf("«repeated»");
+                *pushed_out = 0;
+                return 0;
+            }
+            pushed++;
+            v = asnix_resolve_formalsmap(v);
+            continue;
+        }
         break;
     }
     *v_out = v;

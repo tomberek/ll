@@ -75,6 +75,7 @@ LL_OP_ATTR Value ll_op_select_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *po
 LL_OP_ATTR Value ll_op_select_dynamic_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+LL_OP_ATTR Value ll_op_mk_formalsmap(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs); /* ll-only, see ir.h's OP_MK_FORMALSMAP */
 LL_OP_ATTR Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 LL_OP_ATTR Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 LL_OP_ATTR Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
