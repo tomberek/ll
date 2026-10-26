@@ -641,8 +641,23 @@ static Token lex_indented_run(Lexer *lx) {
         /* Plain content: everything else, including a lone '$' not
          * followed by '{', a lone '\'' not followed by another '\'', and
          * raw newlines (which indentation-stripping treats specially) --
-         * just extend the pending content run, nothing to write yet. */
-        i++;
+         * just extend the pending content run, nothing to write yet.
+         *
+         * perf: jump ahead to the next CANDIDATE boundary byte ('$' or
+         * '\'') via strchrnul instead of advancing one byte at a time --
+         * same "jump then verify" technique the comment-skip fix in
+         * lex_normal already uses, and the same safety contract
+         * (strchrnul never reads past the string's own NUL terminator).
+         * Searches from i+1, not i: the byte at i, if it IS '$' or '\'',
+         * already failed the real-boundary checks above (a lone '$' not
+         * followed by '{', or a lone '\'' not followed by another
+         * '\''), so re-finding it at the same position would never
+         * advance. A landed-on candidate that turns out to be another
+         * false positive just falls through these same checks again at
+         * the top of the loop, exactly as a plain byte would. */
+        const char *dollar = strchrnul(src + i + 1, '$');
+        const char *squote = strchrnul(src + i + 1, '\'');
+        i = (size_t)((dollar < squote ? dollar : squote) - src);
     }
 }
 
