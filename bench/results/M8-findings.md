@@ -1280,9 +1280,123 @@ small improvement, not a regression. Peak RSS 527,260KB to
 with `iets`. All four correctness gates stayed green after the
 merge.
 
-The remaining 39.4MB of the gap is not yet explained. The direct
-`//` path's own 52MB allocation is already tight, as shown above.
-Most of the remaining gap must sit in categories this round did not
-reach in detail. Some of it can also come from a difference between
-asnix's own baseline shape for a flat attrset entry and `iets`'s
-equivalent.
+A fuller accounting, in the next round below, found a different
+number: 62.4MB, not 39.4MB as first estimated here. The asnix
+census this section compares against counts only two of the real
+attrset-allocation sites. Three more sites exist: lazy-union leaf
+headers, dynamic `${...}` attribute insertion, and `removeAttrs`/
+`mapAttrs`. That census misses all three, on both sides of the
+comparison equally, but they are real. Counting every site gives
+`ll`'s true total as 116.6MB before the next round's fix.
+
+## Matching iets's exact `//` heuristic: the single biggest fix
+
+A full accounting counted every attrset-allocating site, not just
+the two the asnix census counts. It found `ll`'s real total at
+116.6MB against `iets`'s 54.3MB. That is a 62.4MB gap. The next step compared two designs: `asnix`'s
+own `//` logic, and `iets`'s exact algorithm. This went past
+`iets`'s MAX_LEAVES constant, already tried and rejected earlier
+this session. The comparison found three real differences. Each
+one is a free win on real nixpkgs code.
+
+1. `iets` returns the other side unchanged, with no allocation, for
+   `x // {}` or `{} // x`. `asnix`'s own design had no such check.
+   Real nixpkgs and stdenv code hits this constantly: optional
+   overrides, `lib.optionalAttrs false {...}`, and default-argument
+   attrsets.
+
+2. `asnix`'s own `asnix_attrs_update` resolved the RHS before it
+   even checked whether to defer. `iets` never forces the RHS up
+   front. Overlay composition often passes a still-deferred union
+   as the RHS of a `//`. `iets` keeps that union's own leaves
+   unresolved instead of flattening it right away.
+
+3. On leaf-budget overflow, `asnix`'s own design resolved the whole
+   left side and ran a full eager merge of both sides. `iets`
+   flattens only the left side, down to one leaf, and retries as a
+   fresh, short union. A naive copy of `iets`'s MAX_LEAVES=8
+   constant onto the OLD restart strategy did not have this piece.
+   That is likely why the earlier attempt measured worse: it paid
+   the old, expensive restart eight times more often, with no
+   cheaper alternative in place. The cheap restart makes the full
+   two-sided merge rare.
+
+Porting all three together, not each alone, closed most of the
+gap. On the real benchmark, `ll`'s true attrset-byte total fell
+from 116.6MB to 84.6MB. The gap with `iets` fell from 62.4MB to
+30.3MB. Instructions rose by 0.345%, a real, reproducible cost, not
+noise. Peak RSS fell 6.3%, and minor page faults fell 6.0%. Wall
+clock (hyperfine, 12 runs each) showed no measured change: 999.0ms
+to 978.5ms, well inside the run-to-run noise band.
+
+This result stands apart from every other memory-for-instructions
+trade tried this session. The K-way merge earlier in this document
+cost 2.4% more instructions for a 3.4% RSS gain. This same round
+tried, and again rejected, an exact-size two-pass version of the
+direct `//` path. That version cost 0.50% more instructions for
+only 0.26% RSS. Here the ratio runs the other way, about 18 to 1 in
+memory's favor. The metric that actually matters, wall clock, shows
+no cost at all. The fix was committed.
+
+All four correctness gates passed. So did several hand-built edge
+cases: empty operands on both sides, nested-union priority with
+duplicate keys spanning both sides' own sub-leaves, the eight-leaf
+overflow restart, and an unbounded RHS size. `asnix`'s own design
+capped the RHS at 16 entries for deferral. `iets`'s design, now
+ported, has no such cap.
+
+## The materialize path: where the rest of the gap lives
+
+With the fix above in place, a full breakdown by true origin
+covered every real attrset-constructing call site, not just the
+asnix census's two categories. It split `ll`'s remaining 84.6MB
+this way:
+
+- True literal syntax, `{...}` and `rec {...}`: 12.7MB.
+- The real `//` eager-merge fallback: 7.5MB.
+- Lazy-union leaf headers, deferred and not yet materialized: 2.5MB.
+- Dynamic `${...}` attribute insertion: 5.3MB.
+- `removeAttrs` and `mapAttrs`: 9.4MB.
+- The derivation-result attrset itself: 0.2MB.
+- The lazy-union materialize path, the final flatten that runs once
+  something needs a union's full key set: 41.3MB.
+
+The materialize path alone outweighs every other category combined.
+It is not one single cause. Breaking its 30,304 real flatten events
+down by the call site that triggered each one found five distinct
+causes, none dominant alone:
+
+- 1.19MB from `asnix_attrs_update`'s own leaf-budget-overflow
+  restart, flattening the accumulated left side of a long `//`
+  chain. A further 0.62MB comes from the same function's eager-
+  merge fallback flattening its right side. Both costs are a direct,
+  unavoidable part of the same heuristic change above. `iets` pays
+  this too, already counted inside its own 23.1MB `AttrsUpd` total.
+- 0.58MB from dynamic `${...}` attribute insertion, which needs a
+  flat base to insert into.
+- 0.58MB from `derivation.c`'s own two highest-risk call sites. This
+  codebase's own comments already flag both sites. Heavy `//`
+  chaining (stdenv's mkDerivation defaults merged with overrides)
+  meets a real consumer that needs the full result right there.
+- 0.4MB from a handful of `mapAttrs` calls, 27 in total, each one
+  over a very large attrset averaging more than 8,000 entries.
+- 0.22MB from the shared count-check helper behind `attrNames`,
+  `attrValues`, `hasAttr`, `getAttr`, and `removeAttrs`.
+
+Restricting the comparison to what `//` itself causes, the leaf
+headers, the eager fallback, and the two `asnix_attrs_update` rows
+above, gives 31.7MB. Against `iets`'s whole `AttrsUpd` total of
+23.1MB, that is a real but much smaller 1.37x gap, not the 2.2x the
+unrestricted total suggests. The remaining 19.3MB of the
+materialize total comes from other operations: `mapAttrs`, the
+attrNames family, derivation processing, and dynamic insertion.
+Each one reads the full contents of a union some earlier `//`
+built.
+This cost belongs to any lazy-union design, `iets`'s included. This
+project has no way to measure `iets`'s own equivalent split without
+changing `iets`'s own source, which is out of scope here.
+
+No further fix was attempted past this point. Every lead left
+standing is a smaller version of a trade already tried and rejected
+twice this session: tune the leaf-budget threshold further, or stop
+caching a one-off materialize result. Both carry a shrinking return.
