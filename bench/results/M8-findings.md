@@ -1071,3 +1071,74 @@ fusion's success does not generalize by analogy alone. Every one of
 these five ideas looked plausible from first principles. Two held up
 under measurement. Three did not, for three different, mostly-
 understood reasons. Measure before trusting any of them.
+
+## M7: the real conformance sweep, run against `ll` for the first time
+
+`ll` never had a working target for the external numtide/nix-
+conformance corpus. M7, the conformance milestone, stayed pending
+for this reason, not because the work was done and unremarkable.
+Running it for the first time (corpus cloned to /tmp/nix-conformance)
+gave a bad first result: 335 pass, 323 fail, 148 skip, against
+asnix's own 655 pass, 3 fail, 148 skip on the identical corpus.
+
+The dominant cause, 271 of the 323 failures alone: `ll_main.c`
+hardcoded the literal string `/tmp` as the base directory for every
+relative `import`. It also passed `NULL` for the file path that
+position-tracking builtins read. It did this regardless of which
+file was actually being evaluated. Every `eval-okay-regex-*` case
+failed on the exact same broken `import ./corpora/regex.nix`. The
+fix replicates asnix's own `eval_file.c` logic exactly: make the
+real file path absolute and canonical, then take its directory for
+imports and the path itself for position tracking. This alone
+brought the count to 639 pass, 19 fail, 148 skip.
+
+Before chasing the rest, a direct `diff` checked every vendored file
+in `src/c/` (derivation.c, string_context.c, builtins_compare.c,
+tryeval.c, and the rest) against asnix's own copy. They are byte-
+identical, down to the single header-comment line that naturally
+differs. This mattered for how the remaining 16 failures got
+investigated. None of them can be a bug in the shared, vendored
+logic, since that exact code already works in asnix. Every one has
+to be in `ll`'s own glue code, the parts that replaced asnix's hand-
+written dispatch layer.
+
+Three agents split the 16 remaining failures by symptom, each in its
+own worktree. Two of them worked on separate clusters in parallel.
+They independently found the exact same root cause. `root_env.c`,
+`ll`'s own code, still wired the TOP-LEVEL root environment's
+`derivation` slot to a stripped-down bootstrap substitute. That
+substitute exists only to break a self-referential cycle inside the
+real Nix-level `derivation` wrapper's own construction, not for
+ordinary use. It behaves exactly like plain `derivationStrict`: no
+`outPath`, `drvPath`, `outputName`, `outputs`, or `type` fields. No
+check this project had run before caught the gap. An imported file's
+root environment already used the real wrapper correctly. Only a
+program's own top-level `derivation {...}` call, the exact shape
+most of the conformance corpus uses, went through the broken
+substitute. A one-line fix, in slots 0 and 8 of `ll_make_root_env`,
+resolved all 15 of those two agents' assigned cases at once. String
+coercion, delayed `with` scoping, and every derivation-output and
+equality case all trace back to the same missing fields.
+
+The third agent fixed a narrower, one-case bug. A thunk can fail its
+first forcing attempt inside a `builtins.tryEval`. If something
+forces that same thunk again, inside a second `tryEval`, the second
+`tryEval` must catch the re-raised failure, not crash the whole
+process. asnix's own hand-written assembly does this by calling
+`asnix_tryeval_raise_or_fatal` instead of a flat fatal exit on that
+path. Two of `ll`'s own ported files, `op_var_ref.c` and
+`closure_helpers.c`, called the flat fatal exit directly instead.
+This never gave the second `tryEval` a chance to catch it. Matching
+the asm's own behavior fixed it.
+
+Merging the two root_env.c fixes produced exactly one conflict, and
+it was trivial: both agents wrote the identical code change,
+independently, and only their explanatory comments differed enough
+for git to flag it. The final result, re-run against the full
+external corpus after merging all three fixes: 655 pass, 3 fail, 148
+skip, an exact match for asnix's own documented rate on this corpus.
+The 3 remaining failures are asnix's own pre-existing, already-
+documented position-tracking gap, not a new one. All 44 difftest
+cases, the 74-package nixpkgs-hash sweep, and a byte-identical
+`ffmpeg-full.outPath` diff against asnix stayed green through every
+step of this work.
