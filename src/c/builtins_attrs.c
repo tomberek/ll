@@ -88,6 +88,28 @@ static Value make_attrs_from_sorted(const uint32_t *syms, const Value *vals, int
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
 }
 
+/* perf: `removeAttrs`/`mapAttrs` below used to build a separate (syms,
+ * vals) scratch pair via `asnix_arena_alloc`, fill it, then hand it to
+ * `make_attrs_from_sorted` just above, which allocates ANOTHER buffer
+ * and copies every entry across a second time -- on this arena (never
+ * frees anything, see arena.h), the scratch pair was pure permanent
+ * garbage, discarded the instant `make_attrs_from_sorted` returned.
+ * These two helpers let a caller that already knows the final sym/value
+ * for each output slot (both builtins do, one entry at a time) write
+ * directly into the one real allocation instead, with no scratch buffer
+ * and no second copy pass. */
+static void *alloc_attrs_header(int64_t count) {
+    void *mem = asnix_arena_alloc(8 + (uint64_t)count * ASNIX_ATTR_SIZE);
+    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = count;
+    return mem;
+}
+static void set_attrs_entry(void *mem, int64_t i, uint32_t sym, Value val) {
+    char *entry = (char *)mem + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
+    /* M103: must be a 4-byte write -- see make_attrs_from_sorted's identical note above. */
+    *(uint32_t *)(entry + ASNIX_ATTR_OFF_SYM) = sym;
+    *(Value *)(entry + ASNIX_ATTR_OFF_VALUE) = val;
+}
+
 static int64_t string_len(Value v) {
     return *(const int64_t *)((const char *)(v.raw & ~0x7ULL) + ASNIX_STRING_OFF_LEN);
 }
@@ -297,8 +319,17 @@ static Value prim_removeAttrs_apply2(const Value *args, int64_t argc) {
         remove_syms[i] = asnix_intern(string_bytes(nv), (size_t)string_len(nv));
     }
     int64_t n = attrs_count(attrs);
-    uint32_t *out_syms = asnix_arena_alloc((uint64_t)n * sizeof(uint32_t));
-    Value *out_vals = asnix_arena_alloc((uint64_t)n * sizeof(Value));
+    /* perf: single pass, writing straight into one real allocation sized
+     * `n` (the worst case, nothing removed) instead of the old scratch
+     * (syms, vals) pair sized n that then got copied AGAIN into a
+     * freshly, exactly-sized final Attrs by make_attrs_from_sorted. Any
+     * actually-removed names leave unused slack at the tail of this one
+     * buffer (the header's count is set to the real out_n below, so
+     * those trailing slots are simply never read) -- strictly less
+     * total arena traffic than before (one allocation instead of two,
+     * no second copy loop) with the exact same single filtering pass
+     * the old code already made, so no added comparison work either. */
+    void *mem = alloc_attrs_header(n);
     int64_t out_n = 0;
     for (int64_t i = 0; i < n; i++) {
         uint32_t sym = attrs_entry_sym(attrs, i);
@@ -307,14 +338,14 @@ static Value prim_removeAttrs_apply2(const Value *args, int64_t argc) {
             if (remove_syms[j] == sym) { removed = 1; break; }
         }
         if (!removed) {
-            out_syms[out_n] = sym;
-            out_vals[out_n] = attrs_entry_value(attrs, i);
+            /* out entries inherit `attrs`'s own ascending-sym order since
+               we only filter in a single forward pass, never reorder. */
+            set_attrs_entry(mem, out_n, sym, attrs_entry_value(attrs, i));
             out_n++;
         }
     }
-    /* out_syms/out_vals inherit `attrs`'s own ascending-sym order since we
-       only filter in a single forward pass, never reorder. */
-    return make_attrs_from_sorted(out_syms, out_vals, out_n);
+    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = out_n;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
 }
 
 static Value prim_removeAttrs(const Value *args, int64_t argc) {
@@ -373,8 +404,16 @@ static Value prim_mapAttrs_apply2(const Value *args, int64_t argc) {
     const char *src_entries = flat_base + ASNIX_ATTRS_OFF_ENTRIES;
     if (n == 0) return make_attrs_from_sorted(NULL, NULL, 0);
 
-    uint32_t *syms = asnix_arena_alloc((uint64_t)n * sizeof(uint32_t));
-    Value *vals = asnix_arena_alloc((uint64_t)n * sizeof(Value));
+    /* perf: mapAttrs always emits exactly as many entries as it reads
+     * (a pure 1:1 map, never filtered) -- so unlike removeAttrs there is
+     * no over-allocation question here at all, only the same redundant-
+     * copy one: the old code built a (syms, vals) scratch pair sized n
+     * via `asnix_arena_alloc`, filled it, then handed it to
+     * `make_attrs_from_sorted`, which allocated ANOTHER n-sized buffer
+     * and copied every entry across a second time. Both branches below
+     * now allocate that one real buffer up front and write each entry
+     * directly into it -- no scratch, no second copy pass. */
+    void *mem = alloc_attrs_header(n);
 
     if (n > ASNIX_THUNKMAP_MAX_IDX + 1) {
         /* Pathological: more entries than a packed ThunkMap index (16
@@ -388,18 +427,17 @@ static Value prim_mapAttrs_apply2(const Value *args, int64_t argc) {
             size_t len;
             const char *name = asnix_sym_name(sym, &len);
             Value name_val = asnix_make_string_value(name, len);
-            syms[i] = sym;
-            vals[i] = asnix_make_lazyapp2(f, name_val, orig);
+            set_attrs_entry(mem, i, sym, asnix_make_lazyapp2(f, name_val, orig));
         }
-        return make_attrs_from_sorted(syms, vals, n);
+        return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
     }
 
     void *desc = asnix_thunkmap_make_desc(f, src_entries);
     for (int64_t i = 0; i < n; i++) {
-        syms[i] = *(const uint32_t *)(src_entries + i * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_SYM);
-        vals[i] = asnix_thunkmap_pack(desc, i);
+        uint32_t sym = *(const uint32_t *)(src_entries + i * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_SYM);
+        set_attrs_entry(mem, i, sym, asnix_thunkmap_pack(desc, i));
     }
-    Value out = make_attrs_from_sorted(syms, vals, n);
+    Value out = (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
     asnix_thunkmap_set_out(desc, out);
     return out;
 }
