@@ -878,3 +878,57 @@ times at the start of this section and 1.14 times at the start of
 the whole optimization effort. The ten synthetic workloads are
 unaffected. All ten still run faster on `ll` than asnix, by 1.07 to
 1.69 times depending on the workload.
+
+## Two more agents, down to a 2.37 percent instruction gap
+
+A second round of two agents, again each in its own worktree, looked
+for more of the same. One owned `ir_link` only. The other owned
+`closure_helpers.c` only, continuing where the last round's agent on
+that file left off.
+
+`ir_link` still cost 66,490,578 instructions, 2.5 times asnix's own
+26,107,374, even after the bounds/null-handler check removal earlier
+in this document. The remaining cost was structural. `ir_link` made
+two full forward passes over every compiled function body's op
+array. A `fuse_push_int_runs` pre-pass found runs of four or more
+consecutive integer-literal pushes first. A second loop then linked
+every op to its real handler address, reading the run flag the first
+pass had set. The agent merged these into one single forward pass.
+The run-length lookahead only reads op records ahead of the current
+position. In a single forward pass, those records are not yet
+linked, so folding the lookahead into the main loop is safe. The
+agent checked more than the usual two gates. It checked, via
+`objdump`, that the compiled function has no call to a separate
+fusion helper left. It checked, with a small literal list of seven
+integers, that the fused output is still byte-correct. It also ran
+one bounded `hyperfine` check on `list_build_large.nix`, the
+benchmark most sensitive to a fusion regression. That check found no
+change in its margin over asnix.
+
+The second agent did two things to `closure_helpers.c`. First, a
+cleanup. The first round's two agents each added an inlined Env-
+allocator fast path on their own: one in `op_dispatch.h`
+(`ll_env_alloc`), one a near-identical copy local to
+`closure_helpers.c` (`ll_env_alloc_fast`). Each agent's isolated
+worktree was blind to the other's edit. The second agent deleted the
+local duplicate and pointed `asnix_apply` at the shared
+`op_dispatch.h` version instead. Second, a further split, in the
+same spirit as the earlier `ll_force_thunk_slow` extraction.
+`asnix_apply` compiled its three branches (PrimOp, Closure, attrs
+`__functor`) as one function. The compiler's single shared prologue
+paid for the union of all three branches' register needs: six
+callee-saved registers pushed even on the simple, common paths. The
+agent split the PrimOp and Closure branches into their own
+`noinline` helpers. This let the compiler shrink-wrap the common
+path down to a bare tag check and a tail call, matching asnix's own
+`apply.S`.
+
+Both fixes are now merged. The instruction count on
+`ffmpeg-full.outPath` dropped to 6,645,790,912, a 2.37 percent gap
+to asnix, down from 2.6 percent. Wall-clock time across repeated
+runs stayed in the 1.02 to 1.11 range. asnix's own absolute time
+moved by a similar margin between runs on this shared machine. This
+points to measurement noise on a largely I/O-bound eval, not a
+regression. The instruction count is the more reliable number here.
+The ten synthetic workloads are unaffected. All ten still run faster
+on `ll` than asnix, by 1.18 to 1.71 times depending on the workload.
