@@ -9,9 +9,6 @@
  * top-level program, every lambda/thunk body, and every curried-
  * native-builtin wrapper -- so this one file is the entire linking
  * story; no other call site needs to change. */
-#include <stdio.h>
-#include <stdlib.h>
-
 #include "ops/ops.h"
 
 void *ll_handler_table[OP_COUNT] = {
@@ -123,20 +120,19 @@ static void fuse_push_int_runs(IrOp *ops, size_t n) {
     }
 }
 
+/* No bounds check, no null-handler fatal: matches asnix's own
+ * ir_link exactly (src/c/dispatch_table.c there), which trusts its
+ * compiler to never emit an op id outside the handler table -- a
+ * trust this backend has now earned the same way (M6/M7: every op
+ * the compiler can emit has an AOT handler, confirmed against the
+ * full real-nixpkgs correctness sweep). This dropped the two checks
+ * that used to run on every op of every compiled function body,
+ * closing roughly a third of ir_link's instruction-count gap to
+ * asnix's own version -- see M8-findings.md's own section on this. */
 void ir_link(IrOp *ops, size_t n) {
     fuse_push_int_runs(ops, n);
     for (size_t i = 0; i < n; i++) {
         intptr_t op_id = (intptr_t)ops[i].handler;
-        void *h;
-        if (op_id == OP_PUSH_INT && ops[i].a > 0) {
-            h = (void *)ll_op_push_int_run;
-        } else {
-            h = (op_id >= 0 && op_id < OP_COUNT) ? ll_handler_table[op_id] : NULL;
-        }
-        if (!h) {
-            fprintf(stderr, "ll: op id %ld has no AOT handler (not yet ported), aborting\n", (long)op_id);
-            exit(1);
-        }
-        ops[i].handler = h;
+        ops[i].handler = (op_id == OP_PUSH_INT && ops[i].a > 0) ? (void *)ll_op_push_int_run : ll_handler_table[op_id];
     }
 }

@@ -814,3 +814,20 @@ same `ffmpeg-full.outPath` eval dropped to 1.07 times asnix's, down
 from 1.14 times at the start of this section. The ten synthetic
 `bench/workloads/*.nix` cases still all run faster on `ll` after
 these three fixes, the same as before them.
+
+A fourth fix followed the same disassembly comparison further.
+`ir_link` (the per-op linking pass run once for every compiled
+function body) cost 82,906,578 instructions, 3.2 times asnix's own
+26,107,374. The difference: `ll`'s version checked that each op id
+was in bounds and had a real handler, aborting with a clear message
+otherwise. asnix's own `ir_link` has neither check. It trusts its
+compiler to never emit an op id outside the handler table. The full
+real-nixpkgs correctness sweep this project already ran (M6/M7)
+earns `ll`'s own compiler the same trust. Both checks were removed
+to match. The 74-package correctness sweep and all 44 difftest
+cases still passed afterward. This checks that no op silently
+relied on the removed check. The fix dropped the total
+instruction count to 6,693,930,803, 3.1 percent above asnix, down
+from 3.4 percent. The ten synthetic workloads still all run faster
+on `ll` than asnix, by 1.11 to 1.69 times depending on the
+workload.
