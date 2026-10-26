@@ -1483,5 +1483,68 @@ guarantee entirely. This round did not pursue a fix here. The two
 probe-based fixes above only change how a lookup finds data.
 Changing how variable aliasing works risks a real behavior
 regression in verified `==`/printer semantics, not just a perf
-cost. It needs its own careful investigation before
-change.
+cost. It needs its own careful investigation before any change.
+
+## A tempting, unsafe lambda optimization, caught and reverted
+
+The wider census above also found a thunk gap. `asnix` creates
+1,933,944 thunks, each a fixed 16 bytes. `iets` creates 481,336
+fewer thunk-family objects, at the same size. This round looked for
+the cause in `is_thunk_free_literal`, the compiler's existing pass.
+That pass already skips thunk allocation for literals known to be
+pure and side-effect-free: integers, floats, booleans, null, folded
+binary operations, plain strings, plain paths, and the empty list.
+Lambda literals are not on that list, yet evaluating a bare `x:
+body` expression is also pure and side-effect-free. It only builds
+a Closure, capturing the current environment. It never touches the
+lambda's own body. Adding `AST_LAMBDA` to this list looked like a
+free win: skip the thunk, build the closure directly, and save one
+allocation per lambda-literal binding.
+
+A check against real Nix's own source raised a warning sign first,
+not proof the idea was safe. cppnix's `Expr::maybeThunk` has
+overrides for `ExprVar`, `ExprInt`, `ExprFloat`, `ExprString`,
+`ExprPath`, and the empty-list case in `ExprList`. It has no
+override for `ExprLambda`. `ExprLambda::eval` itself is a single
+line there, matching the lambda case's own cheap cost reasoned
+above. Real Nix never added this specific optimization.
+This project's own `is_thunk_free_literal` already goes past
+cppnix's exact set in one place, folding constant binary
+operations. The missing cppnix precedent here was treated as a
+caution, not a blocker, and the change was implemented and tested.
+
+The fix passed 44/44 difftest, the full nixpkgs-hash sweep, and a
+byte-identical ffmpeg diff. It then failed one external conformance
+case, `eval-okay-eq-slot-attrs.nix`, newly broken. A minimal repro
+found the exact mechanism. `builtins.attrValues a == builtins.
+attrValues a` must return true, where `a.g` is a bare lambda
+literal. Before this fix, `g`'s slot held an unforced Thunk, read
+lazily and left unforced by `attrValues` on both sides. `==`'s own
+comparison catches two references to the identical, still-unforced
+Thunk pointer before it forces either side, and returns true right
+away. Real Nix's own function comparison has no such escape once a
+value is forced: two function values compare false regardless of
+identity. The thunk-pointer shortcut is not a performance nicety
+here. When the slot holds a function, this is the only path through
+which two lazy reads of the same slot can ever compare equal. Pre-
+building the Closure removes the thunk that shortcut depends on. So
+both reads fall through to the general, always-false function rule
+instead.
+
+This is exactly the trap cppnix's own missing `ExprLambda::
+maybeThunk` override avoids by construction. Real Nix never built
+this specific optimization, and the reason is now clear. Its own
+slot-identity shortcut depends on a real, unforced Thunk existing
+at the shared slot. This change removed exactly that thunk.
+
+The fix was reverted. All four gates returned to the documented
+baseline right after: 655/3/148 conformance, 44/44 difftest, 74/74
+nixpkgs-hash, byte-identical ffmpeg diff. Future work must not
+retry thunk-elision for any literal kind without first checking one
+thing. Does `==`'s own comparison, for that kind, ever rely on
+comparing the UNFORCED representation for slot-identity purposes.
+That risk applies to any value kind whose forced-value comparison
+is not a simple value compare. Functions are one such kind. Lists
+and attrsets already compare structurally by value once forced, not
+by identity, so they are not known to share this exact trap. Each
+new candidate still needs its own check.
