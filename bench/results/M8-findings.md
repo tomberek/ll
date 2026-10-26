@@ -1548,3 +1548,39 @@ is not a simple value compare. Functions are one such kind. Lists
 and attrsets already compare structurally by value once forced, not
 by identity, so they are not known to share this exact trap. Each
 new candidate still needs its own check.
+
+## The Cell gap, closed out: an architecture choice, not a missed trick
+
+The earlier census flagged `asnix`'s 894,153 Cell objects, 14.3MB,
+as the biggest open lead. `iets`'s own census reports no matching
+category at all. This round checked cppnix's own source to settle
+the question. `ExprVar::maybeThunk` there returns `state.
+lookupVar(&env, *this, true)` directly: the SAME `Value*` pointer
+already sitting in the referenced slot. No new object. No copy of
+any kind.
+
+This works in cppnix, and in `iets`, for one specific reason. Both
+represent a Nix value as a stable, heap-allocated struct, referenced
+everywhere by pointer. Aliasing a variable there is just copying
+that one pointer into a new slot. `asnix` and `ll` represent a Nix
+value differently: an 8-byte tagged word, copied by value everywhere
+this codebase touches it. Nothing here gets referenced through one
+shared, stable address the way cppnix's `Value&` is. Aliasing a
+variable under this design needs a real extra object: something
+with its own stable address, holding a pointer to the target slot,
+that every force chokepoint can recognize and chase through. That
+object is the Cell.
+
+This closes the question properly, not just defers it. The Cell gap
+is not a missed optimization `iets` happens to have and `ll` does
+not. It is the direct, structural cost of a whole-system
+representation choice made long before this investigation started.
+The same choice underlies M118's own compressed-pointer `Env`
+design, and this whole dispatch-loop architecture builds on it.
+Removing the Cell means rewriting how every value in this codebase
+is represented and passed around, not a targeted fix to one call
+site. That is well outside the scope of this round's work, and
+likely outside the scope of any single round: such a change touches
+every op handler, every builtin, and every heap-object kind at
+once. No further investigation is planned here unless a future
+round is explicitly scoped to that scale of change.
