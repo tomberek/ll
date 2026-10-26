@@ -3,27 +3,35 @@
  * (constructed by eval_file.c) has sixteen slots... in the same order as
  * eval_file.c's make_root_env_ex"), built from the SAME vendored PrimOp
  * constructors eval_file.c's own (static, so not callable from here)
- * make_root_env_ex uses.
+ * make_root_env_ex(up, 0) (the real, non-bootstrap path) uses.
  *
  * M7 conformance fix: this used to always fill slot 0/8 with the
- * bootstrap-only `skip_derivation_wrapper=1` variants (plain
- * `derivationStrict` standing in for both `builtins.derivation` and bare
- * `derivation`), left over from before M6 when attrsets/strings/
- * OP_SELECT weren't compilable yet, so the real Nix-level `derivation`
- * wrapper (derivation.c's asnix_make_derivation_wrapper_value, which
+ * bootstrap-only `skip_derivation_wrapper=1` variants
+ * (asnix_make_builtins_attrs_for_derivation_bootstrap() and
+ * asnix_make_derivation_strict_primop(), plain `derivationStrict`
+ * standing in for both `builtins.derivation` and bare `derivation`),
+ * left over from before M6 when attrsets/strings/OP_SELECT weren't
+ * compilable yet, so the real Nix-level `derivation` wrapper
+ * (derivation.c's asnix_make_derivation_wrapper_value, which
  * compiles+evaluates an embedded .nix source) couldn't be bootstrapped
  * for the TOP-LEVEL program's own root env. That gap was invisible to
  * the nixpkgs-hash sweep because `import`-ed files get their root env
- * from eval_file.c's own make_root_env (already correct, skip=0) --
- * only a top-level file's own bare `derivation {...}` (e.g.
+ * from eval_file.c's own make_root_env_ex(up, 0) (already correct,
+ * skip=0) -- only a top-level file's own bare `derivation {...}` (e.g.
  * nix-conformance's eval-okay-context-builtins.nix) actually went
  * through this file's skip=1 path, silently getting a result with no
- * `outPath`/`drvPath`/`type`/etc. attrs at all (just derivationStrict's
- * raw per-output path strings) -- coercing that bare attrset to a
- * string later fails with "cannot coerce a set to a string" since
- * `asnix_coerce_to_string`'s own ATTRS case looks for exactly those
- * attrs and finds none. Now matches eval_file.c's ordinary
- * (non-bootstrap) make_root_env(NULL) exactly: real
+ * `outPath`/`drvPath`/`type`/`outputName`/`outputs`/`all`/etc. attrs
+ * at all (just derivationStrict's raw per-output path strings) --
+ * coercing that bare attrset to a string later fails with "cannot
+ * coerce a set to a string" since `asnix_coerce_to_string`'s own
+ * ATTRS case looks for exactly those attrs and finds none. The stale
+ * comment that used to live here ("real attrset/string/OP_SELECT Nix
+ * source this translator doesn't support yet... revisit once
+ * attrsets/strings/select land (M6+)") described a pre-M6 limitation
+ * that no longer applied by the time this bug was found -- M6 landed
+ * attrsets/select, so the fancy wrapper evaluates fine; this file's
+ * own slots just never got updated to use it. Now matches
+ * eval_file.c's ordinary (non-bootstrap) root env exactly: real
  * `asnix_make_builtins_attrs()` for slot 0, the real wrapper
  * (asnix_make_derivation_wrapper_value) for slot 8. Every other slot
  * here is a plain C-constructed PrimOp/Attrs heap value, no compiled-
