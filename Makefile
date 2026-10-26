@@ -63,7 +63,6 @@ C_LIB_SRCS := $(wildcard src/c/*.c) \
               src/llvm/root_env.c \
               src/llvm/dispatch_table.c \
               src/llvm/ll_eval.c \
-              src/llvm/ll_resolve.c \
               src/llvm/ll_print.c \
               $(wildcard src/llvm/ops/*.c)
 LIB_OBJS := $(ASM_SRCS:.S=.o) $(C_LIB_SRCS:.c=.o)

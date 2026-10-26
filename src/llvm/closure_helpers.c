@@ -29,7 +29,7 @@
 int64_t asnix_force_depth = 0;
 int64_t asnix_apply_depth = 0;
 
-static Value ll_force_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+static LL_OP_ATTR Value ll_force_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
     (void)pool;
@@ -38,7 +38,7 @@ static Value ll_force_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
 }
 static IrOp ll_force_sentinel = {.handler = (void *)ll_force_epilogue, .a = 0, .b = 0};
 
-static Value ll_apply_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+static LL_OP_ATTR Value ll_apply_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
     (void)pool;

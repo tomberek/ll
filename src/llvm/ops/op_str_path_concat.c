@@ -16,7 +16,7 @@
 #include "ops.h"
 #include "value_util.h"
 
-Value ll_op_str_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_str_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     Value *parts = vs - count; /* the popped values already sit contiguously here */
     Value result = asnix_concat_strings(parts, count);
@@ -27,7 +27,7 @@ Value ll_op_str_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *r
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_path_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_path_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     Value *parts = vs - count; /* the popped values already sit contiguously here */
     Value result = asnix_concat_path(parts, count);

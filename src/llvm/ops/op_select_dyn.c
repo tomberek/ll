@@ -22,7 +22,7 @@
 #include "ops.h"
 #include "builtins_shared.h"
 
-Value ll_op_select_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_select_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
         /* not even an attrset -- not fatal, see header comment */
@@ -43,7 +43,7 @@ Value ll_op_select_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_select_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_select_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1]; /* pushed last, popped first */
     Value target = vs[-2];
     Value result = asnix_bshared_select_dynamic(target, name);
@@ -52,7 +52,7 @@ Value ll_op_select_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_select_dynamic_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_select_dynamic_or(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1]; /* pushed last, popped first */
     Value target = vs[-2];
     Value out;

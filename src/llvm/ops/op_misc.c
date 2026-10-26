@@ -36,7 +36,7 @@ extern Value asnix_resolve_search_path_value(Value name_val);
  * by hand. Phase 2 (the allowed-field check) binary-searches the pool's
  * own sorted region directly, since that's a plain int64 array, not an
  * Attrs object. */
-Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     vs--;
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
@@ -89,7 +89,7 @@ Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
  * No VALSTACK effect at all other than the abort -- never returns, so
  * there is no LL_NEXT/LL_GOTO here (same precedent as op_select.S's
  * _Noreturn-terminated branches, just for the whole handler this time). */
-Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)env;
     (void)vs;
     (void)rs;
@@ -107,7 +107,7 @@ Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *
  * the string-type check, the duplicate-key fatal, and the sorted-
  * insert are all handled by asnix_attrs_insert_dynamic itself
  * (attrs_update.c) -- pushes its result (net pop 3, push 1). */
-Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value value = vs[-1];
     Value name = vs[-2];
     Value attrs = vs[-3];
@@ -132,7 +132,7 @@ Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
  * (forcing the `__overrides` slot, merging, and overwriting matched
  * Env slots in place) and returns the one finished Attrs Value this
  * pushes. */
-Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t n = ip->a;
     const int64_t *meta = &pool[ip->b];
 
@@ -153,7 +153,7 @@ Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
  * miss routes through asnix_tryeval_raise_or_fatal, same catchable
  * mechanism `throw`/a failed `assert` use), in which case the push below
  * never runs. */
-Value ll_op_resolve_search_path(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_resolve_search_path(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1];
     vs--;
 

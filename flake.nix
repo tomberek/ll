@@ -32,7 +32,21 @@
             # -- no ORC, no libLLVM, none of the shared-library-loading
             # cost M9 spent a session trimming. That whole problem was a
             # symptom of the JIT architecture, not of "using LLVM."
-            llvmPackages_18.clang
+            #
+            # llvmPackages_19, not _18: op handlers that make a real
+            # (non-tail) call mid-body -- e.g. OP_MK_THUNK calling the
+            # arena allocator -- need every one of the five LLOpFn
+            # arguments to survive that call. Plain C has no way to ask
+            # for that: the SysV ABI puts all five in caller-saved
+            # registers, so the compiler spills all five around the
+            # call (confirmed via objdump: 7 pushes in the compiled
+            # handler vs 2 in asnix's own hand-written asm, which
+            # deliberately pins 3 of its 5 state registers in
+            # callee-saved ones). `preserve_none`, the calling
+            # convention CPython's own tail-calling interpreter uses
+            # for exactly this shape, fixes this at the type level --
+            # first available in clang 19.
+            llvmPackages_19.clang
           ];
           shellHook = ''
             export LL_ROOT=$(pwd)

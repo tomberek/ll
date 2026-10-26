@@ -14,7 +14,7 @@
 
 #include "builtins_shared.h"
 
-Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t argc = ip->a;
     Value *callee_slot = vs - argc - 1;
     Value callee = *callee_slot;
@@ -89,7 +89,7 @@ Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     }
 }
 
-Value ll_op_ret(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_ret(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
     (void)pool;

@@ -8,7 +8,7 @@
 #include "ops.h"
 #include "builtins_shared.h"
 
-Value ll_op_select(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_select(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
         asnix_bshared_select_type_fatal(attrs); /* _Noreturn */

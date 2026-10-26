@@ -758,3 +758,59 @@ hash corpus was run again. This time it diffed the two evaluators'
 raw `outPath` output directly, instead of comparing string lengths.
 It passed 74 out of 74. All 44 difftest cases still pass with the
 new printer wired in.
+
+## Closing the real-nixpkgs gap: three fixes, 1.14x down to 1.07x
+
+The prior section measured `ll` at 1.14 times slower than asnix on
+`pkgs.ffmpeg-full.outPath`. It gave no explanation beyond a
+suspected per-hop register cost. A `callgrind` run on both binaries
+on this same expression gave the real breakdown. `ll` executed
+7,359,621,183 instructions. asnix executed 6,492,211,413. The gap
+was 13.4 percent. Three fixes closed most of it. Each fix was
+checked against the full 44-case difftest suite, the 74-package
+nixpkgs-hash corpus, and a direct diff of `ffmpeg-full.outPath` and
+`drvPath` raw output.
+
+First, `ll_resolve_indirection` (Cell/LazyApp/ThunkMap unwrapping,
+called on every variable reference and every force) called three
+separate out-of-line C predicate functions. Each of those itself
+called a fourth function. asnix's own asm once did the same. An
+earlier asnix commit rewrote it to test the tag bits directly
+instead. `ll_resolve_indirection` became a header-only inline
+function that does the same direct tag-bit test. It falls back to a
+real call only for the rare LazyApp/ThunkMap case. A bug surfaced
+during this fix. The inlined Cell-chase logic read a stored pointer
+as the target value directly. This skipped one level of
+indirection. Real nixpkgs evaluation caught the bug immediately:
+`with` on a let-bound attrset failed outright. The fix was one
+line. This change alone dropped the instruction count to
+6,903,932,021 and the wall-clock gap to 1.09 times.
+
+Second, `ll_op_mk_thunk`, `ll_op_lambda`, and `ll_op_mk_attrs` each
+made a real, non-tail call to `asnix_arena_alloc` mid-handler. An
+inlined bump-allocator fast path removed that call from the common
+case. It falls back to the real allocator only on chunk growth or
+the memory cap. This gave a smaller further drop, to 6,857,575,434
+instructions.
+
+Third, and by far the largest remaining cost: disassembly of
+`ll_op_mk_thunk` showed 7 register pushes around its one real call.
+asnix's hand-written asm equivalent needed only 2. The cause is the
+C calling convention itself. The handler signature passes all five
+of its state arguments (ip, env, vs, pool, rs) in registers the
+SysV ABI defines as caller-saved. A real call anywhere in a
+handler's body forces the compiler to spill and reload all five.
+asnix's own asm avoids this. It hand-pins three of its five state
+registers in ABI callee-saved slots instead. A real call there
+costs only two spills, not five. Clang 19 supports the
+`preserve_none` calling convention for exactly this case. This
+project's build moved from clang 18 to use it. CPython's own
+tail-calling interpreter uses the same mechanism. Adding
+`__attribute__((preserve_none))` to every op handler's signature,
+with no other code change, dropped `ll_op_mk_thunk`'s register
+pushes from 7 to 1. The total instruction count dropped to
+6,710,345,987, only 3.4 percent above asnix. Wall-clock time on the
+same `ffmpeg-full.outPath` eval dropped to 1.07 times asnix's, down
+from 1.14 times at the start of this section. The ten synthetic
+`bench/workloads/*.nix` cases still all run faster on `ll` after
+these three fixes, the same as before them.

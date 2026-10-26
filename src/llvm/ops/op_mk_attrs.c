@@ -10,7 +10,7 @@
  * (this evaluator's existing allocation philosophy, see arena.h). */
 #define LL_MK_ATTRS_FIXED_SYMS 8192
 
-Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     int64_t pidx = ip->b;
     Value *vals = vs - count; /* the popped values already sit contiguously here */
@@ -18,7 +18,7 @@ Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs)
     uint32_t fixed_syms[LL_MK_ATTRS_FIXED_SYMS];
     uint32_t *syms = fixed_syms;
     if (count > LL_MK_ATTRS_FIXED_SYMS) {
-        syms = (uint32_t *)asnix_arena_alloc((uint64_t)count * sizeof(uint32_t));
+        syms = (uint32_t *)ll_arena_alloc((uint64_t)count * sizeof(uint32_t));
     }
     for (int64_t i = 0; i < count; i++) syms[i] = (uint32_t)pool[pidx + i];
     Value result = asnix_bshared_make_attrs(syms, vals, count);

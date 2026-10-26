@@ -13,7 +13,7 @@
 #include "ops.h"
 #include "builtins_shared.h"
 
-Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
         vs[-1] = ll_false();
@@ -26,7 +26,7 @@ Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs)
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     vs--;
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
@@ -44,7 +44,7 @@ Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *
     LL_GOTO(ip, env, vs, pool, rs);
 }
 
-Value ll_op_has_attr_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_has_attr_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1], target = vs[-2];
     vs -= 2;
     int found = asnix_bshared_has_attr_dynamic(target, name);

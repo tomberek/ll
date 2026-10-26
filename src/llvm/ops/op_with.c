@@ -18,7 +18,7 @@
  * it into a fresh 1-slot Env frame and tags the frame's OWN `up` field
  * with ASNIX_ENV_WITH_TAG so OP_WITH_TRY/a depth-relative var-ref walk
  * can recognize it later. */
-Value ll_op_with(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_with(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Env *frame = asnix_env_alloc(env, 1);
     frame->up |= ASNIX_ENV_WITH_TAG;
     vs--;
@@ -37,7 +37,7 @@ Value ll_op_with(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
  * through with it on top of VALSTACK; compiler.c always emits an
  * unconditional OP_JMP right after this op for exactly that fallthrough
  * to land on. */
-Value ll_op_with_try(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_with_try(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     vs--;
     if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
@@ -63,7 +63,7 @@ Value ll_op_with_try(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs)
  * unbound variable gets (compiler.c's AST_VAR case), just raised at
  * runtime since whether a `with`'s attrset actually has the key is a
  * runtime fact. */
-Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
     (void)vs;
@@ -80,7 +80,7 @@ Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs
  * ordinary OP_FRAME_ALLOC frame, whose `up` never has the bit set in the
  * first place; see its own comment), so OP_WITH_EXIT needs its own
  * unmasking logic inline here, matching op_with.S's asnix_op_with_exit. */
-Value ll_op_with_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_with_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     env = (Env *)((uint8_t *)asnix_env_arena_base + (env->up & ~(uint32_t)ASNIX_ENV_WITH_TAG));
     LL_NEXT(ip, env, vs, pool, rs);
 }

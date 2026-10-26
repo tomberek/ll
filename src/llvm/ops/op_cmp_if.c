@@ -3,7 +3,7 @@
 #include "value_util.h"
 #include "builtins_shared.h"
 
-Value ll_op_eq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_eq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int eq = asnix_bshared_value_eq_op(lhs, rhs);
@@ -15,7 +15,7 @@ Value ll_op_eq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_GOTO(ip, env, vs, pool, rs);
 }
 
-Value ll_op_neq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_neq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int eq = asnix_bshared_value_eq_op(lhs, rhs);
@@ -27,7 +27,7 @@ Value ll_op_neq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_GOTO(ip, env, vs, pool, rs);
 }
 
-Value ll_op_lt_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_lt_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int take_then;
@@ -47,7 +47,7 @@ Value ll_op_lt_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_GOTO(ip, env, vs, pool, rs);
 }
 
-Value ll_op_ge_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_ge_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int take_then;

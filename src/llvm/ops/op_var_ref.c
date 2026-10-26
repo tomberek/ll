@@ -13,7 +13,7 @@
 #include "../ll_resolve.h"
 #include "value_util.h"
 
-Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
     Value raw = asnix_env_lookup(env, depth, slot);
     raw = ll_resolve_indirection(raw);
@@ -72,7 +72,7 @@ Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) 
  * even thunk-forcing) -- needed by asnix_bshared_make_curried_native_noforce
  * (builtins_shared.c), which root_env.c's merged builtins attrset
  * reaches during construction even for a trivial top-level eval. */
-Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
     Value raw = asnix_env_lookup(env, depth, slot);
     ll_check_valstack(vs);
@@ -90,7 +90,7 @@ Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *
  * needs the slot's ADDRESS, not its dereferenced value; env.h's own
  * asnix_env_arena_base/ASNIX_ENV_WITH_TAG are both already vendored
  * and declared for exactly this kind of walk. */
-Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
     Env *e = env;
     for (int64_t d = 0; d < depth; d++) {

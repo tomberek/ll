@@ -2,7 +2,7 @@
 #include "ops.h"
 #include "value_util.h"
 
-Value ll_op_add(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_add(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
     if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
@@ -22,7 +22,7 @@ Value ll_op_add(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_sub(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_sub(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
     if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
@@ -42,7 +42,7 @@ Value ll_op_sub(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_mul(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_mul(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
     if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
@@ -62,7 +62,7 @@ Value ll_op_mul(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_div(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_div(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
     if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {

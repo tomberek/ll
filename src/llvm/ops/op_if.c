@@ -1,7 +1,7 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_if.S -- see ~/.claude/plans/soft-wishing-engelbart.md */
 #include "ops.h"
 
-Value ll_op_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value cond = vs[-1];
     vs--;
     if ((cond.raw & ASNIX_TAG_MASK) != ASNIX_TAG_IMM) goto type_error;
@@ -23,7 +23,7 @@ type_error:
     }
 }
 
-Value ll_op_jmp(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_jmp(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     ip = (IrOp *)((char *)ip + ip->a);
     LL_GOTO(ip, env, vs, pool, rs);
 }

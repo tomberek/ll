@@ -3,7 +3,7 @@
 #include "attrs_update.h"
 #include "value_util.h"
 
-Value ll_op_update(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_update(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     if ((lhs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS || (rhs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
         static const char msg[] = "asnix: '//' operands must both be attrsets, aborting\n";
@@ -16,7 +16,7 @@ Value ll_op_update(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
 }
 
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 src/asm/ops/op_concat.S -- see soft-wishing-engelbart.md plan */
-Value ll_op_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     /* No type-check here, matching op_concat.S: asnix_concat_lists does its
      * own TAG_LIST check on both operands and asnix_fatal()s (never

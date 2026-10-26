@@ -2,7 +2,7 @@
 #include "ops.h"
 #include "../env_helpers.h"
 
-Value ll_op_frame_alloc(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_frame_alloc(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t nslots = ip->a;
     env = asnix_env_alloc(env, nslots); /* slots left uninitialized -- every slot is
                                           * written by an OP_FRAME_SET before anything
@@ -10,14 +10,14 @@ Value ll_op_frame_alloc(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_frame_set(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_frame_set(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t slot = ip->a;
     vs--;
     ll_env_set(env, slot, vs[0]);
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-Value ll_op_frame_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_frame_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     env = ll_env_frame_exit(env);
     LL_NEXT(ip, env, vs, pool, rs);
 }
@@ -28,7 +28,7 @@ Value ll_op_frame_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *r
  * construction, where OP_VAR_REF's force-on-read would be wrong (it
  * would eagerly force every `rec {}` field the instant the literal is
  * constructed, not lazily on first actual select). */
-Value ll_op_frame_get(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_frame_get(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t slot = ip->a;
     ll_check_valstack(vs);
     vs[0] = env->values[slot];

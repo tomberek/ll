@@ -76,9 +76,21 @@ _Static_assert(offsetof(PrimOp, arity) == ASNIX_PRIMOP_OFF_ARITY, "PrimOp.arity 
 _Static_assert(offsetof(PrimOp, noforce) == ASNIX_PRIMOP_OFF_NOFORCE, "PrimOp.noforce offset");
 _Static_assert(sizeof(PrimOp) == ASNIX_PRIMOP_SIZE, "PrimOp size");
 
-/* Every op handler has exactly this signature -- a hard requirement
- * for musttail (the callee's type must match the caller's). */
-typedef Value (*LLOpFn)(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+/* Every op handler is declared and defined with this attribute --
+ * `preserve_none`, first available in clang 19 (see flake.nix's own
+ * comment on why), tells the compiler these five arguments are the
+ * ENTIRE live state threaded through dispatch; nothing else needs to
+ * survive a hop. Concretely, this lets the compiler assign vs/pool/rs
+ * to registers that are callee-saved under the PLAIN C functions this
+ * code calls out to (asnix_arena_alloc, asnix_force_for_print, ...),
+ * so a real (non-tail) call mid-handler no longer needs to spill and
+ * reload all five -- the same property asnix's own hand-written asm
+ * gets by manually pinning its five dispatch registers across the
+ * ABI's callee-saved set. A hard requirement for musttail regardless
+ * (the callee's type, attribute included, must match the caller's). */
+#define LL_OP_ATTR __attribute__((preserve_none))
+
+typedef LL_OP_ATTR Value (*LLOpFn)(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 static inline void *ll_untag(Value v) {
     return (void *)(uintptr_t)(v.raw & ~(uint64_t)ASNIX_TAG_MASK);
@@ -111,6 +123,38 @@ static inline void ll_check_valstack(Value *vs) {
 
 static inline void ll_check_retsp(RetFrame *rs) {
     if ((void *)(rs + 1) > asnix_retsp_limit) asnix_retsp_overflow();
+}
+
+/* Inlined fast path for arena.S's own bump allocator (same rounding,
+ * same cap check, same field layout -- see arena.h's own comment on
+ * why the C struct and the asm share field offsets). Every op handler
+ * that allocates (OP_LAMBDA, OP_MK_THUNK, OP_MK_ATTRS, ...) is one of
+ * this file's five-argument LLOpFn handlers, and the SysV ABI puts all
+ * five of ip/env/vs/pool/rs in CALLER-saved registers (rdi/rsi/rdx/
+ * rcx/r8) -- unlike asnix's own hand-written asm, which deliberately
+ * pins vs/pool/rs in CALLEE-saved registers (%r12/%r13/%r14) so a real
+ * `call asnix_arena_alloc` only has to spill the two caller-saved ones
+ * it actually uses (ip, env). A plain `call asnix_arena_alloc` from a C
+ * handler has no such luck: the compiler must spill and reload all
+ * five around the call (confirmed via `objdump -d`: 7 register pushes
+ * in ll_op_mk_thunk's compiled code vs 2 in asnix_op_mk_thunk's hand-
+ * written asm). Inlining the bump-pointer fast path here removes the
+ * call (and thus the spills) from the overwhelmingly common case;
+ * growth/cap-exceeded still falls back to the real, out-of-line
+ * asnix_arena_alloc, unchanged. */
+static inline void *ll_arena_alloc(uint64_t n) {
+    uint64_t n8 = (n + 7) & ~(uint64_t)7;
+    if (asnix_arena.max_memory != 0 && asnix_arena.total_allocated + n8 > asnix_arena.max_memory) {
+        return asnix_arena_alloc(n);
+    }
+    uint8_t *cur = asnix_arena.cur;
+    uint8_t *new_cur = cur + n8;
+    if (new_cur > asnix_arena.end) {
+        return asnix_arena_alloc(n);
+    }
+    asnix_arena.cur = new_cur;
+    asnix_arena.total_allocated += n8;
+    return cur;
 }
 
 /* Guaranteed-tail-call dispatch to the next op, advancing IP by one

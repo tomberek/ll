@@ -9,7 +9,7 @@
  * asnix_op_halt does inline in asm -- no need to duplicate it here. */
 #include "ops.h"
 
-Value ll_op_halt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
+LL_OP_ATTR Value ll_op_halt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
     (void)pool;
