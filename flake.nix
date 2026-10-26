@@ -47,6 +47,15 @@
             # for exactly this shape, fixes this at the type level --
             # first available in clang 19.
             llvmPackages_19.clang
+            # llvm-profdata, for merging PGO instrumentation data (see
+            # bench/results/M8-findings.md's PGO section) -- NOT bundled
+            # with the `clang` package above, and the plain `llvm` package
+            # already on PATH via other deps resolves to version 18, a
+            # mismatch against the profraw format clang 19's own
+            # instrumentation emits. Pin the matching major version
+            # explicitly so `llvm-profdata` on PATH is always the one
+            # that understands clang 19's profile data.
+            llvmPackages_19.llvm
           ];
           shellHook = ''
             export LL_ROOT=$(pwd)
