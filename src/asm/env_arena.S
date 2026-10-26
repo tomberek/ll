@@ -44,12 +44,22 @@ asnix_env_arena_base:
     .size asnix_env_arena_base, 8
 
     .align 8
+    // M10 ll port: exported (was file-local) so closure_helpers.c's
+    // ll_env_alloc_fast can read/bump the cursor and check it against
+    // `end` inline, mirroring the already-landed asnix_arena fast-path
+    // trick (op_dispatch.h's ll_arena_alloc) without a real call -- see
+    // that file's own header comment. Purely additive (just exposes
+    // existing state); asnix's own asm callers are unaffected.
+    .globl asnix_env_arena_cur
+    .type asnix_env_arena_cur, @object
 asnix_env_arena_cur:
     .quad 0                              // 0 until the first-ever alloc -- doubles as the
                                           // lazy-init check below
     .size asnix_env_arena_cur, 8
 
     .align 8
+    .globl asnix_env_arena_end
+    .type asnix_env_arena_end, @object
 asnix_env_arena_end:
     .quad 0
     .size asnix_env_arena_end, 8

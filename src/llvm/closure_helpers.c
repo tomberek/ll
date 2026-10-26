@@ -20,6 +20,7 @@
 
 #include "op_dispatch.h"
 #include "asnix/force_scratch.h"
+#include "asnix/stats.h"
 #include "builtins_shared.h"
 #include "ll_resolve.h"
 
@@ -28,6 +29,48 @@
  * from backend_stub.c, which this file's rewrite replaces. */
 int64_t asnix_force_depth = 0;
 int64_t asnix_apply_depth = 0;
+
+/* M10 ll port: asnix_apply's Closure branch makes one real, non-tail
+ * call to asnix_env_alloc per invocation (env.S) -- unlike the op
+ * handlers in src/llvm/ops (op_frame.c/op_call.c/op_with.c, see those
+ * files' own inlined-env-arena-fast-path edits, applied separately),
+ * asnix_apply is not a preserve_none handler, so this isn't about
+ * register-spill pressure; it's just the ordinary cost of a real call
+ * (push/pop + call/ret) versus a few inlined instructions for the
+ * overwhelmingly common case. Same trick as op_dispatch.h's own
+ * ll_arena_alloc (already landed for the general asnix_arena): inline
+ * the bump-allocator fast path, fall back to the real out-of-line
+ * asnix_env_alloc only when the arena isn't initialized yet or this
+ * allocation would overflow it. asnix_env_arena_cur/_end are normally
+ * file-local to src/asm/env_arena.S -- exported (see that file) purely
+ * so this static inline can read/bump them directly without a call,
+ * mirroring asnix_env_alloc's own env.S logic: size =
+ * ASNIX_ENV_OFF_VALUES + nslots*8, rounded up to a multiple of 4 (this
+ * fast path bypasses asnix_env_arena_alloc entirely, so it redoes that
+ * same round_up_4 itself -- see env_arena.S's own header comment for
+ * why 4, not 8), plus the NULL-safe `up` compression asnix_env_alloc's
+ * own general-purpose entry point does (unlike the hot-path op
+ * handlers, which only ever see a non-NULL current ENV). */
+extern void *asnix_env_arena_cur;
+extern void *asnix_env_arena_end;
+
+static inline Env *ll_env_alloc_fast(Env *up, int64_t nslots) {
+    uint8_t *cur = (uint8_t *)asnix_env_arena_cur;
+    if (cur == NULL) return asnix_env_alloc(up, nslots); /* arena not yet initialized */
+
+    uint64_t n = (uint64_t)ASNIX_ENV_OFF_VALUES + (uint64_t)nslots * 8;
+    uint64_t n4 = (n + 3) & ~(uint64_t)3;
+    uint8_t *new_cur = cur + n4;
+    if (new_cur > (uint8_t *)asnix_env_arena_end) return asnix_env_alloc(up, nslots);
+
+    asnix_env_arena_cur = new_cur;
+    asnix_stats_env++;
+    asnix_stats_env_elements += (uint64_t)nslots;
+
+    Env *e = (Env *)cur;
+    e->up = up ? (uint32_t)((uintptr_t)up - (uintptr_t)asnix_env_arena_base) : 0;
+    return e;
+}
 
 static LL_OP_ATTR Value ll_force_epilogue(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
@@ -46,6 +89,57 @@ static LL_OP_ATTR Value ll_apply_epilogue(IrOp *ip, Env *env, Value *vs, int64_t
     return vs[-1];
 }
 static IrOp ll_apply_sentinel = {.handler = (void *)ll_apply_epilogue, .a = 0, .b = 0};
+
+/* M10 ll port: pulled out of asnix_force_for_print's loop body (see
+ * that function's own comment) purely so the UNFORCED/slow path's own
+ * VALSTACK/RETSP setup -- which needs several callee-saved registers
+ * live across its two asnix_force_scratch_* calls -- doesn't force the
+ * COMMON "already forced, or not even a thunk" case to pay for an
+ * unconditional push-every-callee-saved-register prologue too.
+ * Disassembly comparison against asnix's own hand-written force.S
+ * (`objdump -d --disassemble=asnix_force_for_print`) showed exactly
+ * this gap: asnix's asm only pushes %r12/%r13/%r14/%rbx/%rbp/%r15 on
+ * the branch that actually confirms an UNFORCED Thunk, while the
+ * compiled C version (before this split) pushed all six at function
+ * entry unconditionally -- paid even by a call that immediately
+ * returns a plain int/string. Pure code motion, no logic change: same
+ * statements, same order, just split out of the loop into their own
+ * `noinline` function so clang can shrink-wrap the outer loop's
+ * prologue around the (rare) call to this one instead of the (common)
+ * early return above it. */
+static __attribute__((noinline)) Value ll_force_thunk_slow(Thunk *t, int64_t state_word) {
+    /* UNFORCED: state_word IS the clean IrProgram*. */
+    IrProgram *prog = (IrProgram *)(uintptr_t)state_word;
+
+    void *saved_vlim = asnix_valstack_limit;
+    void *saved_rlim = asnix_retsp_limit;
+
+    Value *vs = (Value *)asnix_force_scratch_valstack(asnix_force_depth);
+    RetFrame *rs = (RetFrame *)asnix_force_scratch_retstack(asnix_force_depth);
+    asnix_valstack_limit = (char *)vs + ASNIX_FORCE_VALSTACK_BYTES;
+    asnix_retsp_limit = (char *)rs + ASNIX_FORCE_RETSTACK_BYTES;
+    asnix_force_depth++;
+
+    t->state = ASNIX_THUNK_STATE_IN_PROGRESS;
+
+    rs[0].ip = &ll_force_sentinel;
+    rs[0].env = NULL;
+    rs[0].pool = NULL;
+    rs[0].force_target = t;
+
+    Env *thunk_env = (Env *)(uintptr_t)t->env;
+    t->env = (uint64_t)(uintptr_t)asnix_inprogress_head;
+    asnix_inprogress_head = t;
+
+    IrOp *ip0 = prog->ops;
+    Value result = ((LLOpFn)ip0->handler)(ip0, thunk_env, vs, prog->pool, rs + 1);
+
+    asnix_force_depth--;
+    asnix_retsp_limit = saved_rlim;
+    asnix_valstack_limit = saved_vlim;
+
+    return result;
+}
 
 /* Value asnix_force_for_print(Value v) -- see include/asnix/ir.h.
  * Also resolves Cell/LazyApp/ThunkMap indirection (ll_resolve.c)
@@ -79,37 +173,7 @@ Value asnix_force_for_print(Value v) {
             asnix_fatal(msg, sizeof(msg) - 1);
         }
 
-        /* UNFORCED: state_word IS the clean IrProgram*. */
-        IrProgram *prog = (IrProgram *)(uintptr_t)state_word;
-
-        void *saved_vlim = asnix_valstack_limit;
-        void *saved_rlim = asnix_retsp_limit;
-
-        Value *vs = (Value *)asnix_force_scratch_valstack(asnix_force_depth);
-        RetFrame *rs = (RetFrame *)asnix_force_scratch_retstack(asnix_force_depth);
-        asnix_valstack_limit = (char *)vs + ASNIX_FORCE_VALSTACK_BYTES;
-        asnix_retsp_limit = (char *)rs + ASNIX_FORCE_RETSTACK_BYTES;
-        asnix_force_depth++;
-
-        t->state = ASNIX_THUNK_STATE_IN_PROGRESS;
-
-        rs[0].ip = &ll_force_sentinel;
-        rs[0].env = NULL;
-        rs[0].pool = NULL;
-        rs[0].force_target = t;
-
-        Env *thunk_env = (Env *)(uintptr_t)t->env;
-        t->env = (uint64_t)(uintptr_t)asnix_inprogress_head;
-        asnix_inprogress_head = t;
-
-        IrOp *ip0 = prog->ops;
-        Value result = ((LLOpFn)ip0->handler)(ip0, thunk_env, vs, prog->pool, rs + 1);
-
-        asnix_force_depth--;
-        asnix_retsp_limit = saved_rlim;
-        asnix_valstack_limit = saved_vlim;
-
-        v = result;
+        v = ll_force_thunk_slow(t, state_word);
         /* loop: see the FORCED case's own comment above */
     }
 }
@@ -172,7 +236,7 @@ Value asnix_apply(Value fn, const Value *args, int64_t argc) {
         asnix_retsp_limit = (char *)rs + ASNIX_FORCE_RETSTACK_BYTES;
         asnix_apply_depth++;
 
-        Env *new_env = asnix_env_alloc(c->up, argc);
+        Env *new_env = ll_env_alloc_fast(c->up, argc);
         for (int64_t i = 0; i < argc; i++) new_env->values[i] = args[i];
 
         rs[0].ip = &ll_apply_sentinel;
