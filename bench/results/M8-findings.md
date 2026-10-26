@@ -1366,21 +1366,21 @@ It is not one single cause. Breaking its 30,304 real flatten events
 down by the call site that triggered each one found five distinct
 causes, none dominant alone:
 
-- 1.19MB from `asnix_attrs_update`'s own leaf-budget-overflow
+- 14.3MB from `asnix_attrs_update`'s own leaf-budget-overflow
   restart, flattening the accumulated left side of a long `//`
-  chain. A further 0.62MB comes from the same function's eager-
+  chain. A further 7.5MB comes from the same function's eager-
   merge fallback flattening its right side. Both costs are a direct,
   unavoidable part of the same heuristic change above. `iets` pays
   this too, already counted inside its own 23.1MB `AttrsUpd` total.
-- 0.58MB from dynamic `${...}` attribute insertion, which needs a
+- 7.1MB from dynamic `${...}` attribute insertion, which needs a
   flat base to insert into.
-- 0.58MB from `derivation.c`'s own two highest-risk call sites. This
+- 7.0MB from `derivation.c`'s own two highest-risk call sites. This
   codebase's own comments already flag both sites. Heavy `//`
   chaining (stdenv's mkDerivation defaults merged with overrides)
   meets a real consumer that needs the full result right there.
-- 0.4MB from a handful of `mapAttrs` calls, 27 in total, each one
+- 2.8MB from a handful of `mapAttrs` calls, 27 in total, each one
   over a very large attrset averaging more than 8,000 entries.
-- 0.22MB from the shared count-check helper behind `attrNames`,
+- 2.7MB from the shared count-check helper behind `attrNames`,
   `attrValues`, `hasAttr`, `getAttr`, and `removeAttrs`.
 
 Restricting the comparison to what `//` itself causes, the leaf
