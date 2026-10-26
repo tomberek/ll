@@ -932,3 +932,52 @@ points to measurement noise on a largely I/O-bound eval, not a
 regression. The instruction count is the more reliable number here.
 The ten synthetic workloads are unaffected. All ten still run faster
 on `ll` than asnix, by 1.18 to 1.71 times depending on the workload.
+
+## Correction: every number above compared ll at -O3 against asnix at -O2
+
+Every ffmpeg-full.outPath gap reported above compared `ll`'s build
+against asnix's own default build. `ll`'s Makefile sets `OPT` to
+`-O3` by default. This applies uniformly to the op handlers and to
+the vendored frontend code (lexer, parser, compiler, builtins).
+asnix's own Makefile sets `OPT` to `-O2` by default, applied to that
+exact same vendored frontend source. Neither Makefile's comments
+compare `-O2` against `-O3` directly. asnix's own comment only
+measured `-O2` against `-O0`, a different question. Every comparison
+in this document up to this point mixed two separate things
+together: `ll`'s own dispatch backend improvements, and a real,
+unrelated optimization-level gap in shared code. Neither project's
+architecture work ever touched that second gap.
+
+The fix: rebuild asnix with `make clean && make OPT=-O3 asnix`.
+First check that its own unit tests and `test-e2e` suite still pass
+at this optimization level. They do. asnix's own instruction count
+on ffmpeg-full.outPath then dropped from 6,492,211,413 to
+6,371,026,916. That is about 1.9 percent fewer instructions than its
+own `-O2` build, purely from compiling the same C source more
+aggressively. Against `ll`'s 6,645,790,912, the honest, matched-
+optimization-level gap is 4.31 percent, not the 2.37 percent
+reported two sections above. Wall-clock on the same expression has
+tighter error bars than earlier runs in this document: plus or minus
+roughly 15 milliseconds on about 900-960 milliseconds, instead of
+the 25-40 millisecond spread seen before. It puts asnix at 1.06
+times faster than `ll`.
+
+This matters for the project's own founding question: does compiling
+the dispatch loop through LLVM beat hand-written assembly. The ten
+synthetic `bench/workloads/*.nix` cases are small expressions. They
+do almost no frontend work, with little to parse or compile. They
+mostly measure the dispatch loop itself, the one part this project's
+whole backend-replacement effort actually changes. Against the
+matched, `-O3` asnix build, `ll` still wins all ten. The margin is
+1.12 to 1.79 times, about the same as against the `-O2` build. The
+dispatch-layer thesis holds up where it is actually being tested.
+`ffmpeg-full.outPath` is different. It spends most of its time in
+frontend parsing, compiling, vendored builtins, derivation hashing,
+and SHA256. All of that is shared, byte-identical code on both
+sides. This project's dispatch-backend work was never going to
+change any of it. The honest conclusion: `ll`'s LLVM-compiled
+dispatch backend beats asnix's hand-written assembly dispatch loop
+on workloads that exercise dispatch, by a wide and consistent
+margin. A real-world nixpkgs evaluation is not such a workload. It
+is dominated by other costs this project does not touch, and asnix
+stays a little ahead there, honestly measured.
