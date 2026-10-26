@@ -1771,3 +1771,39 @@ correctness loss, so this is now a permanent feature, not a
 prototype. See `heap.h`'s `ASNIX_FORMALSMAP_MARKER` comment for the
 full design, and `op_misc.c`'s `ll_op_mk_formalsmap` for the
 handler.
+
+## A tried and reverted idea: a cross-derivation ATerm escape cache
+
+The escape cache in `aterm.c` only shares work within one
+derivation's own three passes (masked, real, cache-hash). It is
+keyed by source pointer. Many strings repeat across derivations too,
+such as `system = "x86_64-linux"`. A content-keyed, process-lifetime
+cache looked like a way to share that work across the whole eval,
+not just one derivation.
+
+The idea failed. Instructions went up, not down: pinned `perf stat`
+counted 5.44 billion before the change and 5.75 billion after, a
+5.64% rise. Cycles rose 6.78%. Wall clock rose 7.7%. Peak RSS also
+rose, instead of falling. Every axis moved the wrong way, with no
+benefit to offset the cost.
+
+The cause is the hash function itself. The old cache hashed the
+source pointer, a fixed, length-independent cost. A content-keyed
+cache must hash the string's own bytes instead, a cost that grows
+with the string's length. It is paid on every lookup, including the
+within-derivation hits that used to be nearly free.
+`find_escape_aterm`'s own SWAR scan, the cost this cache exists to
+skip, is already fast. Round 4 of this document found it near its
+own ceiling. Hashing every byte to find a cache slot was not cheaper
+than scanning those same bytes to find an escape. The trade lost on
+this benchmark.
+
+The change was fully reverted, not left in the tree. 44 of 44
+difftest cases and the full nixpkgs-hash sweep passed both before
+and after this attempt, so correctness was never in question here.
+Only instructions, cycles, wall clock, and RSS, all measured with
+pinned `perf stat` and `/usr/bin/time -v`, decided this. Do not
+re-attempt a content-keyed cache for this exact cost, ATerm escaping,
+without a real change in the tradeoff. A cheaper content hash, or a
+workload with a much higher cross-derivation hit rate, changes that
+balance.
