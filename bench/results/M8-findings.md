@@ -831,3 +831,50 @@ instruction count to 6,693,930,803, 3.1 percent above asnix, down
 from 3.4 percent. The ten synthetic workloads still all run faster
 on `ll` than asnix, by 1.11 to 1.69 times depending on the
 workload.
+
+## Four parallel agents, two more real fixes, down to 1.02x
+
+Four agents ran at the same time, each in its own git worktree, to
+look for more of the same class of fix. Each one owned a separate
+file set. This kept them from stepping on each other. Each agent had
+to pass the full 44-case difftest suite first. Each agent also had to
+pass a direct diff of `ffmpeg-full.outPath` against real asnix
+output. Only then did it report a change as done.
+
+Two agents found and fixed a real, verified cost. `asnix_env_alloc`
+(`src/asm/env.S`) is the Env allocator. Every closure call, every
+`let`/`rec` frame, and every `with` scope uses it. It made the same
+kind of real, non-tail call mid-handler that `asnix_arena_alloc` did
+before its own fix earlier in this document. One agent added an
+inlined fast path for it: `ll_env_alloc` in `op_dispatch.h`. It
+switched `OP_FRAME_ALLOC`, `OP_CALL`'s closure branch, and `OP_WITH`
+to use it. A second agent worked on `closure_helpers.c` at the same
+time. It found the same cost in `asnix_apply`'s closure branch and
+added its own local copy of the same fast path there. It made one
+more fix too. `asnix_force_for_print`'s compiled prologue saved six
+registers on every call. It did this even on the common fast-return
+path, which needs none of them. The agent moved the slow,
+six-register path into its own `noinline` helper function. This let
+the compiler shrink the fast path down to two registers, matching
+the shape of asnix's own `force.S`.
+
+Both agents touched `src/asm/env_arena.S`. Each needed to export the
+same two, previously file-local symbols, and each added that export
+on its own. This produced one merge conflict, a duplicated comment,
+trivial to resolve. It also produced one duplicate extern
+declaration with a mismatched type: `uint8_t *` in one file, `void *`
+in the other. The compiler caught this immediately. The fix was one
+line. The two other agents reported clean negative results. A sweep
+of seven more op handler files found no handler with the old spill
+pattern left to fix. A dedicated audit of the `preserve_none` rollout
+found no missing attribute and no type mismatch anywhere.
+
+Both real fixes are now merged, and the one post-merge type conflict
+is fixed. The instruction count on `ffmpeg-full.outPath` dropped to
+6,658,208,843, 2.6 percent above asnix, down from 3.1 percent.
+Wall-clock time dropped to 1.02 times asnix's time. This is
+essentially parity, within measurement noise. It is down from 1.07
+times at the start of this section and 1.14 times at the start of
+the whole optimization effort. The ten synthetic workloads are
+unaffected. All ten still run faster on `ll` than asnix, by 1.07 to
+1.69 times depending on the workload.
