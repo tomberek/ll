@@ -44,11 +44,13 @@ asnix_env_arena_base:
     .size asnix_env_arena_base, 8
 
     .align 8
-    // M8 perf work: exported (.globl) so op_dispatch.h's ll_env_alloc can
-    // inline this allocator's bump-pointer fast path directly from C
-    // (same precedent as arena.h's AsnixArenaState.cur/end, which
-    // ll_arena_alloc already reads this way) -- previously file-local,
-    // since only asnix_env_arena_alloc itself (this file) needed them.
+    // M8 perf work: exported (.globl) so both op_dispatch.h's ll_env_alloc
+    // and closure_helpers.c's ll_env_alloc_fast can inline this allocator's
+    // bump-pointer fast path directly from C (same precedent as arena.h's
+    // AsnixArenaState.cur/end, which ll_arena_alloc already reads this way)
+    // -- previously file-local, since only asnix_env_arena_alloc itself
+    // (this file) needed them. Purely additive; asnix's own asm callers
+    // are unaffected.
     .globl asnix_env_arena_cur
     .type asnix_env_arena_cur, @object
 asnix_env_arena_cur:
