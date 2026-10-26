@@ -1705,3 +1705,69 @@ area. The bound on the possible win is small either way, about
 1.2% of instructions at most, since that is `malloc`'s whole
 measured share. This is left here as a candidate for a future
 round, not attempted in this one.
+
+## FormalsMap: one shared descriptor for required lambda-pattern formals
+
+The thunk-gap investigation found one dominant cause. Pattern-lambda
+formal binding, the code that binds each field of a `{a, b, ...}:`
+function pattern, builds 25.6% of all thunks on `ffmpeg-full.outPath`.
+Real nixpkgs code calls this path 46,719 times, with an average of
+10.6 formals each. Every required (no default) formal got its own
+Thunk object, even though its value is always the same fixed
+operation: select the field from the call's own argument, then
+force it.
+
+FormalsMap replaces one Thunk per required formal with one shared
+descriptor per call. It reuses the pointer-tagging trick ThunkMap
+already uses for `mapAttrs`: a packed 8-byte Value encodes the
+descriptor's address plus the formal's position within one word.
+The first read of a given formal resolves it from the call's
+argument attrset. It then writes the result back into the same
+slot it came from. A later read of that same slot sees the plain
+ground value directly, with no extra step. This mechanism is
+`ll`-only. `asnix` has no equivalent, since this gap does not exist
+there in the same shape.
+
+Two bugs surfaced while building this. The first crashed every real
+pattern-lambda call. The op that builds the descriptor read the
+call's argument straight from its env slot. That slot still held
+the lazy thunk. An earlier step already forced that thunk on the
+value stack, for its own separate purpose. It never wrote the
+forced value back into the env slot. So the descriptor stored a
+stale pointer, not the real attrset. The fix reads that slot the
+same way an ordinary variable read resolves an already-forced
+thunk, before building the descriptor. The second bug was in the
+printer. Its cycle-detection key for a FormalsMap read reused the
+exact address an enclosing Cell reference already used, one step
+up. So even a first, non-repeated read printed as `«repeated»`.
+The fix uses the packed Value's own bits as the key instead, a
+value that never collides with a bare pointer.
+
+The fix passed four correctness gates:
+
+- all 44 difftest cases
+- a 14-case hand-built pattern-lambda file, matched byte-for-byte
+  against `asnix`
+- all 148 nixpkgs-hash attribute/field pairs
+- a byte-identical `ffmpeg-full.outPath` diff against `asnix`
+
+That hand-built file covers required fields, optional fields,
+letrec-style forward visibility, `...`, `@` aliases, unused fields
+never forced, and recursion through required formals.
+
+Measured on `ffmpeg-full.outPath`, against the same workload before
+this change (three runs each, under 1% variance):
+
+- callgrind instructions: down 3.42%
+- pinned `perf stat` instructions: down 5.06%
+- pinned `perf stat` wall clock: down 27.5%
+- peak RSS: down 11.5%, about 54 MB
+- minor page faults: down 10.9%
+- cache misses: down 8%
+
+Major page faults stayed at zero on both sides. Branch misses stayed
+about flat. Every measured number moved the same direction, with no
+correctness loss, so this is now a permanent feature, not a
+prototype. See `heap.h`'s `ASNIX_FORMALSMAP_MARKER` comment for the
+full design, and `op_misc.c`'s `ll_op_mk_formalsmap` for the
+handler.
