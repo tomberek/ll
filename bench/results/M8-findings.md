@@ -1400,3 +1400,88 @@ No further fix was attempted past this point. Every lead left
 standing is a smaller version of a trade already tried and rejected
 twice this session: tune the leaf-budget threshold further, or stop
 caching a one-off materialize result. Both carry a shrinking return.
+
+## Two safe probe-based fixes, and a wider look past attrsets
+
+A follow-up round re-examined the remaining gap with a direct goal.
+It aimed to match `iets`'s real wall clock on `ffmpeg-full.outPath`,
+not just its attrset byte count. A fresh three-way hyperfine run, 25
+samples, found `iets` a real, reproducible 1.17x to 1.28x faster
+than `ll` end to end. This holds even though `ll` runs fewer raw
+instructions: 6.66 billion against `iets`'s 7.49 billion, on the
+same callgrind run. Instruction count alone does not explain this
+workload.
+
+`ll`'s own memory footprint is the likelier cause. Rebuilding `ll`
+from before today's attrset fixes, then comparing wall clock, found
+those fixes already bought a real 8.5% speedup: 1.122s down to
+1.026s. Two of those fixes cost instructions on paper. From this
+point on, this round judged every change by wall clock, not
+instruction count.
+
+Two more real, safe fixes came out of this round. Both follow the
+same pattern `asnix_bshared_attrs_probe` already established: a
+single-key lookup never needs the whole set materialized.
+
+`asnix_collect_input_refs`, in `derivation.c`, is one of the two
+"highest-risk" materialize call sites named above. It only ever
+reads three known keys, `type`, `drvPath`, and `outputName`, to
+decide whether a value is a derivation. It used to resolve the
+whole set first. It now probes for all three keys directly instead.
+When the probe fails to find all three keys, it falls back to the
+original resolve-and-scan. That fallback case is rare: a value that
+is not a derivation at all, which genuinely needs the full
+json/`__toString`/`outPath` handling. Measured result: instructions
+down 0.072%, a real improvement. Peak RSS stayed flat. Most of this
+call site's hit volume turned out to be already-flat attrsets
+paying an O(n) scan cost, not a union materialize. The fix passed
+all four correctness gates and was merged.
+
+`hasAttr` and `getAttr`, in `builtins_attrs.c`, had the identical
+problem one level down. Both routed through a local `attrs_find`
+helper. That helper called `attrs_count` first, a full resolve just
+to bound a binary search. Both builtins now call
+`asnix_bshared_attrs_probe` directly instead. `attrs_find` is now
+dead code and was removed. The effect on `ffmpeg-full.outPath`
+itself sits inside measurement noise, since that benchmark does not
+lean heavily on these two builtins. The fix is correct regardless.
+This exact gap was already named in `asnix_bshared_attrs_probe`'s
+own header comment, as a deferred scope cut from an earlier
+milestone. Closing it costs nothing and helps any workload that does
+lean on these two builtins. The fix passed all four correctness
+gates and was merged.
+
+A wider census compared every object category, not just attrsets,
+between `asnix`'s own stats and `iets`'s. It found two things worth
+recording. First, environments sit at near parity already. `ll`
+creates more of them than `iets`, 1,038,688 against 780,378, but
+each one is smaller on average. The two totals land within half a
+percent of each other: 18.82MB against 18.92MB. No fix is needed
+here.
+
+Second, thunks show a real, unexplained 7.7MB gap. `asnix` creates
+1,933,944 of them at a fixed 16 bytes each. `iets` creates 481,336
+fewer thunk-family objects, at the same 16 bytes each. The gap sits
+purely in how often each system decides to defer something, not in
+how big each deferred unit is. This round did not find the root
+cause. `ll`'s own compiler already runs a mature, well-tested
+thunk-elision pass, `is_thunk_free_literal`. It covers constant
+literals and folded binary operations. A separate pass,
+`try_cell_ref`, covers bare variable references. Closing this gap
+further needs tracing real call sites, not guessing at one.
+
+Third, and the largest single number in this wider census: `asnix`
+allocates 894,153 Cell objects, 16 bytes each, 14.3MB in total, for
+bare variable references that resolve lexically. This is a real,
+deliberate design (M92 in this codebase's own history), built to
+preserve real Nix's own slot-identity behavior for `==` and the
+printer. `iets`'s own census reports no equivalent category at all.
+Two explanations are possible. `iets` can achieve the same aliasing
+with zero allocation, a plain pointer copy into the new binding's
+slot rather than a wrapper object. Or `iets` can skip the same
+guarantee entirely. This round did not pursue a fix here. The two
+probe-based fixes above only change how a lookup finds data.
+Changing how variable aliasing works risks a real behavior
+regression in verified `==`/printer semantics, not just a perf
+cost. It needs its own careful investigation before
+change.
