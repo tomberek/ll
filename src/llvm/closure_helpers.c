@@ -50,18 +50,17 @@ int64_t asnix_apply_depth = 0;
  * same round_up_4 itself -- see env_arena.S's own header comment for
  * why 4, not 8), plus the NULL-safe `up` compression asnix_env_alloc's
  * own general-purpose entry point does (unlike the hot-path op
- * handlers, which only ever see a non-NULL current ENV). */
-extern void *asnix_env_arena_cur;
-extern void *asnix_env_arena_end;
-
+ * handlers, which only ever see a non-NULL current ENV). asnix_env_arena_cur/
+ * _end are already declared (as uint8_t *) by op_dispatch.h, included
+ * above -- no separate extern needed here. */
 static inline Env *ll_env_alloc_fast(Env *up, int64_t nslots) {
-    uint8_t *cur = (uint8_t *)asnix_env_arena_cur;
+    uint8_t *cur = asnix_env_arena_cur;
     if (cur == NULL) return asnix_env_alloc(up, nslots); /* arena not yet initialized */
 
     uint64_t n = (uint64_t)ASNIX_ENV_OFF_VALUES + (uint64_t)nslots * 8;
     uint64_t n4 = (n + 3) & ~(uint64_t)3;
     uint8_t *new_cur = cur + n4;
-    if (new_cur > (uint8_t *)asnix_env_arena_end) return asnix_env_alloc(up, nslots);
+    if (new_cur > asnix_env_arena_end) return asnix_env_alloc(up, nslots);
 
     asnix_env_arena_cur = new_cur;
     asnix_stats_env++;
