@@ -12,7 +12,6 @@
 #include "asnix/stats.h"
 #include "asnix/ir.h"
 #include "asnix/irbuild.h"
-#include "attrs_update.h" /* M88: asnix_attrs_eager_merge, for asnix_bshared_attrs_resolve */
 #include "symtab.h"
 #include "value_util.h"
 
@@ -291,6 +290,71 @@ Value asnix_bshared_make_list(const Value *elems, int64_t count) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_LIST };
 }
 
+/* M-garbage-fix: merges two already-flat (sym-sorted) attrsets' entry
+ * arrays into a caller-supplied output buffer, preserving `//`'s
+ * right-biased collision semantics (rhs wins on a duplicate key). This is
+ * the EXACT SAME two-pointer comparison/copy logic as
+ * asnix_attrs_eager_merge's own inner loop (attrs_update.c) -- duplicated
+ * here deliberately, not shared, because this helper is parameterized
+ * over raw (entries pointer, count) pairs and a buffer the CALLER already
+ * owns, instead of allocating (and stats-counting) its own output the way
+ * asnix_attrs_eager_merge must keep doing for its own, unrelated call
+ * sites. Used ONLY by asnix_bshared_attrs_resolve's internal merge rounds
+ * below. Returns the number of entries written (<= acount+bcount, shrinks
+ * only on duplicate keys); `out_entries` must have room for at least
+ * acount+bcount entries.
+ *
+ * M-garbage-fix perf note: deliberately NOT inlined. If the compiler
+ * inlines this into the much-larger asnix_bshared_attrs_resolve below,
+ * the function grows past whatever size threshold GCC uses to decide
+ * whether a small-constant-size `memcpy(dst, src, ASNIX_ATTR_SIZE)` is
+ * worth expanding into a couple of plain `mov`s inline -- past that
+ * threshold it instead emits a real call to `__memcpy_chk` (confirmed
+ * via `objdump -d`), which costs measurably more retired instructions
+ * per entry than the handful of `mov`s asnix_attrs_eager_merge's own
+ * (standalone, small, NOT inlined anywhere) copy of this same loop gets.
+ * Keeping this helper out-of-line, same as asnix_attrs_eager_merge
+ * itself, keeps it small enough that the compiler expands the memcpys
+ * the same cheap way. */
+static int64_t attrs_merge_entries_into(const char *aentries, int64_t acount, const char *bentries, int64_t bcount,
+                                         char *out_entries) __attribute__((noinline));
+static int64_t attrs_merge_entries_into(const char *aentries, int64_t acount, const char *bentries, int64_t bcount,
+                                         char *out_entries) {
+    const char *pa = aentries;
+    const char *pb = bentries;
+    const char *aend = aentries + acount * ASNIX_ATTR_SIZE;
+    const char *bend = bentries + bcount * ASNIX_ATTR_SIZE;
+    char *pout = out_entries;
+    while (pa < aend && pb < bend) {
+        uint32_t asym = *(const uint32_t *)(pa + ASNIX_ATTR_OFF_SYM);
+        uint32_t bsym = *(const uint32_t *)(pb + ASNIX_ATTR_OFF_SYM);
+        if (asym < bsym) {
+            memcpy(pout, pa, ASNIX_ATTR_SIZE);
+            pa += ASNIX_ATTR_SIZE;
+        } else if (bsym < asym) {
+            memcpy(pout, pb, ASNIX_ATTR_SIZE);
+            pb += ASNIX_ATTR_SIZE;
+        } else {
+            /* duplicate key: rhs (b) wins, matching `//`'s right-biased semantics */
+            memcpy(pout, pb, ASNIX_ATTR_SIZE);
+            pa += ASNIX_ATTR_SIZE;
+            pb += ASNIX_ATTR_SIZE;
+        }
+        pout += ASNIX_ATTR_SIZE;
+    }
+    while (pa < aend) {
+        memcpy(pout, pa, ASNIX_ATTR_SIZE);
+        pa += ASNIX_ATTR_SIZE;
+        pout += ASNIX_ATTR_SIZE;
+    }
+    while (pb < bend) {
+        memcpy(pout, pb, ASNIX_ATTR_SIZE);
+        pb += ASNIX_ATTR_SIZE;
+        pout += ASNIX_ATTR_SIZE;
+    }
+    return (pout - out_entries) / ASNIX_ATTR_SIZE;
+}
+
 /* M88: see builtins_shared.h's comment and heap.h's UnionHdr layout. */
 Value asnix_bshared_attrs_resolve(Value v) {
     const char *base = (const char *)(uintptr_t)(v.raw & ~(uint64_t)ASNIX_TAG_MASK);
@@ -302,6 +366,16 @@ Value asnix_bshared_attrs_resolve(Value v) {
 
     int64_t nleaves = -count;
     const Value *leaves = (const Value *)(base + ASNIX_ATTRS_UNION_OFF_LEAVES);
+
+    if (nleaves == 1) {
+        /* No merge at all needed -- leaves[0] is already a real,
+         * permanent, flat attrs object (guaranteed flat by construction,
+         * see the comment below), so there's nothing to copy. */
+        Value acc = leaves[0];
+        *(Value *)((char *)base + ASNIX_ATTRS_UNION_OFF_FLATCACHE) = acc;
+        return acc;
+    }
+
     /* Leaves are guaranteed flat by construction (asnix_attrs_update,
      * attrs_update.c, always resolves a would-be leaf before storing it).
      *
@@ -317,25 +391,112 @@ Value asnix_bshared_attrs_resolve(Value v) {
      * synthetic many-small-leaves benchmark (nearly identical memory to
      * the eager baseline). The pairwise merge below halves the work list
      * each round (same shape as mergesort's merge phase), preserving
-     * `//`'s right-biased collision semantics: each pairwise
-     * asnix_attrs_eager_merge(work[i], work[i+1]) keeps `work[i+1]` (the
-     * more-recently-layered, higher-priority side, since `leaves` is
-     * stored lowest-priority-first) as the winning operand, and pairing
+     * `//`'s right-biased collision semantics: each pairwise merge of
+     * (entries_ptr[i], entries_cnt[i]) with (entries_ptr[i+1],
+     * entries_cnt[i+1]) keeps slot i+1 (the more-recently-layered,
+     * higher-priority side, since `leaves` is stored lowest-priority-
+     * first) as the winning operand on a duplicate key, and pairing
      * adjacent elements bottom-up preserves that same relative priority
-     * order all the way up the tree. */
-    Value work[ASNIX_ATTRS_UNION_MAX_LEAVES];
-    for (int64_t i = 0; i < nleaves; i++) work[i] = leaves[i];
+     * order all the way up the tree.
+     *
+     * M-garbage-fix: the merge ALGORITHM above is unchanged from the
+     * original bottom-up pairwise design -- same comparisons, same
+     * copies, same round structure. What changed is WHERE each round's
+     * output lives. Every round used to call asnix_attrs_eager_merge
+     * directly, meaning every round's output -- including the (up to
+     * nleaves-2) intermediate rounds that the very next round
+     * immediately supersedes, and that nothing else ever reads again --
+     * was a real, permanent asnix_arena_alloc allocation in the
+     * never-free arena. Measured on the real ffmpeg-full.outPath
+     * benchmark: materialize calls flatten 2,387,216 entries' worth of
+     * actually-useful final results, but permanently allocated
+     * 3,927,137 entries total across every round -- about 18.5MB of
+     * pure, confirmed, never-reclaimed garbage.
+     *
+     * Fix: every round EXCEPT the last now writes into one of a handful
+     * of plain `malloc` scratch buffers instead of the permanent arena.
+     * NOT a ping-pong between just 2 buffers (a "carried over, unmerged"
+     * odd-one-out entry from an earlier round can end up pointing into a
+     * buffer a LATER round would then overwrite) -- one DEDICATED buffer
+     * per round, never reused across rounds. ASNIX_ATTRS_UNION_MAX_LEAVES
+     * (64) bounds the round count at log2(64)=6 (each round at least
+     * halves the work list), so at most 6 scratch buffers are ever
+     * allocated. Each is sized to `upper_bound` entries -- the total
+     * entry count summed across all original leaves, which bounds every
+     * round's output (a pairwise merge only ever shrinks the total, via
+     * duplicate-key collisions, never grows it; the bound holds
+     * transitively across rounds too).
+     *
+     * The LAST round is always a plain 2-way merge (the loop below only
+     * runs while n > 2, and a round's output count is ceil(n/2), which
+     * only reaches 1 by going through exactly n == 2) -- so instead of
+     * writing it into one more scratch buffer and then copying the
+     * result into the permanent arena (an extra full-size copy of the
+     * final, biggest result, measured to cost ~19M extra instructions
+     * on the real ffmpeg-full.outPath benchmark, enough on its own to
+     * erase this fix's whole win), that last merge writes DIRECTLY into
+     * one real, permanent arena allocation (upper-bound-sized, same
+     * "don't bother reclaiming the slack" convention
+     * asnix_attrs_eager_merge's own allocation already uses). Every
+     * scratch buffer (if any were allocated at all) is freed right
+     * after -- none of them outlive this function call. */
+    const char *entries_ptr[ASNIX_ATTRS_UNION_MAX_LEAVES];
+    int64_t entries_cnt[ASNIX_ATTRS_UNION_MAX_LEAVES];
+    int64_t upper_bound = 0;
+    for (int64_t i = 0; i < nleaves; i++) {
+        const char *lb = (const char *)(uintptr_t)(leaves[i].raw & ~(uint64_t)ASNIX_TAG_MASK);
+        int64_t lc = *(const int64_t *)(lb + ASNIX_ATTRS_OFF_COUNT);
+        entries_ptr[i] = lb + ASNIX_ATTRS_OFF_ENTRIES;
+        entries_cnt[i] = lc;
+        upper_bound += lc;
+    }
+
+    void *scratch[6]; /* log2(ASNIX_ATTRS_UNION_MAX_LEAVES) == 6 */
+    int64_t n_scratch = 0;
+    size_t scratch_bytes = (size_t)upper_bound * ASNIX_ATTR_SIZE;
+    if (scratch_bytes == 0) scratch_bytes = 1; /* malloc(0) is implementation-defined; avoid relying on it */
+
     int64_t n = nleaves;
-    while (n > 1) {
+    while (n > 2) {
+        void *mem = malloc(scratch_bytes);
+        if (!mem) {
+            fprintf(stderr, "asnix: out of memory\n");
+            exit(1);
+        }
+        scratch[n_scratch++] = mem;
+        char *cursor = (char *)mem;
+
         int64_t out_n = 0;
         int64_t i = 0;
         for (; i + 1 < n; i += 2) {
-            work[out_n++] = asnix_attrs_eager_merge(work[i], work[i + 1]);
+            int64_t k = attrs_merge_entries_into(entries_ptr[i], entries_cnt[i], entries_ptr[i + 1],
+                                                  entries_cnt[i + 1], cursor);
+            entries_ptr[out_n] = cursor;
+            entries_cnt[out_n] = k;
+            out_n++;
+            cursor += k * ASNIX_ATTR_SIZE;
         }
-        if (i < n) work[out_n++] = work[i]; /* odd one out, carried up unmerged */
+        if (i < n) { /* odd one out, carried up unmerged */
+            entries_ptr[out_n] = entries_ptr[i];
+            entries_cnt[out_n] = entries_cnt[i];
+            out_n++;
+        }
         n = out_n;
     }
-    Value acc = work[0];
+
+    /* n == 2 here (see the comment above): the one and only real,
+     * permanent allocation this function ever makes, built directly
+     * from the last pairwise merge's own output -- no extra copy. */
+    void *mem = asnix_arena_alloc(ASNIX_ATTRS_OFF_ENTRIES + (uint64_t)(entries_cnt[0] + entries_cnt[1]) * ASNIX_ATTR_SIZE);
+    int64_t final_count = attrs_merge_entries_into(entries_ptr[0], entries_cnt[0], entries_ptr[1], entries_cnt[1],
+                                                     (char *)mem + ASNIX_ATTRS_OFF_ENTRIES);
+    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = final_count;
+    asnix_stats_attrs++;
+    asnix_stats_attrs_entries += (uint64_t)final_count;
+
+    for (int64_t s = 0; s < n_scratch; s++) free(scratch[s]);
+
+    Value acc = (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
     *(Value *)((char *)base + ASNIX_ATTRS_UNION_OFF_FLATCACHE) = acc;
     return acc;
 }
