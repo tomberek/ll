@@ -86,39 +86,29 @@ void *ll_handler_table[OP_COUNT] = {
     [OP_HALT] = (void *)ll_op_halt,
 };
 
-/* M10 perf: a post-link peephole pass, not a compiler.c change --
- * compiler.c (vendored, byte-identical to asnix) stays untouched, and
- * nothing it emits knows this pass exists. A literal list/attrset
- * built entirely from plain integer constants (list_build_large.nix,
- * attrset_build_large.nix) compiles to a long run of bare
- * OP_PUSH_INT with nothing interleaved, because `ib_pool_add`
- * allocates pool slots in strict call order: run detection just
- * needs "N consecutive OP_PUSH_INT records whose pool indices are
- * consecutive integers," checked while `handler` still holds the
- * small op-id (before the main linking loop below overwrites it).
- * Runs of 4 or more get flagged (`a` repurposed to hold the run
- * length -- always 0 on a lone OP_PUSH_INT, see ib_push_int) so the
- * main loop links the run's first record to ll_op_push_int_run
- * instead of the ordinary one-push-per-hop handler; the remaining
- * records in the run still link normally and stay individually
- * valid, just unreached in the ordinary control flow (the fused
- * handler's own ip += count skips straight over them). */
+/* M10 perf: a single forward-pass link + peephole fusion, not a
+ * compiler.c change -- compiler.c (vendored, byte-identical to
+ * asnix) stays untouched, and nothing it emits knows this fusion
+ * exists. A literal list/attrset built entirely from plain integer
+ * constants (list_build_large.nix, attrset_build_large.nix) compiles
+ * to a long run of bare OP_PUSH_INT with nothing interleaved,
+ * because `ib_pool_add` allocates pool slots in strict call order:
+ * run detection just needs "N consecutive OP_PUSH_INT records whose
+ * pool indices are consecutive integers," checked while `handler`
+ * still holds the small op-id for the not-yet-visited lookahead
+ * records -- safe because this loop only ever writes ops[i] (and,
+ * for a fused run, the already-looked-ahead ops[i+1..j-1]), never
+ * reads ahead into anything this same pass has already linked.
+ * Runs of 4 or more get the first record linked straight to
+ * ll_op_push_int_run (with `a` repurposed to hold the run length);
+ * every other record in the run still gets linked to the ordinary
+ * ll_op_push_int so it stays individually valid, just unreached in
+ * the ordinary control flow (the fused handler's own ip += count
+ * skips straight over them). This used to be two full passes over
+ * `ops` (a separate fuse_push_int_runs pre-pass, then this linking
+ * loop); merging them into one removes a full redundant scan of
+ * every op in every compiled function body. */
 #define LL_PUSH_INT_RUN_MIN 4
-
-static void fuse_push_int_runs(IrOp *ops, size_t n) {
-    size_t i = 0;
-    while (i < n) {
-        if ((intptr_t)ops[i].handler != OP_PUSH_INT) {
-            i++;
-            continue;
-        }
-        size_t j = i + 1;
-        while (j < n && (intptr_t)ops[j].handler == OP_PUSH_INT && ops[j].b == ops[j - 1].b + 1) j++;
-        size_t run_len = j - i;
-        if (run_len >= LL_PUSH_INT_RUN_MIN) ops[i].a = (int32_t)run_len;
-        i = j;
-    }
-}
 
 /* No bounds check, no null-handler fatal: matches asnix's own
  * ir_link exactly (src/c/dispatch_table.c there), which trusts its
@@ -130,9 +120,24 @@ static void fuse_push_int_runs(IrOp *ops, size_t n) {
  * closing roughly a third of ir_link's instruction-count gap to
  * asnix's own version -- see M8-findings.md's own section on this. */
 void ir_link(IrOp *ops, size_t n) {
-    fuse_push_int_runs(ops, n);
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n;) {
         intptr_t op_id = (intptr_t)ops[i].handler;
-        ops[i].handler = (op_id == OP_PUSH_INT && ops[i].a > 0) ? (void *)ll_op_push_int_run : ll_handler_table[op_id];
+        if (op_id != OP_PUSH_INT) {
+            ops[i].handler = ll_handler_table[op_id];
+            i++;
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < n && (intptr_t)ops[j].handler == OP_PUSH_INT && ops[j].b == ops[j - 1].b + 1) j++;
+        size_t run_len = j - i;
+        if (run_len >= LL_PUSH_INT_RUN_MIN) {
+            for (size_t k = i + 1; k < j; k++) ops[k].handler = ll_handler_table[OP_PUSH_INT];
+            ops[i].handler = (void *)ll_op_push_int_run;
+            ops[i].a = (int32_t)run_len;
+            i = j;
+        } else {
+            ops[i].handler = ll_handler_table[OP_PUSH_INT];
+            i++;
+        }
     }
 }
