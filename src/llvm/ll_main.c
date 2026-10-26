@@ -14,8 +14,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "asnix/arena.h"
 #include "asnix/ir.h"
@@ -25,6 +27,7 @@
 #include "ll_print.h"
 #include "parser.h"
 #include "root_env.h"
+#include "value_util.h" /* asnix_canon_path */
 
 static double ms_between(struct timespec *a, struct timespec *b) {
     return (b->tv_sec - a->tv_sec) * 1000.0 + (b->tv_nsec - a->tv_nsec) / 1e6;
@@ -56,9 +59,70 @@ static char *read_file_source(const char *path) {
     return buf;
 }
 
+static char *current_dir(void) {
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) {
+        fprintf(stderr, "ll: cannot determine the current directory\n");
+        exit(1);
+    }
+    return strdup(cwd);
+}
+
+/* Matches asnix's own eval_file.c exactly: resolve_import_path (make
+ * `path` absolute against the process cwd if it's relative, then
+ * lexically canonicalize) followed by dir_of (directory part of an
+ * absolute path -- "/foo.nix" -> "/", the one case that keeps its own
+ * slash). Every relative `import`/path-literal in the evaluated file
+ * resolves against *base_dir_out, so a file argument NOT sitting
+ * directly in the process's own cwd needs its real directory here, not
+ * a placeholder. *resolved_path_out is the canonicalized absolute path
+ * itself (asnix_compile's `file_path` argument, g_compile_file_path --
+ * read by __curPos__/builtins.unsafeGetAttrPos's own `file` field; a
+ * NULL here is why that field printed empty instead of the real path). */
+static void resolve_file_for_compile(const char *path, char **base_dir_out, char **resolved_path_out) {
+    char *abs;
+    if (path[0] == '/') {
+        abs = strdup(path);
+    } else {
+        char *cwd = current_dir();
+        size_t cwd_len = strlen(cwd), path_len = strlen(path);
+        abs = malloc(cwd_len + 1 + path_len + 1);
+        memcpy(abs, cwd, cwd_len);
+        abs[cwd_len] = '/';
+        memcpy(abs + cwd_len + 1, path, path_len + 1);
+        free(cwd);
+    }
+    char *canon = asnix_canon_path(abs);
+    free(abs);
+
+    const char *slash = strrchr(canon, '/');
+    size_t dirlen = (size_t)(slash - canon);
+    if (dirlen == 0) dirlen = 1;
+    char *dir = malloc(dirlen + 1);
+    memcpy(dir, canon, dirlen);
+    dir[dirlen] = '\0';
+
+    *base_dir_out = dir;
+    *resolved_path_out = canon;
+}
+
 int main(int argc, char **argv) {
     char *file_src = argc > 1 ? read_file_source(argv[1]) : NULL;
     const char *src = file_src ? file_src : (argc > 1 ? argv[1] : "42");
+    /* Matches asnix's own two entry points exactly: a real file's
+     * relative imports resolve against ITS OWN directory, and its own
+     * resolved path feeds position tracking (asnix_eval_file's
+     * base_dir/resolved, via dir_of/resolve_import_path); a literal CLI
+     * expression (no file of its own) resolves imports against the
+     * process's cwd directly, with no file path at all for position
+     * tracking (asnix_eval_expr_source) -- neither is ever a fixed
+     * placeholder. */
+    char *base_dir, *resolved_path = NULL;
+    if (file_src) {
+        resolve_file_for_compile(argv[1], &base_dir, &resolved_path);
+    } else {
+        base_dir = current_dir();
+    }
     const char *show_stats = getenv("LL_SHOW_STATS");
     struct timespec t0, t1, t2, t3, t4;
 
@@ -66,7 +130,7 @@ int main(int argc, char **argv) {
     asnix_arena_init(0);
     Ast *root = asnix_parse(src);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t1);
-    IrProgram *prog = asnix_compile(root, "/tmp", NULL);
+    IrProgram *prog = asnix_compile(root, base_dir, resolved_path);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t2);
     Env *root_env = ll_make_root_env();
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t3);
