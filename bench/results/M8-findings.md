@@ -1640,3 +1640,68 @@ this document's own earlier framing assumed. Future `ll`-vs-`iets`
 comparisons must use `perf stat`, pinned to one core. Callgrind
 stays the faster, cheaper tool, but only for same-architecture
 `ll`-vs-`ll`/`asnix` comparisons.
+
+## Two real lexer wins, found by a real CPU profile
+
+`perf stat` now works on this machine. This round also tried `perf
+record` for the first time, for a real, sampled hot-function list.
+Earlier work in this document relied on callgrind alone. The result
+named two self-time leaders this document had never checked:
+`asnix_intern` and `lexer_next`, at 4.41% and 4.38%. Every earlier
+section here targeted evaluation, not parsing. This was new ground.
+
+`lexer_next`'s own `lex_normal` function skipped a line comment with
+a byte-at-a-time loop. That loop stopped at `\n` or the string's own
+`\0` terminator. Glibc's `strchrnul` already does exactly that, in
+one SIMD-accelerated call. The lexer's block-comment case got the
+same treatment one level removed. It jumps to the next star with
+`strchrnul`, then checks for the closing slash. A star that turns
+out to be part of the comment's own text, not its end, falls back
+to a byte-at-a-time retry from that point.
+
+A second fix in the same function batched whitespace. The lexer
+used to advance one byte per space character. Each step re-ran its
+own end-of-input and comment checks. Real nixpkgs source is mostly
+indentation and blank lines. A tight loop over the lexer's own
+existing character-class table now skips a whole run of whitespace
+in one pass.
+
+Both fixes passed all four correctness gates. Both also passed
+hand-built edge cases: stars inside block comments, multiple
+consecutive stars, a comment with no trailing newline at end of
+file, and the unterminated-block-comment error path. Measured on
+`ffmpeg-full.outPath` with callgrind instructions: comment skipping
+cut 0.055%. Whitespace batching cut a further 0.41%, the larger of
+the two. That order matches real source, where whitespace is far
+more common than comments.
+
+Three other hot functions from the same profile were checked and
+found already near their practical ceiling. None needed a further
+fix. `asnix_intern`'s own hashing was already rewritten word-at-a-
+time in an earlier milestone, measured directly against `iets`'s
+own hasher as the reference. `buf_put_escaped`'s character scan
+already uses a SWAR bit-twiddling trick. That trick was ported
+directly from `iets`'s own escape-finder and checked with a fuzz
+test. An earlier milestone already caches its result across a
+derivation's three ATerm-building passes. `make pgo`, rebuilt fresh
+against every fix in this document so far, reproduced the same
+real-but-small instruction win recorded elsewhere in this file:
+callgrind instructions down 0.72%. It also reproduced the same
+unreliable wall-clock result on this one benchmark. `ffmpeg-
+full.outPath`'s own hyperfine run came back slightly slower, not
+faster, under PGO. PGO stays an opt-in build target, not the
+default, for the reason already on record.
+
+One more lead was found but not pursued. `malloc`'s own cost traces
+mostly to `asnix_prim_derivation`'s per-derivation escape cache.
+That cache is deliberately keyed by pointer, so it only helps
+within one derivation's own three-pass build. A cache keyed by
+string content instead of pointer, shared across derivations,
+is a candidate target: `system`, for one value, repeats across
+many derivations. Such a cache needs real hashing and comparison
+work of its own. It also needs real correctness care: this file's
+own history already records subtle lifetime bugs in this exact
+area. The bound on the possible win is small either way, about
+1.2% of instructions at most, since that is `malloc`'s whole
+measured share. This is left here as a candidate for a future
+round, not attempted in this one.
