@@ -412,7 +412,7 @@ static void jb_puts(JsonBuf *b, const char *s, size_t n) {
  * twiddling identities and how they were verified), just with n=0x20
  * instead of n=0x0e and no '\\'-vs-'"' asymmetry. Output is byte-for-
  * byte identical to a plain per-byte scan-and-switch loop. */
-static int64_t find_escape_json(const unsigned char *s, int64_t len) {
+static int64_t find_escape_json_scalar(const unsigned char *s, int64_t len) {
     static const uint64_t LO = 0x0101010101010101ULL;
     static const uint64_t HI = 0x8080808080808080ULL;
     int64_t i = 0;
@@ -435,6 +435,36 @@ static int64_t find_escape_json(const unsigned char *s, int64_t len) {
     }
     return len;
 }
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <emmintrin.h>
+
+/* perf: real SSE2 vector compare, 16 bytes/iteration -- same rationale
+ * and same iets lineage (bytescan.rs's `Escapes::Json`) as aterm.c's
+ * own find_escape_aterm SIMD port; see that file's comment for the
+ * full history. "unsigned x < 0x20" has no single SSE2 comparison
+ * (only signed `_mm_cmplt_epi8` exists), so this uses iets's own
+ * identity instead: `min_epu8(x, 0x1f) == x` iff `x <= 0x1f`, i.e.
+ * `x < 0x20` -- an unsigned-safe minimum, correct for every byte
+ * value 0-255, not just ASCII. */
+static int64_t find_escape_json(const unsigned char *s, int64_t len) {
+    int64_t i = 0;
+    for (; i + 16 <= len; i += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+        __m128i eq_dq = _mm_cmpeq_epi8(x, _mm_set1_epi8('"'));
+        __m128i eq_bs = _mm_cmpeq_epi8(x, _mm_set1_epi8('\\'));
+        __m128i lt_20 = _mm_cmpeq_epi8(_mm_min_epu8(x, _mm_set1_epi8(0x1f)), x);
+        __m128i any = _mm_or_si128(_mm_or_si128(eq_dq, eq_bs), lt_20);
+        int mask = _mm_movemask_epi8(any);
+        if (mask) return i + __builtin_ctz((unsigned)mask);
+    }
+    return i + find_escape_json_scalar(s + i, len - i);
+}
+#else
+static int64_t find_escape_json(const unsigned char *s, int64_t len) {
+    return find_escape_json_scalar(s, len);
+}
+#endif
 
 static void jb_escape_string(JsonBuf *out, const char *bytes, int64_t len) {
     jb_putc(out, '"');

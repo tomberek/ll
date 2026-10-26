@@ -113,7 +113,7 @@ static void buf_put_bytes(Buf *b, const char *s, size_t n) {
  * flagged "no" is trusted outright (the identities have no false
  * negatives), so output is byte-for-byte identical to a plain scalar
  * scan for every input, including non-ASCII/non-UTF-8 bytes. */
-static size_t find_escape_aterm(const unsigned char *s, size_t len) {
+static size_t find_escape_aterm_scalar(const unsigned char *s, size_t len) {
     static const uint64_t LO = 0x0101010101010101ULL;
     static const uint64_t HI = 0x8080808080808080ULL;
     size_t i = 0;
@@ -138,6 +138,51 @@ static size_t find_escape_aterm(const unsigned char *s, size_t len) {
     }
     return len;
 }
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <emmintrin.h>
+
+/* perf: real SSE2 vector compare, 16 bytes/iteration, ported from
+ * iets's own `Escapes::mask`/`Escapes::Aterm` (~/gnix/iets/src/
+ * bytescan.rs) -- the ABOVE find_escape_aterm_scalar is itself a port
+ * of an OLDER iets, from before iets's own commit 4116e034 ("print:
+ * find bytes to escape 16 at a time") upgraded its scanner from the
+ * identical SWAR trick to this. SSE2 is baseline on every x86-64 CPU
+ * (part of the ABI, no -msse2 flag or runtime feature check needed),
+ * so this is the unconditional x86 path, not an opt-in. One `_mm_or_
+ * si128` tree ORs five byte-equality masks (`"`, `\`, `\t`, `\n`,
+ * `\r`) rather than the scalar version's three arithmetic "less-than/
+ * equals" identities, because a vector compare makes a plain
+ * equality test as cheap as the scalar version's less-than trick
+ * (and more direct to read). `_mm_movemask_epi8` packs the 16 per-
+ * lane comparison results into one bit per byte; `__builtin_ctz`
+ * finds the first (lowest-index) set bit directly, replacing the
+ * scalar version's byte-by-byte re-scan of a flagged chunk entirely
+ * -- the vector compare already pinpoints the exact byte, no "maybe"
+ * false positives to re-verify (unlike the scalar version's SWAR
+ * identities, a vector *equality* compare has none). The tail
+ * (<16 remaining bytes) falls through to the scalar scanner above,
+ * which is already correct for any length. */
+static size_t find_escape_aterm(const unsigned char *s, size_t len) {
+    size_t i = 0;
+    for (; i + 16 <= len; i += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+        __m128i eq_dq = _mm_cmpeq_epi8(x, _mm_set1_epi8('"'));
+        __m128i eq_bs = _mm_cmpeq_epi8(x, _mm_set1_epi8('\\'));
+        __m128i eq_t = _mm_cmpeq_epi8(x, _mm_set1_epi8('\t'));
+        __m128i eq_n = _mm_cmpeq_epi8(x, _mm_set1_epi8('\n'));
+        __m128i eq_r = _mm_cmpeq_epi8(x, _mm_set1_epi8('\r'));
+        __m128i any = _mm_or_si128(_mm_or_si128(eq_dq, eq_bs), _mm_or_si128(eq_t, _mm_or_si128(eq_n, eq_r)));
+        int mask = _mm_movemask_epi8(any);
+        if (mask) return i + (size_t)__builtin_ctz((unsigned)mask);
+    }
+    return i + find_escape_aterm_scalar(s + i, len - i);
+}
+#else
+static size_t find_escape_aterm(const unsigned char *s, size_t len) {
+    return find_escape_aterm_scalar(s, len);
+}
+#endif
 
 /* M151: per-derivation escape cache, keyed by SOURCE POINTER (see aterm.h's
  * own comment on `AtermEscapeCache`/`asnix_build_derivation_aterm_cached`
