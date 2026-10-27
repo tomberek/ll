@@ -433,6 +433,20 @@ typedef struct ScopeFrame {
     size_t *name_lens;
     size_t count;
     int is_with;
+    /* M-skip-cell: set only for a `rec {}`'s own frame when it has an
+     * `__overrides` binding (see that AST_ATTRSET case's own comment).
+     * `try_cell_ref` below refuses its Cell-aliasing optimization for
+     * any name that resolves into such a frame -- `__overrides` rewrites
+     * an already-populated sibling slot to a DIFFERENT object after the
+     * fact (ib_rec_overrides_merge), which a Cell still gets right (it
+     * re-chases the slot's CURRENT content every time), but an eager
+     * "read the slot now, it's already non-empty" fast path at the op
+     * level would bake in the pre-override value instead. Matches
+     * iets's own fix for this exact case (eval/mod.rs fill_rec_slots's
+     * `overrides: bool` parameter, forcing a real deferred thunk for
+     * every binding in such a set rather than its own maybe_thunk fast
+     * path) -- confirmed by reading that code directly. */
+    int has_overrides;
 } ScopeFrame;
 
 /* Bounds how many enclosing `with`s a single unresolved-name fallback
@@ -464,14 +478,18 @@ static int name_eq(const char *a, size_t alen, const char *b, size_t blen) {
  * for one -- the "with-sourced names never alias" exclusion the M92
  * design calls for falls out of this function returning 0, with no extra
  * special-casing needed. */
+/* `out_has_overrides` may be NULL for a caller that doesn't care (e.g.
+ * the native-builtin-call-fusion check below, which only wants depth/
+ * slot) -- written only on a match, same as out_depth/out_slot. */
 static int scope_find_lexical(ScopeFrame *scope, const char *name, size_t name_len, int *out_depth,
-                               int64_t *out_slot) {
+                               int64_t *out_slot, int *out_has_overrides) {
     int depth = 0;
     for (ScopeFrame *f = scope; f; f = f->up, depth++) {
         for (size_t slot = 0; slot < f->count; slot++) {
             if (name_eq(f->names[slot], f->name_lens[slot], name, name_len)) {
                 *out_depth = depth;
                 *out_slot = (int64_t)slot;
+                if (out_has_overrides) *out_has_overrides = f->has_overrides;
                 return 1;
             }
         }
@@ -504,7 +522,16 @@ static int try_cell_ref(IrBuilder *b, Ast *node, ScopeFrame *scope) {
     if (node->kind != AST_VAR) return 0;
     int depth;
     int64_t slot;
-    if (!scope_find_lexical(scope, node->as.var.name, node->as.var.name_len, &depth, &slot)) return 0;
+    int has_overrides = 0;
+    if (!scope_find_lexical(scope, node->as.var.name, node->as.var.name_len, &depth, &slot, &has_overrides))
+        return 0;
+    /* M-skip-cell: a name resolving into a `rec{}` frame with its own
+     * `__overrides` binding must not alias through this optimization --
+     * see ScopeFrame's own has_overrides comment. Falls back to the
+     * caller's ordinary ib_mk_thunk path, which still re-resolves this
+     * same (depth, slot) fresh at force time via a real deferred thunk,
+     * exactly like the unconditional pre-this-change behavior. */
+    if (has_overrides) return 0;
     ib_var_ref_cell(b, depth, slot);
     return 1;
 }
@@ -921,7 +948,7 @@ static int try_fused_native_call2(IrBuilder *b, Ast *node, ScopeFrame *scope) {
 
     int depth;
     int64_t slot;
-    if (!scope_find_lexical(scope, builtins_var->as.var.name, builtins_var->as.var.name_len, &depth, &slot))
+    if (!scope_find_lexical(scope, builtins_var->as.var.name, builtins_var->as.var.name_len, &depth, &slot, NULL))
         return 0;
     ScopeFrame *f = scope;
     for (int i = 0; i < depth; i++) f = f->up;
@@ -2112,6 +2139,11 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                         break;
                     }
                 }
+                /* M-skip-cell: mark this frame before it's used below, so
+                 * try_cell_ref refuses to alias any sibling binding's
+                 * slot when this set has __overrides -- see ScopeFrame's
+                 * own has_overrides comment. */
+                frame.has_overrides = (overrides_slot >= 0);
 
                 ib_frame_alloc(b, (int64_t)n);
                 for (size_t i = 0; i < n; i++) {
@@ -2484,6 +2516,7 @@ static void init_builtins_frame(ScopeFrame *f) {
     f->name_lens = builtins_name_lens;
     f->count = 16;
     f->is_with = 0;
+    f->has_overrides = 0;
 }
 
 IrProgram *asnix_compile(Ast *root, const char *base_dir, const char *file_path) {
