@@ -947,6 +947,27 @@ static int try_fused_native_call2(IrBuilder *b, Ast *node, ScopeFrame *scope) {
     return 1;
 }
 
+/* Factored out of AST_APP's own case below (same three-way branch,
+ * unchanged): a call argument is call-by-need (see AST_APP's own long
+ * comment, below, for why), compiled as a Cell-aliased bare variable
+ * when possible, inlined directly when it's a thunk-free literal, or
+ * wrapped in a fresh OP_MK_THUNK capturing the caller's env otherwise.
+ * Shared between the ordinary single-argument path and the chained-
+ * application path (OP_CALL_CHAIN, ir.h) so both compile each argument
+ * identically. */
+static void compile_app_arg(IrBuilder *b, Ast *arg, ScopeFrame *scope) {
+    if (try_cell_ref(b, arg, scope)) {
+        /* nothing more to do -- OP_VAR_REF_CELL already emitted */
+    } else if (is_thunk_free_literal(arg)) {
+        compile_expr(b, arg, scope);
+    } else {
+        IrBuilder *arg_b = ib_new();
+        compile_expr(arg_b, arg, scope);
+        ib_ret(arg_b);
+        ib_mk_thunk(b, ib_finish(arg_b));
+    }
+}
+
 static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
     /* Debug-only (irbuild.h's ib_enable_line_tracking, off by default): a
      * plain field write, no branch, cheap enough to leave unconditional
@@ -1465,17 +1486,44 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * logic (already correct, untouched) then forces it, if and
              * only if the callee's body ever actually reads the
              * parameter. */
-            compile_expr(b, node->as.app.fn, scope);
-            if (try_cell_ref(b, node->as.app.arg, scope)) {
-                /* nothing more to do -- OP_VAR_REF_CELL already emitted */
-            } else if (is_thunk_free_literal(node->as.app.arg)) {
-                compile_expr(b, node->as.app.arg, scope);
-            } else {
-                IrBuilder *arg_b = ib_new();
-                compile_expr(arg_b, node->as.app.arg, scope);
-                ib_ret(arg_b);
-                ib_mk_thunk(b, ib_finish(arg_b));
+
+            /* perf (round 7, Env-frame fusion, ll-only): a syntactic
+             * application chain (`f a b c` is AST_APP(AST_APP(AST_APP(
+             * f,a),b),c)) walks leftward to its base here. A chain of
+             * depth >= 2 compiles to ONE OP_CALL_CHAIN instead of N
+             * separate OP_CALL(1)s -- see ir.h's OP_CALL_CHAIN comment
+             * and op_call.c's ll_op_call_chain for the runtime half,
+             * which is purely an allocation-batching optimization: it
+             * either produces the IDENTICAL result N ordinary calls
+             * would have, or falls back to exactly that N-calls
+             * sequence, never anything else. Depth 1 (the common,
+             * already-fast base case) falls through unchanged below. */
+            size_t chain_len = 1;
+            Ast *chain_walk = node;
+            while (chain_walk->as.app.fn->kind == AST_APP) {
+                chain_len++;
+                chain_walk = chain_walk->as.app.fn;
             }
+            if (chain_len >= 2) {
+                int args_on_stack = (chain_len <= ASNIX_COMPILE_SCRATCH_MAX);
+                Ast *args_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                Ast **args = args_on_stack ? args_stack : malloc(chain_len * sizeof(Ast *));
+                Ast *cur = node;
+                for (size_t i = chain_len; i-- > 0;) {
+                    args[i] = cur->as.app.arg;
+                    cur = cur->as.app.fn;
+                }
+                compile_expr(b, chain_walk->as.app.fn, scope);
+                for (size_t i = 0; i < chain_len; i++) {
+                    compile_app_arg(b, args[i], scope);
+                }
+                ib_call_chain(b, (int64_t)chain_len);
+                if (!args_on_stack) free(args);
+                return;
+            }
+
+            compile_expr(b, node->as.app.fn, scope);
+            compile_app_arg(b, node->as.app.arg, scope);
             ib_call(b, 1);
             return;
         }

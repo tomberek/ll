@@ -53,6 +53,7 @@ void *ll_handler_table[OP_COUNT] = {
 
     [OP_CALL] = (void *)ll_op_call,
     [OP_RET] = (void *)ll_op_ret,
+    [OP_CALL_CHAIN] = (void *)ll_op_call_chain,
 
     [OP_MK_LIST] = (void *)ll_op_mk_list,
     [OP_MK_ATTRS] = (void *)ll_op_mk_attrs,

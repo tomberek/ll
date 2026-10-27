@@ -500,6 +500,27 @@ enum {
                         * pair entirely for those slots. See heap.h's ASNIX_FORMALSMAP_MARKER
                         * comment for the full design and op_misc.c's ll_op_mk_formalsmap for
                         * the handler. */
+    OP_CALL_CHAIN, /* ll-only, no asnix equivalent: a = n (>= 2), the number of args in a
+                     * syntactic application chain (`f a b c`, compiler.c's AST_APP case,
+                     * is one OP_CALL_CHAIN(3) instead of three chained OP_CALL(1)s). Same
+                     * VALSTACK layout convention as an ordinary n-arg OP_CALL (callee then
+                     * n args, pushed in application order) and the SAME observable
+                     * result in every case -- this op is a pure allocation-batching
+                     * optimization, never a behavior change. At runtime, checks whether
+                     * the callee is the head of a plain one-slot-per-level curry chain
+                     * (every non-pattern lambda and every curried-native-builtin stage is
+                     * built this way -- see builtins_shared.c's asnix_bshared_make_
+                     * curried_native) at least n-1 levels deep; if so, builds all n of
+                     * those levels' 1-slot Env frames in ONE bump allocation instead of
+                     * n separate ones, then runs the n-th level's own body directly
+                     * (identical to what n chained ordinary calls would have produced,
+                     * including a real Closure if n is less than the chain's own full
+                     * depth -- partial application). Falls back to n ordinary,
+                     * byte-identical-to-before-this-op sequential calls whenever that
+                     * check fails (not a Closure, arity != 1 at some level, a level's
+                     * body isn't the exact two-op `[OP_LAMBDA, OP_RET]` shape a plain
+                     * curry-chain link always compiles to, or the chain runs out before
+                     * n-1 levels). See op_call.c's ll_op_call_chain for the handler. */
     OP_COUNT
 };
 

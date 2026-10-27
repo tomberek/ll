@@ -169,6 +169,11 @@ size_t ib_lambda(IrBuilder *b, int64_t arity, IrProgram *body_prog, int64_t form
 size_t ib_call(IrBuilder *b, int64_t argc) {
     return ib_emit(b, OP_CALL, argc, 0);
 }
+
+/* ll-only, no asnix equivalent: see ir.h's OP_CALL_CHAIN comment. */
+size_t ib_call_chain(IrBuilder *b, int64_t n) {
+    return ib_emit(b, OP_CALL_CHAIN, n, 0);
+}
 size_t ib_ret(IrBuilder *b) {
     return ib_emit(b, OP_RET, 0, 0);
 }

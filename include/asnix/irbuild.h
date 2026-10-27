@@ -97,6 +97,8 @@ size_t ib_let(IrBuilder *b, int64_t nslots);
  * ir.h. */
 size_t ib_lambda(IrBuilder *b, int64_t arity, IrProgram *body_prog, int64_t formals_raw);
 size_t ib_call(IrBuilder *b, int64_t argc);
+/* ll-only, no asnix equivalent: see ir.h's OP_CALL_CHAIN comment. */
+size_t ib_call_chain(IrBuilder *b, int64_t n);
 size_t ib_ret(IrBuilder *b);
 size_t ib_halt(IrBuilder *b);
 
