@@ -786,8 +786,22 @@ static AttrSeg parse_attr_segment(Parser *p, const char *what) {
          * starts_atom's own comment above for the full rationale;
          * `"or"` (quoted) was already accepted here (this function's own
          * header comment), only the unquoted keyword-token form was
-         * missing. */
-        if (cur(p).kind == TOK_OR) {
+         * missing.
+         *
+         * `null`/`true`/`false` as a bare binding/attribute name --
+         * confirmed against real `nix-instantiate --eval`: `{ null =
+         * 1; }.null` == `1`, same for `true`/`false`, found evaluating
+         * real nixpkgs (nixos/modules/services/games/minetest-server.nix's
+         * own `{ bool = ...; int = ...; null = ""; set = ...; string =
+         * ...; }."${builtins.typeOf value}"` dispatch table, keyed by
+         * `builtins.typeOf`'s own result strings, one of which is
+         * literally `"null"`). Real Nix's own structural keywords
+         * (`let`/`in`/`if`/`then`/`else`/`with`/`assert`/`inherit`/
+         * `rec`) stay rejected here, confirmed the same way -- only
+         * `or`/`null`/`true`/`false` are real Nix's own bare-identifier-
+         * shaped literal tokens, lexed as such but still accepted as
+         * plain names in this one grammar position. */
+        if (cur(p).kind == TOK_OR || cur(p).kind == TOK_NULL || cur(p).kind == TOK_TRUE || cur(p).kind == TOK_FALSE) {
             Token t = cur(p);
             advance(p);
             return (AttrSeg){ .is_dynamic = 0, .attr = tok_text(p, t), .attr_len = tok_len(t) };
@@ -906,7 +920,14 @@ static void parse_binding_stmt(Parser *p, BTVec *out, DynBindingVec *dyn_out) {
          * below can decide, from the final count, whether to share one
          * evaluation of `expr` across every name. */
         size_t names_mark = attrsegvec_mark();
-        while (cur(p).kind == TOK_IDENT || cur(p).kind == TOK_STR_START || cur(p).kind == TOK_DOLLAR_LBRACE) {
+        /* `or`/`null`/`true`/`false` are also valid bare inherited names
+         * (parse_attr_segment's own comment) -- this loop's own
+         * continuation check must recognize the same token set it hands
+         * off to, or an inherit clause starting with one of them (e.g.
+         * `inherit (x) null true;`) parses zero names and chokes on the
+         * first one expecting ';' instead. */
+        while (cur(p).kind == TOK_IDENT || cur(p).kind == TOK_STR_START || cur(p).kind == TOK_DOLLAR_LBRACE ||
+               cur(p).kind == TOK_OR || cur(p).kind == TOK_NULL || cur(p).kind == TOK_TRUE || cur(p).kind == TOK_FALSE) {
             AttrSeg name = parse_attr_segment(p, "an inherited name");
             /* real Nix's grammar lets a bare `${...}`/interpolated
              * string reach this position syntactically (`attrs: attrs
