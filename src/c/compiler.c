@@ -746,6 +746,19 @@ static int try_fold_const_binop(Ast *node, int *out_is_bool, int *out_is_float, 
 static int is_thunk_free_literal(Ast *node) {
     switch (node->kind) {
         case AST_INT:
+            /* M-range-fix: an out-of-range int literal must NOT be
+             * eagerly inlined here -- unlike every other case in this
+             * function, pushing it has an observable side effect
+             * (ib_push_int's own runtime range check fatals). Inlining
+             * it would force a value real Nix's laziness would never
+             * touch if the enclosing binding is never read (e.g. a
+             * `let maxHandle = 9223372036854775806; in ...` used only
+             * inside a disabled `lib.mkIf false { ... }` branch -- found
+             * in nixos/modules/services/network-filesystems/orangefs/
+             * server.nix). Falling through to the ordinary OP_MK_THUNK
+             * path keeps it lazy, matching try_fold_const_binop's own
+             * ASNIX_INT_MIN/MAX guard (below) for the folded-binop case. */
+            return node->as.int_val >= ASNIX_INT_MIN && node->as.int_val <= ASNIX_INT_MAX;
         case AST_FLOAT:
         case AST_BOOL:
         case AST_NULL:
