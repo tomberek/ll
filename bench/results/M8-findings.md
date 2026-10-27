@@ -1862,6 +1862,36 @@ escaped byte at a random position, in strings of every length from
 boundary. Hand-built cases at exact 8, 16, and 32-byte lengths
 passed too.
 
+## Scoping a real lead before building it: curried-lambda frame fusion
+
+iets fuses the environment frames of a curried call chain
+(`a: b: c: body`) and an immediately-nested `let` into one
+allocation. ll allocates a separate frame for each one. The earlier
+no-env-elision result showed that a sound-looking, iets-proven idea
+can still cost more than it saves. The compile-time cost of the
+check can outweigh the runtime saving. This lead needed a cheap,
+direct measurement before committing to the real fix, not just a
+plausible story.
+
+Throwaway runtime counters, reverted after measuring and not left
+in the tree, tagged every `OP_CALL` site whose callee is itself a
+chained application. For `f a b`, the compiler emits `f a`'s own
+call first. The outer call's callee is exactly that inner call's
+result. On `ffmpeg-full.outPath`, 257,146 of 688,062 closure calls
+(37.4%) fired at such a tagged site and found a real closure as
+their callee. That is a genuine curry-chain saturation rate, not a
+rare pattern. It is also close to the 266,220 closures that
+returned another closure at all. So almost none of those closures
+sit unused or stored away.
+
+This is a real fix still worth building. It needs two files. One
+is a compiler change that recognizes a saturated N-ary application
+as one unit. The other is a new `OP_CALL` path that allocates one
+N-slot frame directly, instead of chaining several 1-slot ones.
+Partial application must still work too: calling a curried function
+with fewer than all of its arguments, then calling the result later
+with the rest. Left for a dedicated session, not rushed here.
+
 ## A tried and reverted idea: a cross-derivation ATerm escape cache
 
 The escape cache in `aterm.c` only shares work within one
