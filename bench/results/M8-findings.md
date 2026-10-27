@@ -1892,6 +1892,76 @@ Partial application must still work too: calling a curried function
 with fewer than all of its arguments, then calling the result later
 with the rest. Left for a dedicated session, not rushed here.
 
+## Curried-call frame fusion, built and measured
+
+The scoping pass above found a real signal. The real fix follows
+here: one new op, `OP_CALL_CHAIN`, replaces a chain of ordinary
+calls with one call that tries to fuse their frames.
+
+`compiler.c`'s own application case now walks a syntactic call chain
+(`f a b c`) back to its base. A chain of depth two or more compiles
+to one `OP_CALL_CHAIN(n)`, instead of n separate calls chained one
+after another.
+
+At runtime, the new op first does a read-only check. It walks the
+callee's own compiled body, looking for the exact two-op shape every
+plain curry level compiles to. That shape is: build the next
+closure, then return it. Every non-pattern lambda and every curried
+native builtin uses this exact shape. If the walk finds at least
+n-1 such levels, the op builds all n of this call's frames in one
+allocation. It then runs the last level's real body directly. The
+result matches, byte-for-byte, the value n separate calls produce,
+including partial application. When the check fails, for any
+reason, the op falls back to n ordinary calls, one at a time, with
+no fast path at all.
+
+One real bug surfaced during testing, not during scoping. The
+fallback path called a shared helper, `asnix_apply`, to run each of
+its sequential calls. That helper does not guarantee that a
+callee's own value sits right before its argument on the value
+stack. A few native builtins read their own captured values by
+assuming exactly that layout. `foldl'`, `map`, and `filter` each
+stage this way, over two calls, in `builtins_list.c`. The fix
+copies the callee and its one argument into a small local pair
+before each fallback call, so that layout holds every time.
+
+Measured on `ffmpeg-full.outPath` (callgrind and pinned `perf stat`,
+three runs each):
+
+- instructions: down 0.19% to 0.38%
+- cycles: down 2.0%
+- peak RSS: down 1.8%
+- wall clock: flat, within run-to-run noise
+
+This is smaller than a naive reading of the 37.4% saturation rate
+suggests. Each fused call still saves only one allocation, not a
+proportional share of the whole call's cost. The win is real and
+consistent, with no regression on any measured axis.
+
+The fix passed 44 of 44 difftest cases, all 148 nixpkgs-hash pairs,
+and a byte-identical `ffmpeg-full.outPath` diff. A wide hand-built
+suite covered:
+
+- saturated chains from depth two to five
+- partial application split at every point
+- calling a chain's own result with extra trailing arguments
+- a lambda whose body is real content, not another lambda
+  (correctly skipped by the fast path)
+- pattern lambdas and bare-variable arguments inside a chain
+- the curried native builtins above
+- deep recursion through a curried function
+- a 40-argument chain, past the compiler's own 32-entry stack buffer
+
+One side note from that same recursion test, not a correctness
+issue. A synthetic counter recursing through a curried two-argument
+function now hits this evaluator's own fixed call-stack bound a
+little earlier than before the fix. The new threshold is about
+15,000 to 17,000 steps. The old one was roughly 15,000 to 20,000
+steps. Both before and after the fix, this is the same class of
+bound, with the same error message. It sits far beyond any real
+recursion depth this evaluator's own correctness suite exercises.
+This work did not track the exact cause further.
+
 ## A tried and reverted idea: a cross-derivation ATerm escape cache
 
 The escape cache in `aterm.c` only shares work within one
