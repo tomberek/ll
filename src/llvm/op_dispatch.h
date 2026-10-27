@@ -207,6 +207,28 @@ static inline Env *ll_env_alloc(Env *up, int64_t nslots) {
     return e;
 }
 
+/* Inlined fast path for env.S's own asnix_env_lookup (De Bruijn
+ * depth/slot walk) -- env.S's OWN header comment says the hot
+ * dispatch path is supposed to "inline the same logic directly...
+ * rather than paying a `call` per use" (same precedent as this
+ * file's own ll_env_alloc above, and matching asnix's own
+ * op_var_ref.S, which inlines this exact walk and never calls
+ * asnix_env_lookup at all) -- op_var_ref.c's two handlers previously
+ * called the real, non-tail asnix_env_lookup on every variable
+ * reference instead, missing that precedent. Decompress `up` (base +
+ * offset), then mask off ASNIX_ENV_WITH_TAG from the DECOMPRESSED
+ * POINTER (not from `up` itself) -- same order asnix_env_lookup/
+ * op_var_ref.S both use, needed so a hop that happens to pass through
+ * a with-frame on its way to an outer lexical binding still lands on
+ * the right address (env.h's own ASNIX_ENV_WITH_TAG comment). */
+static inline Value ll_env_lookup(Env *env, int64_t depth, int64_t slot) {
+    for (; depth > 0; depth--) {
+        uintptr_t decompressed = (uintptr_t)asnix_env_arena_base + env->up;
+        env = (Env *)(decompressed & ~(uintptr_t)ASNIX_ENV_WITH_TAG);
+    }
+    return env->values[slot];
+}
+
 /* Guaranteed-tail-call dispatch to the next op, advancing IP by one
  * record first -- the direct C equivalent of dispatch.S's universal
  * NEXT tail ("IP += 16; jmp *(IP->handler)"). Must be the LAST

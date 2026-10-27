@@ -16,7 +16,7 @@
 
 LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
-    Value raw = asnix_env_lookup(env, depth, slot);
+    Value raw = ll_env_lookup(env, depth, slot);
     raw = ll_resolve_indirection(raw);
 
     if ((raw.raw & ASNIX_TAG_MASK) != ASNIX_TAG_THUNK) {
@@ -83,7 +83,7 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
  * reaches during construction even for a trivial top-level eval. */
 LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
-    Value raw = asnix_env_lookup(env, depth, slot);
+    Value raw = ll_env_lookup(env, depth, slot);
     ll_check_valstack(vs);
     vs[0] = raw;
     vs++;
