@@ -29,6 +29,8 @@
 #include "asnix/env.h"
 
     .equ ASNIX_SYS_MMAP,       9
+    .equ ASNIX_SYS_MADVISE,    28
+    .equ ASNIX_MADV_HUGEPAGE,  14
     .equ ASNIX_PROT_READ,      0x1
     .equ ASNIX_PROT_WRITE,     0x2
     .equ ASNIX_MAP_PRIVATE,    0x02
@@ -121,6 +123,22 @@ asnix_env_arena_do_init:                // internal, called exactly once (from a
     syscall
     testq %rax, %rax
     jl .Lenv_arena_abort_mmap
+
+    // madvise(base, ASNIX_ENV_ARENA_SIZE, MADV_HUGEPAGE) -- same hint and
+    // same rationale as arena.S's own general-arena fix: this kernel's
+    // transparent_hugepage/enabled is "madvise", not "always", so this
+    // 1 GiB NORESERVE reservation -- backing EVERY Env object this
+    // evaluator ever allocates -- would otherwise fault in one 4 KiB
+    // page at a time as the bump cursor advances, instead of one 2 MiB
+    // page per 512 Envs. Return value ignored (hint only); rax (the
+    // mmap result, needed right below) must survive the syscall.
+    pushq %rax
+    movq %rax, %rdi
+    movq $ASNIX_ENV_ARENA_SIZE, %rsi
+    movq $ASNIX_MADV_HUGEPAGE, %rdx
+    movq $ASNIX_SYS_MADVISE, %rax
+    syscall
+    popq %rax
 
     leaq asnix_env_arena_base(%rip), %rcx
     movq %rax, (%rcx)

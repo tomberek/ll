@@ -6,6 +6,8 @@
 #include "asnix/arena.h"
 
     .equ ASNIX_SYS_MMAP,       9
+    .equ ASNIX_SYS_MADVISE,    28
+    .equ ASNIX_MADV_HUGEPAGE,  14
     .equ ASNIX_PROT_READ,      0x1
     .equ ASNIX_PROT_WRITE,     0x2
     .equ ASNIX_MAP_PRIVATE,    0x02
@@ -104,9 +106,31 @@ asnix_arena_alloc:                      // void *asnix_arena_alloc(uint64_t n)
     testq %rax, %rax
     jl .Labort_mmap                      // raw syscall error: rax = -errno (always negative)
 
-    popq %rdi                            // rdi = chunk_size
+    popq %r8                             // r8 = chunk_size (pushed before the mmap syscall)
+    // madvise(new_chunk, chunk_size, MADV_HUGEPAGE) -- hint only, return
+    // value ignored: this kernel's transparent_hugepage/enabled is
+    // "madvise", not "always" (confirmed via /sys), so ASNIX_ARENA_CHUNK_
+    // SIZE's own 2 MiB chunks -- exactly one x86-64 huge page -- silently
+    // stay 512 separate 4 KiB pages, each its own minor page fault on
+    // first touch, unless explicitly hinted here. A real, measured
+    // contributor to this evaluator's much higher page-fault count vs
+    // iets (every single heap object funnels through this one bump
+    // allocator). Failure (no THP support at all) just forgoes the
+    // speedup, never a correctness problem, so the return value is never
+    // checked. rax currently holds new_chunk (the mmap result); both it
+    // and chunk_size (r8) must survive the syscall's own clobbers.
+    pushq %rax
+    pushq %r8
+    movq %rax, %rdi
+    movq %r8, %rsi
+    movq $ASNIX_MADV_HUGEPAGE, %rdx
+    movq $ASNIX_SYS_MADVISE, %rax
+    syscall
+    popq %r8                             // restore chunk_size
+    popq %rax                            // restore new_chunk pointer
+
     leaq asnix_arena(%rip), %rcx
-    leaq (%rax, %rdi), %rdx
+    leaq (%rax, %r8), %rdx
     movq %rdx, ASNIX_ARENA_OFF_END(%rcx) // end = new_chunk + chunk_size
 
     movq %rax, %rsi                      // rsi = result pointer = new_chunk
