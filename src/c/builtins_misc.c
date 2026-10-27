@@ -775,6 +775,14 @@ static Value build_currentSystem(void) { return asnix_make_string_value("x86_64-
  * `builtins.storeDir` directly, expecting a path-prefix-shaped string. */
 static Value build_storeDir(void) { return asnix_make_string_value("/nix/store", 10); }
 
+/* `builtins.langVersion` -- same "plain constant, no PrimOp needed" shape
+ * as nixVersion/currentSystem/storeDir above. Real Nix's is the evaluator
+ * language version (an integer, currently 6, confirmed via
+ * `nix-instantiate --eval -E 'builtins.langVersion'`), bumped on language-
+ * level changes, not every release. Found evaluating a full NixOS system
+ * config (`nixos/lib/eval-config.nix`'s own closure references it). */
+static Value build_langVersion(void) { return asnix_make_int(6); }
+
 const AsnixBuiltinMiscDef ASNIX_BUILTINS_MISC[] = {
     { "substring", build_substring },
     { "stringLength", build_stringLength },
@@ -795,6 +803,7 @@ const AsnixBuiltinMiscDef ASNIX_BUILTINS_MISC[] = {
     { "nixVersion", build_nixVersion },
     { "currentSystem", build_currentSystem },
     { "storeDir", build_storeDir },
+    { "langVersion", build_langVersion },
     { "baseNameOf", build_baseNameOf },
     { "dirOf", build_dirOf },
     { "placeholder", build_placeholder },
