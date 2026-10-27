@@ -518,6 +518,23 @@ static Token lex_dquote_run(Lexer *lx) {
             lx->has_pending = 1;
             return part;
         }
+        /* M-dollar-pair: "$$" is always a literal, atomically-consumed
+         * pair -- confirmed against real nix-instantiate: "a$${foo}b"
+         * passes through unchanged (length 9, no lookup of `foo` at
+         * all, even when `foo` is undefined), while an ODD run of
+         * dollars ("a$$${foo}b") leaves exactly one unpaired "$" that
+         * DOES start real interpolation. Must be checked before the
+         * "${"-starts-interpolation rule below, and must `continue`
+         * rather than fall into it -- otherwise the second "$" of a
+         * literal pair gets misread as the start of a fresh "${"
+         * check against whatever follows it. Found via a false-
+         * positive "undefined variable" on real nixpkgs code using
+         * this exact idiom (accounts-qt's `$${INSTALL_PREFIX}`,
+         * a literal qmake variable reference, not a Nix one). */
+        if (c == '$' && src[i + 1] == '$') {
+            i += 2;
+            continue;
+        }
         if (c == '$' && src[i + 1] == '{') {
             Token part = mk_tok(TOK_STR_PART, start, i);
             i += 2;
@@ -591,6 +608,15 @@ static Token lex_indented_run(Lexer *lx) {
         char c = src[i];
         if (c == '\0') fatal_unterminated("indented string literal (''...'')");
 
+        /* M-dollar-pair: see lex_dquote_run's own comment on the
+         * identical rule -- "$$" is always a literal, atomically-
+         * consumed pair, checked before "${"-starts-interpolation so
+         * the second "$" of a pair never gets re-read as the start of
+         * a fresh "${" check. */
+        if (c == '$' && src[i + 1] == '$') {
+            i += 2;
+            continue;
+        }
         if (c == '$' && src[i + 1] == '{') {
             /* Always emit a (possibly empty) PART before the boundary --
              * matches the pre-M141 istr_flush_always convention. */
