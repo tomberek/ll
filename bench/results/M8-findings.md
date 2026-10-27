@@ -1962,6 +1962,28 @@ bound, with the same error message. It sits far beyond any real
 recursion depth this evaluator's own correctness suite exercises.
 This work did not track the exact cause further.
 
+## A second missing-inline port, found the same way as the mimalloc gap
+
+`env.S`'s own header comment states a rule directly: the hot
+dispatch path must inline the Env depth/slot walk itself, never
+call `asnix_env_lookup` for it. `asnix`'s own `op_var_ref.S` follows
+that rule. `ll`'s port of the same op called `asnix_env_lookup` as
+a real function on every variable reference, missing the rule
+instead of following it.
+
+The fix adds one small inlined function, matching the walk `asnix`'s
+own assembly already does: decompress the next frame's address,
+then mask one tag bit off the decompressed pointer, not off the
+raw offset. Both variable-reference handlers now use it in place
+of the real call.
+
+Measured on `ffmpeg-full.outPath`: instructions down 0.144% to
+0.16%, cycles down 0.59%, wall clock flat within noise. Small, but
+the fix also passed every correctness gate: 44 of 44 difftest
+cases, hand-built cases covering deep lexical nesting and `with`
+hops, all 148 nixpkgs-hash pairs, and a byte-identical
+`ffmpeg-full.outPath` diff.
+
 ## A tried and reverted idea: a cross-derivation ATerm escape cache
 
 The escape cache in `aterm.c` only shares work within one
