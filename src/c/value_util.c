@@ -35,7 +35,11 @@
  * packed index bits in the computed "base" pointer and crash dereferencing
  * it -- caught directly: an early version of this milestone that only
  * widened the mask at the force-chokepoint Cell/LazyApp checks (not here)
- * segfaulted in asnix_value_is_cell on the very first `mapAttrs` print. */
+ * segfaulted in asnix_value_is_cell on the very first `mapAttrs` print.
+ * NOTE: `asnix_value_is_path`/`asnix_value_is_float`/`asnix_value_is_cell`
+ * themselves moved to value_util.h as `static inline` (M-inline-predicates)
+ * -- this macro moved with them; still used by every OTHER function below
+ * that derives a base pointer the same way. */
 #define ASNIX_PTR_BASE_MASK 0x0000FFFFFFFFFFF8ULL
 
 Value asnix_make_string_value(const char *s, size_t len) {
@@ -55,23 +59,11 @@ Value asnix_make_path_value(const char *abs_path, size_t len) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PTR };
 }
 
-int asnix_value_is_path(Value v) {
-    if (asnix_tag_of(v) != ASNIX_TAG_PTR) return 0;
-    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
-    return *(const int64_t *)(base + ASNIX_PATH_OFF_MARKER) == ASNIX_PATH_MARKER;
-}
-
 Value asnix_make_float_value(double d) {
     void *mem = asnix_arena_alloc(16);
     *(int64_t *)((char *)mem + ASNIX_FLOAT_OFF_MARKER) = ASNIX_FLOAT_MARKER;
     *(double *)((char *)mem + ASNIX_FLOAT_OFF_VALUE) = d;
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PTR };
-}
-
-int asnix_value_is_float(Value v) {
-    if (asnix_tag_of(v) != ASNIX_TAG_PTR) return 0;
-    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
-    return *(const int64_t *)(base + ASNIX_FLOAT_OFF_MARKER) == ASNIX_FLOAT_MARKER;
 }
 
 double asnix_float_value(Value v) {
@@ -85,12 +77,6 @@ Value asnix_make_cell_value(Value *target) {
     *(int64_t *)((char *)mem + ASNIX_CELL_OFF_MARKER) = ASNIX_CELL_MARKER;
     *(Value **)((char *)mem + ASNIX_CELL_OFF_TARGET) = target;
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PTR };
-}
-
-int asnix_value_is_cell(Value v) {
-    if (asnix_tag_of(v) != ASNIX_TAG_PTR) return 0;
-    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
-    return *(const int64_t *)(base + ASNIX_CELL_OFF_MARKER) == ASNIX_CELL_MARKER;
 }
 
 Value *asnix_cell_target(Value v) {

@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "asnix/heap.h"
 #include "asnix/value.h"
 
 /* Small, shared helpers used by multiple builtins (builtins.c, derivation.c)
@@ -19,9 +20,33 @@ Value asnix_make_string_value(const char *s, size_t len);
  * of its own. */
 Value asnix_make_path_value(const char *abs_path, size_t len);
 
+/* M-inline-predicates: same rule env.S's own header comment states for
+ * asnix_env_lookup (round 7's op_var_ref.c fix) -- a hot, tiny,
+ * tag-and-marker-check predicate must be inlined at every call site, not
+ * paid for as a real out-of-line `call`/`ret`. These three were plain
+ * extern functions in value_util.c, called from many other translation
+ * units (derivation.c, builtins_compare.c, op_mk_attrs.c, etc. -- no LTO
+ * in this build, so cross-TU calls never inline on their own); found hot
+ * in a `perf record` flat profile of the plasma-system NixOS-config
+ * benchmark (asnix_value_is_path 2.63%, asnix_tag_of 2.32% separately,
+ * asnix_value_is_float 1.53%, asnix_value_is_cell 0.86% of all branch-
+ * misses -- ffmpeg-full's profile never surfaced these as prominently,
+ * this benchmark's much heavier attrset/string-coercion mix does). Mask
+ * duplicated from value_util.c's own (now-removed) private copy, same
+ * comment/rationale as there: must be ASNIX_PTR_BASE_MASK (clears the
+ * ThunkMap index bits too), never the narrower ~0x7ULL, even though none
+ * of Path/Float/Cell is ever itself a ThunkMap -- a caller may hand any
+ * of these a value that turns out to be one (see that comment's own
+ * `asnix_value_is_cell`-segfault history). */
+#define ASNIX_PTR_BASE_MASK 0x0000FFFFFFFFFFF8ULL
+
 /* True iff `v` is an ASNIX_TAG_PTR object storing a Path rather than a
  * String (see heap.h's ASNIX_PATH_MARKER note). False for any other tag. */
-int asnix_value_is_path(Value v);
+static inline __attribute__((always_inline)) int asnix_value_is_path(Value v) {
+    if ((v.raw & ASNIX_TAG_MASK) != ASNIX_TAG_PTR) return 0;
+    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
+    return *(const int64_t *)(base + ASNIX_PATH_OFF_MARKER) == ASNIX_PATH_MARKER;
+}
 
 /* Float (M51): a third ASNIX_TAG_PTR kind alongside String/Path -- see
  * heap.h's ASNIX_FLOAT_MARKER note for the full rationale. Arena-allocates
@@ -33,7 +58,11 @@ Value asnix_make_float_value(double d);
  * Path -- callers that already know `v` is ASNIX_TAG_PTR and need "is this
  * specifically a string" should check `!asnix_value_is_path(v) &&
  * !asnix_value_is_float(v)`. */
-int asnix_value_is_float(Value v);
+static inline __attribute__((always_inline)) int asnix_value_is_float(Value v) {
+    if ((v.raw & ASNIX_TAG_MASK) != ASNIX_TAG_PTR) return 0;
+    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
+    return *(const int64_t *)(base + ASNIX_FLOAT_OFF_MARKER) == ASNIX_FLOAT_MARKER;
+}
 
 /* Unboxes a Float Value's double payload. Aborts if `v` isn't one (same
  * "trust the caller already checked the tag" convention as
@@ -54,7 +83,11 @@ Value asnix_make_cell_value(Value *target);
 /* True iff `v` is an ASNIX_TAG_PTR object storing a Cell rather than a
  * String/Path/Float (see heap.h's ASNIX_CELL_MARKER note). False for any
  * other tag. */
-int asnix_value_is_cell(Value v);
+static inline __attribute__((always_inline)) int asnix_value_is_cell(Value v) {
+    if ((v.raw & ASNIX_TAG_MASK) != ASNIX_TAG_PTR) return 0;
+    const char *base = (const char *)(v.raw & ASNIX_PTR_BASE_MASK);
+    return *(const int64_t *)(base + ASNIX_CELL_OFF_MARKER) == ASNIX_CELL_MARKER;
+}
 
 /* Unboxes a Cell Value's target pointer. Aborts if `v` isn't one (same
  * "trust the caller already checked the tag" convention as
