@@ -478,7 +478,30 @@ typedef struct ScopeFrame {
  * the target's far more often than not for arbitrary Nix identifiers --
  * rejecting on that alone, before ever calling memcmp, skips the
  * libc-call overhead for the overwhelming majority of comparisons,
- * without touching ScopeFrame, AST_VAR, or any other call site at all. */
+ * without touching ScopeFrame, AST_VAR, or any other call site at all.
+ *
+ * Considered, built, and REJECTED: a real 128-bit SSE/AVX load instead
+ * of memcmp for the common <=8/<=16-byte case (real Nix identifiers are
+ * almost all this short). Two separate problems, confirmed by direct
+ * measurement, not assumption: (1) unsafe as a literal wide load --
+ * `name`/`a`/`b` here point into the source buffer `eval_file.c`'s
+ * `read_file` allocates via `malloc(size + 1)` (padding for exactly one
+ * NUL byte, nothing more), so an unaligned 16-byte `_mm_loadu_si128` for
+ * an identifier in the file's last ~15 bytes would read past that
+ * allocation -- a real heap-buffer-overflow. (2) even the SAFE version
+ * (two bounded `memcpy`s into a zeroed `uint64_t` + one 8-byte compare,
+ * never reading past `alen`) measured as a NET REGRESSION on real
+ * ffmpeg-full (+0.21% instructions, confirmed via callgrind) versus this
+ * 3-line version: the extra branch/locals pushed `name_eq` past the
+ * compiler's inline-size threshold, so what used to be folded into every
+ * caller for free (confirmed: this function has zero self-cost of its
+ * own in the profile, below) became a real CALL at ~380,000 call sites
+ * -- that overhead alone outweighed the memcmp calls it avoided. Also:
+ * glibc's own `memcmp` already uses AVX2 on this machine for longer runs
+ * (confirmed in the profile: `__memcmp_avx2_movbe`) -- the cost this
+ * function's short-name case was paying was the call + internal
+ * length-dispatch, not a lack of vectorization, so there was no missing
+ * SIMD to add in the first place. */
 static int name_eq(const char *a, size_t alen, const char *b, size_t blen) {
     if (a == NULL || alen != blen) return 0;
     if (alen == 0) return 1;
