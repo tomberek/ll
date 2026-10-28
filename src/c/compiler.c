@@ -456,8 +456,34 @@ typedef struct ScopeFrame {
  * cuts in this project, e.g. M6's non-recursive `let`). */
 #define ASNIX_MAX_WITH_CHAIN 64
 
+/* perf: profiled directly (callgrind on real nixpkgs ffmpeg-full/plasma
+ * evals) as the dominant self-cost inside compile_expr's own body -- the
+ * AST_VAR/try_cell_ref scope-chain walk (compiler.c's `scope_find_lexical`
+ * and AST_VAR's own copy of the same loop) calls this on average ~16
+ * times per enclosing frame actually walked, ~357,000 frame-visits on the
+ * real ffmpeg-full eval alone. A first real `rec {}` scope this project's
+ * own M142 comment already measured at thousands of bindings (nixpkgs's
+ * all-packages.nix) was the obvious first suspect for an O(log n)
+ * bsearch-over-pre-sorted-symbol-ids rewrite (reusing AST_ATTRSET's
+ * already-computed `sorted_syms`/`order`) -- tried, built, verified
+ * correct (44/44 difftest, 148/148 nixpkgs-hash), but MEASURED a net
+ * REGRESSION on real ffmpeg-full (+18.8M of 5.77B instructions, +0.33%):
+ * direct instrumentation showed that path's own bsearch fires only ~2,100
+ * times against ~357,000 ordinary small-frame linear-scan visits
+ * (average 16.25 slots/frame) -- the rare big-frame win doesn't come
+ * close to paying for the extra branch+lazy-intern cost paid on every
+ * other (small, common) frame. Reverted in favor of this instead: almost
+ * every one of those ~5.8M comparisons across the many small frames is a
+ * MISMATCH (wrong sibling name), and a mismatch's first byte differs from
+ * the target's far more often than not for arbitrary Nix identifiers --
+ * rejecting on that alone, before ever calling memcmp, skips the
+ * libc-call overhead for the overwhelming majority of comparisons,
+ * without touching ScopeFrame, AST_VAR, or any other call site at all. */
 static int name_eq(const char *a, size_t alen, const char *b, size_t blen) {
-    return a != NULL && alen == blen && memcmp(a, b, alen) == 0;
+    if (a == NULL || alen != blen) return 0;
+    if (alen == 0) return 1;
+    if (a[0] != b[0]) return 0;
+    return memcmp(a, b, alen) == 0;
 }
 
 /* M92: factored out of AST_VAR's own scope walk below -- scans `scope`
