@@ -47,6 +47,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "asnix/heap.h"
 #include "asnix/ir.h"
@@ -75,12 +76,191 @@ static void vv_push(ValueVec *v, Value x) {
  * were it ever invoked; for the dedup-by-equality loop below, a shallow
  * tag check is enough to reject the two kinds of input the two
  * conformance cases exercise: an incompatible type mix, and a type
- * that's never comparable at all, e.g. an attrset). */
-static int value_key_comparable(Value a, Value b) {
-    int ta = asnix_tag_of(a), tb = asnix_tag_of(b);
-    if (ta == ASNIX_TAG_INT && tb == ASNIX_TAG_INT) return 1;
-    if (ta == ASNIX_TAG_PTR && tb == ASNIX_TAG_PTR && !asnix_value_is_path(a) && !asnix_value_is_path(b)) return 1;
-    if (ta == ASNIX_TAG_LIST && tb == ASNIX_TAG_LIST) return 1;
+ * that's never comparable at all, e.g. an attrset).
+ *
+ * perf (plasma-system-eval cluster): a fresh profile on a full NixOS
+ * module-system eval (nixos/lib/eval-config.nix with Plasma 6 enabled)
+ * found nixpkgs's own `lib.modules.filterModules` calling this builtin
+ * with `startSet` = the full collected module list and `operator =
+ * attrs: attrs.modules` -- real measured shape on that benchmark:
+ * ONE call with startSet of 2,116 items popping ~3,967 total work-queue
+ * items, almost all of them DISTINCT keys (module file paths), which is
+ * the worst case for the old O(n) linear `seen_keys` scan below: ~n^2/2
+ * comparisons with almost no early-exit hits, measured directly via
+ * callgrind at ~7.96 million asnix_bshared_value_eq calls from this one
+ * call site alone (confirmed by temporarily instrumenting with an
+ * fprintf before writing the fix). Replaced the O(n) linear scan with
+ * an open-addressing hash set (closure_key_hash below) keyed on the
+ * SAME three type classes value_key_comparable already recognizes
+ * (int/non-path-string/list), giving O(1)-average dedup instead of
+ * O(n) per item. The comparability-error contract is preserved exactly
+ * (see key_class/KeyClass below) without needing a pairwise scan: the
+ * ORIGINAL loop's `value_key_comparable(seen_keys.data[i], key)` check
+ * only ever depends on the two values' own type classes, never on the
+ * VALUE of any other previously-seen key, so establishing a single
+ * "class" from the first-ever key and checking every subsequent key's
+ * class against it reproduces the identical fire/no-fire decision on
+ * the identical iteration as the old pairwise scan (by induction: every
+ * previously-accepted key already shares the established class, or the
+ * loop would have already thrown before accepting it). */
+typedef enum { KC_INT, KC_STR, KC_LIST, KC_FLOAT, KC_OTHER } KeyClass;
+
+/* M-closure-hash-float-fix: value_key_comparable's ORIGINAL check (now
+ * removed above) classified a Float -- tagged ASNIX_TAG_PTR same as a
+ * string, distinguished only by an internal marker (see value_util.h's
+ * own asnix_value_is_float comment) -- into the SAME "comparable" bucket
+ * as a real string, simply because it never excluded `asnix_value_is_
+ * float` the way it excluded `asnix_value_is_path`. That was harmless in
+ * the original code because the actual EQUALITY check was always a
+ * separate, correct call to asnix_bshared_value_eq (which checks
+ * is_float first and does a real numeric double compare). This hash-set
+ * replacement would NOT be harmless if it inherited the same
+ * misclassification: closure_key_hash's STR case hashes raw PTR bytes,
+ * and two numerically-equal doubles are not always byte-identical (0.0
+ * and -0.0 differ only in the sign bit) -- hashing them as opaque bytes
+ * would put them in different buckets and the hash set would never even
+ * call asnix_bshared_value_eq to notice they're equal, silently failing
+ * to dedupe a case the original O(n) scan handled correctly. Giving
+ * Float its own class with a hash that normalizes -0.0 to +0.0 (see
+ * closure_key_hash below) closes that gap -- same observable dedup
+ * behavior as the original scan for every key type, not just the ones
+ * exercised by this session's own test corpus. */
+static KeyClass key_class(Value v) {
+    int t = asnix_tag_of(v);
+    if (t == ASNIX_TAG_INT) return KC_INT;
+    if (t == ASNIX_TAG_PTR && asnix_value_is_float(v)) return KC_FLOAT;
+    if (t == ASNIX_TAG_PTR && !asnix_value_is_path(v)) return KC_STR;
+    if (t == ASNIX_TAG_LIST) return KC_LIST;
+    return KC_OTHER;
+}
+
+/* classes_comparable mirrors value_key_comparable's original allowed
+ * pairs exactly (both int, both non-path non-float string, both list,
+ * both float) -- KC_OTHER never matches anything, including itself
+ * (matches value_key_comparable's own (IMM,IMM)/(ATTRS,ATTRS)/etc.
+ * "never comparable" behavior, which is why two `{key = true;}` items
+ * still throw -- see the long comment above prim_genericClosure). Note
+ * KC_INT and KC_FLOAT are NOT mutually comparable here even though
+ * asnix_bshared_value_eq itself allows numeric int/float equality --
+ * this matches value_key_comparable's own original behavior exactly
+ * (its first check requires BOTH sides tagged ASNIX_TAG_INT, so an
+ * int key mixed with a float key already threw "cannot compare" before
+ * this fix existed; not something this fix changes either way). */
+static int classes_comparable(KeyClass a, KeyClass b) {
+    return (a == KC_INT && b == KC_INT) || (a == KC_STR && b == KC_STR) || (a == KC_LIST && b == KC_LIST) ||
+           (a == KC_FLOAT && b == KC_FLOAT);
+}
+
+/* FNV-1a-style mix, folded recursively over a LIST key's elements (each
+ * forced first, exactly like asnix_bshared_value_eq's own LIST case
+ * forces each element via its recursive call -- so two keys that are
+ * equal per asnix_bshared_value_eq always hash equal here too, which is
+ * the only correctness requirement a hash-set dedup has). Only ever
+ * called on a key whose class is KC_INT/KC_STR/KC_LIST/KC_FLOAT
+ * (KC_OTHER keys are never hashed -- see prim_genericClosure below). */
+static uint64_t closure_key_hash(Value v) {
+    uint64_t h = 1469598103934665603ULL;
+    int t = asnix_tag_of(v);
+    if (t == ASNIX_TAG_INT) {
+        h ^= (uint64_t)asnix_int_value(v);
+        h *= 0x100000001b3ULL;
+        return h;
+    }
+    if (asnix_value_is_float(v)) {
+        /* Normalize -0.0 to +0.0 before hashing -- the one case where
+         * two IEEE754 doubles compare equal (asnix_bshared_value_eq's
+         * own `da == db`) but have different bit patterns. Every other
+         * finite value, and NaN (which is never equal to anything, even
+         * itself, so a hash collision there is harmless -- value_eq
+         * still correctly says "not equal" on probe), already hashes
+         * consistently with its own equality notion without special
+         * casing. */
+        double d = asnix_float_value(v);
+        if (d == 0.0) d = 0.0; /* collapses -0.0 to +0.0; +0.0 is a no-op */
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        h ^= bits;
+        h *= 0x100000001b3ULL;
+        return h;
+    }
+    if (t == ASNIX_TAG_LIST) {
+        int64_t n = asnix_bshared_list_count(v);
+        const Value *elems = asnix_bshared_list_elems(v);
+        h ^= (uint64_t)n;
+        h *= 0x100000001b3ULL;
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t eh = closure_key_hash(asnix_force_for_print(elems[i]));
+            h ^= eh;
+            h *= 0x100000001b3ULL;
+        }
+        return h;
+    }
+    /* KC_STR (plain ASNIX_TAG_PTR, non-path) -- same byte source
+     * asnix_bshared_value_eq's own PTR-vs-PTR case memcmp's. */
+    int64_t len;
+    const char *bytes = asnix_ptr_bytes(v, &len);
+    for (int64_t i = 0; i < len; i++) {
+        h ^= (uint8_t)bytes[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+typedef struct {
+    uint64_t hash;
+    Value key;
+    int used;
+} ClosureSeenSlot;
+
+typedef struct {
+    ClosureSeenSlot *slots;
+    size_t cap;   /* always a power of two */
+    size_t count;
+} ClosureSeenSet;
+
+static void seen_set_init(ClosureSeenSet *s) {
+    s->cap = 64;
+    s->slots = calloc(s->cap, sizeof(ClosureSeenSlot));
+    s->count = 0;
+}
+
+static void seen_set_insert_raw(ClosureSeenSet *s, uint64_t hash, Value key) {
+    size_t mask = s->cap - 1;
+    size_t i = (size_t)hash & mask;
+    while (s->slots[i].used) i = (i + 1) & mask;
+    s->slots[i].used = 1;
+    s->slots[i].hash = hash;
+    s->slots[i].key = key;
+    s->count++;
+}
+
+static void seen_set_grow(ClosureSeenSet *s) {
+    size_t old_cap = s->cap;
+    ClosureSeenSlot *old = s->slots;
+    s->cap = old_cap * 2;
+    s->slots = calloc(s->cap, sizeof(ClosureSeenSlot));
+    s->count = 0;
+    for (size_t i = 0; i < old_cap; i++) {
+        if (old[i].used) seen_set_insert_raw(s, old[i].hash, old[i].key);
+    }
+    free(old);
+}
+
+/* Returns 1 if an equal key is already present (per asnix_bshared_value_eq);
+ * otherwise inserts `key` and returns 0. Keeps the load factor <= 0.75. */
+static int seen_set_probe_or_insert(ClosureSeenSet *s, Value key) {
+    if (s->count * 4 >= s->cap * 3) seen_set_grow(s);
+    uint64_t h = closure_key_hash(key);
+    size_t mask = s->cap - 1;
+    size_t i = (size_t)h & mask;
+    while (s->slots[i].used) {
+        if (s->slots[i].hash == h && asnix_bshared_value_eq(s->slots[i].key, key)) return 1;
+        i = (i + 1) & mask;
+    }
+    s->slots[i].used = 1;
+    s->slots[i].hash = h;
+    s->slots[i].key = key;
+    s->count++;
     return 0;
 }
 
@@ -102,7 +282,11 @@ static Value prim_genericClosure(const Value *args, int64_t argc) {
     if (op_idx < 0) asnix_bshared_fatal("genericClosure", "attribute 'operator' is missing");
     Value operator_fn = asnix_force_for_print(asnix_bshared_attrs_value(input, op_idx));
 
-    ValueVec queue = {0}, seen_keys = {0}, result = {0};
+    ValueVec queue = {0}, result = {0};
+    ClosureSeenSet seen;
+    seen_set_init(&seen);
+    int have_class = 0;
+    KeyClass class0 = KC_OTHER;
     int64_t n0 = asnix_bshared_list_count(start_set);
     const Value *elems0 = asnix_bshared_list_elems(start_set);
     for (int64_t i = 0; i < n0; i++) vv_push(&queue, elems0[i]);
@@ -121,16 +305,21 @@ static Value prim_genericClosure(const Value *args, int64_t argc) {
         }
         Value key = asnix_force_for_print(asnix_bshared_attrs_value(item, k_idx));
 
-        int already_seen = 0;
-        for (size_t i = 0; i < seen_keys.len; i++) {
-            if (!value_key_comparable(seen_keys.data[i], key)) {
-                asnix_bshared_fatal("genericClosure",
-                    "cannot compare two 'key' values (incompatible or uncomparable types)");
-            }
-            if (asnix_bshared_value_eq(seen_keys.data[i], key)) { already_seen = 1; break; }
+        KeyClass kc = key_class(key);
+        if (!have_class) {
+            have_class = 1;
+            class0 = kc;
+        } else if (!classes_comparable(class0, kc)) {
+            asnix_bshared_fatal("genericClosure", "cannot compare two 'key' values (incompatible or uncomparable types)");
         }
+        /* A KC_OTHER key is only ever reachable here on its very first
+         * occurrence (any second key -- even another KC_OTHER one --
+         * fails classes_comparable above and is already fatal by this
+         * point), so it can never be "already seen"; skip the hash set
+         * entirely for it (closure_key_hash/value_eq on KC_OTHER values
+         * like attrsets/functions is unsupported and unnecessary). */
+        int already_seen = (kc == KC_OTHER) ? 0 : seen_set_probe_or_insert(&seen, key);
         if (already_seen) continue;
-        vv_push(&seen_keys, key);
         vv_push(&result, item);
 
         Value next = asnix_apply(operator_fn, &item, 1);
@@ -144,7 +333,7 @@ static Value prim_genericClosure(const Value *args, int64_t argc) {
 
     Value out = asnix_bshared_make_list(result.data, (int64_t)result.len);
     free(queue.data);
-    free(seen_keys.data);
+    free(seen.slots);
     free(result.data);
     return out;
 }
