@@ -26,6 +26,7 @@
 // being exactly 0, which it only ever is before the one-time mmap) so
 // no caller anywhere -- production or test -- needs to remember to
 // call an explicit init function before the first Env allocation.
+#include "asnix/arena.h"
 #include "asnix/env.h"
 
     .equ ASNIX_SYS_MMAP,       9
@@ -124,6 +125,18 @@ asnix_env_arena_do_init:                // internal, called exactly once (from a
     testq %rax, %rax
     jl .Lenv_arena_abort_mmap
 
+    // asnix_huge_pages_available() -- gate the hint below on this, same
+    // reason and same helper as arena.S's own general-arena fix (see
+    // that file's own comment): avoid ever hinting MADV_HUGEPAGE when
+    // the kernel has no free 2 MiB+ block, which under defrag=madvise
+    // would otherwise be assembled by synchronous compaction at fault
+    // time. rax (the mmap result) must survive the call.
+    pushq %rax
+    call asnix_huge_pages_available
+    popq %rax
+    testl %eax, %eax
+    jz .Lno_env_hugepage_hint
+
     // madvise(base, ASNIX_ENV_ARENA_SIZE, MADV_HUGEPAGE) -- same hint and
     // same rationale as arena.S's own general-arena fix: this kernel's
     // transparent_hugepage/enabled is "madvise", not "always", so this
@@ -140,6 +153,7 @@ asnix_env_arena_do_init:                // internal, called exactly once (from a
     syscall
     popq %rax
 
+.Lno_env_hugepage_hint:
     leaq asnix_env_arena_base(%rip), %rcx
     movq %rax, (%rcx)
     // cur starts at base+8, not base+0, so a stored offset of 0 can

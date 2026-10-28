@@ -45,6 +45,13 @@ void asnix_arena_init(uint64_t max_memory_bytes);
  * allocation would exceed the configured memory cap or mmap fails. */
 void *asnix_arena_alloc(uint64_t n);
 
+/* M-iets-parity (hugepage_check.c): 1 iff /proc/buddyinfo shows at
+ * least 1GiB free in order-9+ (>=2MiB) blocks, checked once and
+ * cached. arena.S/env_arena.S check this before ever hinting
+ * MADV_HUGEPAGE, to avoid triggering expensive synchronous compaction
+ * on a fragmented box (see that file's own comment). */
+int asnix_huge_pages_available(void);
+
 #endif /* __ASSEMBLER__ */
 
 #endif /* ASNIX_ARENA_H */
