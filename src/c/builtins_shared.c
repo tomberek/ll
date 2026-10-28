@@ -520,20 +520,37 @@ Value asnix_bshared_attrs_value(Value v, int64_t i) {
     return *(const Value *)(entry + ASNIX_ATTR_OFF_VALUE);
 }
 
-/* fork (unionhdr-probe): binary search on a value ALREADY KNOWN to be
- * flat (count >= 0) -- shared by asnix_bshared_attrs_probe and (M114)
- * asnix_bshared_attrs_find below, raw-layout version of a lo/hi binary
- * search without any resolve call, since every leaf of a union is
- * already guaranteed flat by construction (asnix_attrs_update always
- * resolves a would-be leaf before storing it), and a caller that has
- * already resolved its own `attrs` argument once knows the result is
- * flat too. */
+/* fork (unionhdr-probe): search on a value ALREADY KNOWN to be flat
+ * (count >= 0) -- shared by asnix_bshared_attrs_probe and (M114)
+ * asnix_bshared_attrs_find below, raw-layout version without any
+ * resolve call, since every leaf of a union is already guaranteed flat
+ * by construction (asnix_attrs_update always resolves a would-be leaf
+ * before storing it), and a caller that has already resolved its own
+ * `attrs` argument once knows the result is flat too.
+ *
+ * M-attrs-linear-scan: iets's own get_flat (runtime/value.rs) uses a
+ * LINEAR scan, not binary search, whenever the set has 8 or fewer
+ * entries -- read directly, not guessed: "binary search over symbol
+ * ids; linear for small sets". A sequential scan over a small, tightly-
+ * packed entry array beats binary search's O(log n) but branch-heavy,
+ * cache-unpredictable jump pattern for small n, and most real nixpkgs
+ * attrsets (package metadata, module options) are small. Kept the
+ * exact threshold (8) iets itself uses. */
 static int64_t attrs_find_flat_noresolve(Value flat, uint32_t sym) {
     const char *base = (const char *)(uintptr_t)(flat.raw & ~(uint64_t)ASNIX_TAG_MASK);
-    int64_t lo = 0, hi = *(const int64_t *)(base + ASNIX_ATTRS_OFF_COUNT);
+    int64_t hi = *(const int64_t *)(base + ASNIX_ATTRS_OFF_COUNT);
+    const char *entries = base + ASNIX_ATTRS_OFF_ENTRIES;
+    if (hi <= 8) {
+        const char *entry = entries;
+        for (int64_t i = 0; i < hi; i++, entry += ASNIX_ATTR_SIZE) {
+            if (*(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM) == sym) return i;
+        }
+        return -1;
+    }
+    int64_t lo = 0;
     while (lo < hi) {
         int64_t mid = lo + (hi - lo) / 2;
-        const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + mid * ASNIX_ATTR_SIZE;
+        const char *entry = entries + mid * ASNIX_ATTR_SIZE;
         uint32_t s = *(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM);
         if (s == sym) return mid;
         if (s < sym) lo = mid + 1; else hi = mid;
