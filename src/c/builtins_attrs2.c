@@ -62,6 +62,32 @@ static Value filterAttrs2_impl(const Value *args, int64_t argc) {
 }
 static Value build_filterAttrs(void) { return asnix_bshared_make_curried_native((void *)filterAttrs2_impl, 2); }
 
+/* M196 perf: listToAttrs's own dedupe used to be an unconditional O(n^2)
+ * linear scan over every already-collected output entry for every list
+ * element -- the same anti-pattern M89/M158 already fixed in make_attrs
+ * and M195 fixed in zipAttrsWith, just missed here since it's a separate,
+ * inline check in a different file, and (unlike those two) had no size
+ * threshold at all. Fixed the same way: collect (sym, original index,
+ * value) for every element unconditionally first (each element needs
+ * forcing + name/value lookup regardless of dedup), sort by (sym, idx)
+ * with idx as a tie-break, then a single forward dedupe pass. Sorting by
+ * idx as the tie-break means the FIRST entry in each equal-sym run is
+ * always the one with the smallest original index -- i.e. the earliest
+ * list occurrence -- so the dedupe pass below preserves this builtin's
+ * documented "first occurrence of a duplicate name wins" semantics
+ * exactly (see prim_listToAttrs's own comment), without ever re-scanning
+ * already-collected output. Same insertion-sort-below/qsort-above split
+ * and threshold as make_attrs's own ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX. */
+#define ASNIX_LIST_TO_ATTRS_SORT_INSERTION_MAX 32
+
+typedef struct { uint32_t sym; int64_t idx; Value val; } ListToAttrsEntry;
+
+static int cmp_list_to_attrs_entry(const void *a, const void *b) {
+    const ListToAttrsEntry *ea = a, *eb = b;
+    if (ea->sym != eb->sym) return ea->sym < eb->sym ? -1 : 1;
+    return ea->idx < eb->idx ? -1 : (ea->idx > eb->idx ? 1 : 0);
+}
+
 /* ---------------------------------------------------------------------
  * listToAttrs list -- verified:
  * `builtins.listToAttrs [{name="foo"; value=123;} {name="bar"; value=456;}
@@ -82,9 +108,7 @@ static Value prim_listToAttrs(const Value *args, int64_t argc) {
     uint32_t sym_name = asnix_intern("name", 4);
     uint32_t sym_value = asnix_intern("value", 5);
 
-    uint32_t *syms = n > 0 ? malloc((size_t)n * sizeof(uint32_t)) : NULL;
-    Value *vals = n > 0 ? malloc((size_t)n * sizeof(Value)) : NULL;
-    int64_t out_n = 0;
+    ListToAttrsEntry *entries = n > 0 ? malloc((size_t)n * sizeof(ListToAttrsEntry)) : NULL;
 
     for (int64_t i = 0; i < n; i++) {
         /* Lazy list elements (M23's `map`, etc.) -- force before checking
@@ -103,18 +127,38 @@ static Value prim_listToAttrs(const Value *args, int64_t argc) {
         asnix_bshared_string_bytes(name_v, &nbytes, &nlen, "listToAttrs");
         uint32_t sym = asnix_intern(nbytes, (size_t)nlen);
 
-        int dup = 0;
-        for (int64_t j = 0; j < out_n; j++) {
-            if (syms[j] == sym) { dup = 1; break; }
-        }
-        if (dup) continue; /* first occurrence wins */
+        entries[i].sym = sym;
+        entries[i].idx = i;
+        entries[i].val = asnix_bshared_attrs_value(elem, value_idx);
+    }
 
-        syms[out_n] = sym;
-        vals[out_n] = asnix_bshared_attrs_value(elem, value_idx);
+    if (n <= ASNIX_LIST_TO_ATTRS_SORT_INSERTION_MAX) {
+        for (int64_t i = 1; i < n; i++) {
+            int64_t j = i;
+            ListToAttrsEntry e = entries[i];
+            while (j > 0 && (entries[j - 1].sym > e.sym ||
+                             (entries[j - 1].sym == e.sym && entries[j - 1].idx > e.idx))) {
+                entries[j] = entries[j - 1];
+                j--;
+            }
+            entries[j] = e;
+        }
+    } else {
+        qsort(entries, (size_t)n, sizeof(ListToAttrsEntry), cmp_list_to_attrs_entry);
+    }
+
+    uint32_t *syms = n > 0 ? malloc((size_t)n * sizeof(uint32_t)) : NULL;
+    Value *vals = n > 0 ? malloc((size_t)n * sizeof(Value)) : NULL;
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (out_n > 0 && syms[out_n - 1] == entries[i].sym) continue; /* later (by idx) duplicate: first occurrence already kept */
+        syms[out_n] = entries[i].sym;
+        vals[out_n] = entries[i].val;
         out_n++;
     }
 
     Value result = asnix_bshared_make_attrs(syms, vals, out_n);
+    free(entries);
     free(syms);
     free(vals);
     return result;
