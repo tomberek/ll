@@ -8,6 +8,7 @@
     .equ ASNIX_SYS_MMAP,       9
     .equ ASNIX_SYS_MADVISE,    28
     .equ ASNIX_MADV_HUGEPAGE,  14
+    .equ ASNIX_MADV_POPULATE_WRITE, 23
     .equ ASNIX_PROT_READ,      0x1
     .equ ASNIX_PROT_WRITE,     0x2
     .equ ASNIX_MAP_PRIVATE,    0x02
@@ -124,6 +125,31 @@ asnix_arena_alloc:                      // void *asnix_arena_alloc(uint64_t n)
     movq %rax, %rdi
     movq %r8, %rsi
     movq $ASNIX_MADV_HUGEPAGE, %rdx
+    movq $ASNIX_SYS_MADVISE, %rax
+    syscall
+
+    // madvise(new_chunk, chunk_size, MADV_POPULATE_WRITE) -- the hint
+    // above is not enough on its own: this kernel's transparent_
+    // hugepage/defrag is "madvise", meaning huge-page promotion for a
+    // MADV_HUGEPAGE region is attempted via DIRECT (synchronous)
+    // compaction at first-touch fault time, one lazy 4 KiB fault at a
+    // time as the bump cursor advances -- unreliable for actually
+    // landing a huge page, and (per iets's own sys/linux.rs comment,
+    // read directly rather than guessed) this exact "many threads
+    // compacting at once on a fragmented box" pattern was a measured
+    // regression for them. Eagerly populating the WHOLE chunk now, in
+    // one syscall, gives the kernel the full 2 MiB extent up front
+    // instead of discovering it fault-by-fault, which is what actually
+    // makes promotion land reliably. Still hint-only (return value
+    // ignored) -- iets additionally gates this on free order-9+ blocks
+    // in /proc/buddyinfo before ever requesting a huge page at all,
+    // avoiding the fragmented-box regression at its root; NOT ported
+    // here (would need a C-side one-time check, this file has no libc
+    // dependency by design) -- a known, deliberate scope cut, safe on
+    // this box only because /proc/buddyinfo currently shows hundreds of
+    // MB free at order 9/10. Revisit if this ever regresses instead of
+    // helping. %rdi/%rsi are already new_chunk/chunk_size from above.
+    movq $ASNIX_MADV_POPULATE_WRITE, %rdx
     movq $ASNIX_SYS_MADVISE, %rax
     syscall
     popq %r8                             // restore chunk_size
