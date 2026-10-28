@@ -128,6 +128,7 @@ int main(int argc, char **argv) {
 
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t0);
     asnix_arena_init(0);
+    asnix_lazy_thunk_enabled = getenv("ASNIX_LAZY_THUNK") != NULL; /* lazy-thunk-compile experiment, ported from asnix */
     Ast *root = asnix_parse(src);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t1);
     IrProgram *prog = asnix_compile(root, base_dir, resolved_path);

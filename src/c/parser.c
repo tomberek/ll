@@ -904,7 +904,26 @@ static Ast *build_dynamic_chain_value(AttrSeg *segs, size_t start, size_t count,
  * checks entirely, which exist only for names a *user* could write). */
 static int g_inherit_hidden_counter = 0;
 
+/* Lazy-thunk-compile experiment, ported from asnix (see ast.h's own
+ * comment on asnix_ast_enter_retained): wraps the real
+ * parse_binding_stmt_inner below so every Ast node it builds for ANY
+ * binding -- attrset-literal OR `let` -- is redirected into the
+ * permanently-retained arena instead of the normal per-file resettable
+ * one. Unconditional on block kind (not gated on `dyn_out != NULL`,
+ * which asnix's own M196 fix found was wrong: `let a.b = v;`-style
+ * attrpath sugar synthesizes an AST_ATTRSET node regardless of block
+ * kind, and that synthetic attrset's own fields are just as eligible
+ * for emit_attrset_field_value's deferral as any hand-written literal's
+ * -- a real neovim.outPath use-after-free on asnix before this fix). */
+static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_out);
+
 static void parse_binding_stmt(Parser *p, BTVec *out, DynBindingVec *dyn_out) {
+    int prev = asnix_ast_enter_retained();
+    parse_binding_stmt_inner(p, out, dyn_out);
+    asnix_ast_leave_retained(prev);
+}
+
+static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_out) {
     if (cur(p).kind == TOK_INHERIT) {
         advance(p);
         Ast *src_expr = NULL;
@@ -1393,6 +1412,13 @@ static Ast *parse_atom(Parser *p) {
             advance(p);
             BTVec bt = { 0 };
             DynBindingVec dyn = { 0 };
+            /* Lazy-thunk-compile experiment, ported from asnix: wraps
+             * the WHOLE literal's parse (not just parse_binding_stmt's
+             * own already-wrapped per-binding value), since
+             * finalize_bt_vec/merge_bt_dyn_into build wrapper Ast nodes
+             * AFTER the loop (e.g. a dynamic-attr merge) that also
+             * become part of a deferred field's body. */
+            int lt_prev_lbrace = asnix_ast_enter_retained();
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
@@ -1405,6 +1431,7 @@ static Ast *parse_atom(Parser *p) {
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
+            asnix_ast_leave_retained(lt_prev_lbrace);
             return n;
         }
         case TOK_REC: {
@@ -1412,6 +1439,7 @@ static Ast *parse_atom(Parser *p) {
             expect(p, TOK_LBRACE, "'{'");
             BTVec bt = { 0 };
             DynBindingVec dyn = { 0 };
+            int lt_prev_rec = asnix_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
@@ -1424,6 +1452,7 @@ static Ast *parse_atom(Parser *p) {
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
+            asnix_ast_leave_retained(lt_prev_rec);
             return n;
         }
         default:
@@ -1863,7 +1892,15 @@ static Ast *parse_let_bindings(Parser *p) {
         exit(1);
     }
     BindingVec bindings = { 0 };
+    /* Lazy-thunk-compile experiment, ported from asnix: same reasoning
+     * as TOK_LBRACE/TOK_REC's own identical wrap in parse_atom --
+     * finalize_bt_vec is where any attrpath-sugar's synthetic
+     * AST_ATTRSET wrapper node actually gets allocated, strictly AFTER
+     * the while-loop above has already returned, so the per-binding
+     * toggle inside parse_binding_stmt cannot reach it on its own. */
+    int lt_prev_let_finalize = asnix_ast_enter_retained();
     finalize_bt_vec(&bt, &bindings);
+    asnix_ast_leave_retained(lt_prev_let_finalize);
     VEC_TRIM(bindings, AstBinding);
 
     Ast *n = asnix_ast_new_at(AST_LET, cur(p).start);
@@ -1964,6 +2001,7 @@ static Ast *parse_expr(Parser *p) {
             advance(p); /* '{' */
             BTVec bt = { 0 };
             DynBindingVec dyn = { 0 };
+            int lt_prev_letbrace = asnix_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
@@ -1976,6 +2014,7 @@ static Ast *parse_expr(Parser *p) {
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             attrs->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             attrs->as.attrset.dyn_count = dyn.len;
+            asnix_ast_leave_retained(lt_prev_letbrace);
             Ast *n = asnix_ast_new_at(AST_SELECT, cur(p).start);
             n->as.select.target = attrs;
             n->as.select.attr = "body";

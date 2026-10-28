@@ -449,6 +449,102 @@ typedef struct ScopeFrame {
     int has_overrides;
 } ScopeFrame;
 
+/* Lazy-thunk-compile experiment, ported from asnix -- see compiler.h's
+ * own comment on asnix_lazy_thunk_enabled. */
+int asnix_lazy_thunk_enabled = 0;
+
+/* Pool payload for a stub IrProgram's single OP_LAZY_THUNK_BODY op (see
+ * docs/lazy-thunk-compile-proposal.md's "Concrete mechanism" section,
+ * asnix's own compiler.c). Defined here, not ir.h/irbuild.h -- nothing
+ * outside compiler.c and this experiment's own op handler (which only
+ * ever hands the pointer to the C bridge below, never dereferences a
+ * field itself) needs the layout. `self` is set once, right after the
+ * stub's own IrProgram is built (see emit_attrset_field_value below) --
+ * the same shared IrProgram every dynamic Thunk cell from this static
+ * OP_MK_THUNK site points at, mutated in place on upgrade. */
+typedef struct LazyThunkDescriptor {
+    IrProgram *self;
+    Ast *body;
+    ScopeFrame *scope;
+    const char *file_path;
+    const char *base_dir;
+} LazyThunkDescriptor;
+
+/* Deep-copies a ScopeFrame chain (walking ->up) into freshly malloc'd,
+ * never-freed memory -- fixes the ScopeFrame's-C-stack-only-lifetime
+ * obstacle (asnix's own docs/lazy-thunk-compile-proposal.md). `names`/
+ * `name_lens` arrays are copied too (fresh arrays, same pointer VALUES
+ * inside -- each name still aliases `src`, same as the Ast nodes
+ * themselves). */
+static ScopeFrame *scope_frame_persist(ScopeFrame *stack_scope) {
+    if (!stack_scope) return NULL;
+    ScopeFrame *copy = malloc(sizeof(ScopeFrame));
+    *copy = *stack_scope;
+    copy->up = scope_frame_persist(stack_scope->up);
+    if (stack_scope->count > 0) {
+        const char **names = malloc(stack_scope->count * sizeof(char *));
+        size_t *lens = malloc(stack_scope->count * sizeof(size_t));
+        memcpy(names, stack_scope->names, stack_scope->count * sizeof(char *));
+        memcpy(lens, stack_scope->name_lens, stack_scope->count * sizeof(size_t));
+        copy->names = names;
+        copy->name_lens = lens;
+    }
+    return copy;
+}
+
+static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
+
+/* C bridge for OP_LAZY_THUNK_BODY's handler (src/llvm/ops/
+ * op_lazy_thunk_body.c) -- ported from asnix. Runs the exact same
+ * compile_expr/ib_finish pipeline a top-level asnix_compile() call
+ * would, mid-dispatch, saving/restoring the two file-scope globals
+ * compile_expr depends on beyond its explicit parameters. */
+IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
+    LazyThunkDescriptor *desc = (LazyThunkDescriptor *)desc_void;
+    const char *saved_base_dir = g_compile_base_dir;
+    const char *saved_file_path = g_compile_file_path;
+    g_compile_base_dir = desc->base_dir;
+    g_compile_file_path = desc->file_path;
+
+    IrBuilder *real_b = ib_new();
+    compile_expr(real_b, desc->body, desc->scope);
+    ib_ret(real_b);
+    IrProgram *real = ib_finish(real_b);
+
+    g_compile_base_dir = saved_base_dir;
+    g_compile_file_path = saved_file_path;
+
+    desc->self->ops = real->ops;
+    desc->self->pool = real->pool;
+    free(real);
+    return desc->self;
+}
+
+/* Replaces the usual "build a thunk_b, compile_expr into it, ib_ret,
+ * ib_mk_thunk(b, ib_finish(thunk_b))" sequence for an ordinary attrset
+ * field value -- when the experiment is on, builds a 1-op stub instead
+ * and defers the real compile to first-force. `value_scope` is whatever
+ * ScopeFrame the eager path would have compiled `value` against. */
+static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value_scope) {
+    if (!asnix_lazy_thunk_enabled) {
+        IrBuilder *thunk_b = ib_new();
+        compile_expr(thunk_b, value, value_scope);
+        ib_ret(thunk_b);
+        ib_mk_thunk(b, ib_finish(thunk_b));
+        return;
+    }
+    LazyThunkDescriptor *desc = malloc(sizeof(LazyThunkDescriptor));
+    desc->body = value;
+    desc->scope = scope_frame_persist(value_scope);
+    desc->file_path = g_compile_file_path;
+    desc->base_dir = g_compile_base_dir;
+    IrBuilder *stub_b = ib_new();
+    ib_mk_lazy_thunk_stub(stub_b, desc);
+    IrProgram *stub_prog = ib_finish(stub_b);
+    desc->self = stub_prog;
+    ib_mk_thunk(b, stub_prog);
+}
+
 /* Bounds how many enclosing `with`s a single unresolved-name fallback
  * chain can walk through -- real Nix has no such limit, but nesting this
  * deep never happens in practice and a fixed-size stack array keeps the
@@ -1997,10 +2093,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                         } else if (is_thunk_free_literal(bind->value)) {
                             compile_expr(b, bind->value, scope);
                         } else {
-                            IrBuilder *thunk_b = ib_new();
-                            compile_expr(thunk_b, bind->value, scope);
-                            ib_ret(thunk_b);
-                            ib_mk_thunk(b, ib_finish(thunk_b));
+                            emit_attrset_field_value(b, bind->value, scope);
                         }
                     }
                     ib_mk_attrs(b, (int64_t)n, sorted_syms);
@@ -2098,10 +2191,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     } else if (is_thunk_free_literal(node->as.attrset.bindings[order[i]].value)) {
                         compile_expr(b, node->as.attrset.bindings[order[i]].value, &hidden_frame);
                     } else {
-                        IrBuilder *thunk_b = ib_new();
-                        compile_expr(thunk_b, node->as.attrset.bindings[order[i]].value, &hidden_frame);
-                        ib_ret(thunk_b);
-                        ib_mk_thunk(b, ib_finish(thunk_b));
+                        emit_attrset_field_value(b, node->as.attrset.bindings[order[i]].value, &hidden_frame);
                     }
                     visible_sorted_syms[vi++] = sorted_syms[i];
                 }
@@ -2202,10 +2292,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     } else if (is_thunk_free_literal(bindings[i].value)) {
                         compile_expr(b, bindings[i].value, value_scope);
                     } else {
-                        IrBuilder *thunk_b = ib_new();
-                        compile_expr(thunk_b, bindings[i].value, value_scope);
-                        ib_ret(thunk_b);
-                        ib_mk_thunk(b, ib_finish(thunk_b));
+                        emit_attrset_field_value(b, bindings[i].value, value_scope);
                     }
                     ib_frame_set(b, (int64_t)i);
                 }

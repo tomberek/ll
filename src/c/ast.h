@@ -324,4 +324,19 @@ static inline Ast *asnix_ast_new_at(AstKind kind, uint32_t src_pos) {
  * why that's always safe. */
 void asnix_ast_arena_reset(void);
 
+/* Lazy-thunk-compile experiment, ported from asnix (docs/lazy-thunk-
+ * compile-proposal.md): redirects every asnix_ast_new()/
+ * asnix_ast_new_at() call made while active into a SEPARATE chunk list
+ * that asnix_ast_arena_reset() never touches -- i.e. permanently
+ * retained for the rest of the process, since a deferred lazy-compile
+ * stub's Ast subtree must survive past the file's own compile call.
+ * Gated internally on asnix_lazy_thunk_enabled (compiler.h) -- a no-op
+ * when the experiment is off. parser.c's own call sites toggle this
+ * around exactly the subtree the experiment defers (an attrset literal
+ * binding's value expression). Returns the previous state (nested-safe:
+ * a `let`/attrset nested INSIDE an already-redirected value expression
+ * must stay redirected for its own nested attrset fields too). */
+int asnix_ast_enter_retained(void);
+void asnix_ast_leave_retained(int prev_state);
+
 #endif /* ASNIX_AST_H */

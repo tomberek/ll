@@ -556,14 +556,20 @@ Value asnix_eval_file(const char *path) {
          * path produced prog instead; nothing downstream (the IrProgram,
          * the Ast already reset above) retains a pointer into it. Never
          * freed before this fix -- a ~24 MB leak across a real nixpkgs
-         * closure's ~1000+ imported files. */
-        free(src);
+         * closure's ~1000+ imported files.
+         *
+         * Lazy-thunk-compile experiment (hazard #3's simple-but-correct
+         * fix, ported from asnix, see compiler.h's own comment on
+         * asnix_lazy_thunk_enabled): when on, a not-yet-forced stub's
+         * Ast string fields may still alias this buffer, so skip
+         * freeing it. */
+        if (!asnix_lazy_thunk_enabled) free(src);
     }
     Env *root_env = make_root_env(NULL);
     Value result = asnix_eval(prog, root_env);
     import_cache_insert(resolved, result);
-    free(resolved);
-    free(base_dir);
+    if (!asnix_lazy_thunk_enabled) free(resolved);
+    if (!asnix_lazy_thunk_enabled) free(base_dir);
     return result;
 }
 
@@ -601,11 +607,11 @@ Value asnix_eval_file_for_derivation_bootstrap(const char *path) {
     Ast *ast = parse_file(path, &resolved, &base_dir, &src);
     IrProgram *prog = asnix_compile(ast, base_dir, resolved);
     asnix_ast_arena_reset(); /* perf: ast is dead past this point -- see ast.c */
-    free(src); /* perf: see asnix_eval_file's identical free(src) comment */
+    if (!asnix_lazy_thunk_enabled) free(src); /* perf: see asnix_eval_file's identical free(src) comment */
     Env *root_env = make_root_env_ex(NULL, 1);
     Value result = asnix_eval(prog, root_env);
-    free(resolved);
-    free(base_dir);
+    if (!asnix_lazy_thunk_enabled) free(resolved);
+    if (!asnix_lazy_thunk_enabled) free(base_dir);
     return result;
 }
 
@@ -630,7 +636,7 @@ Value asnix_eval_file_scoped(const char *path, Value scope) {
 
     IrProgram *prog = asnix_compile_scoped(ast, base_dir, resolved, names, lens, (size_t)n);
     asnix_ast_arena_reset(); /* perf: ast is dead past this point -- see ast.c */
-    free(src); /* perf: see asnix_eval_file's identical free(src) comment --
+    if (!asnix_lazy_thunk_enabled) free(src); /* perf: see asnix_eval_file's identical free(src) comment --
                  * names[]/lens[] above come from asnix_sym_name's own
                  * interned storage, not from src, so nothing here still
                  * points into it either. */
@@ -643,8 +649,8 @@ Value asnix_eval_file_scoped(const char *path, Value scope) {
 
     free(names);
     free(lens);
-    free(resolved);
-    free(base_dir);
+    if (!asnix_lazy_thunk_enabled) free(resolved);
+    if (!asnix_lazy_thunk_enabled) free(base_dir);
     return result;
 }
 

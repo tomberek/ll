@@ -485,6 +485,15 @@ enum {
     OP_HAS_ATTR_IF, /* a = byte delta to else (patched via ib_patch_delta); b = symbol id
                       * (same a/b roles as OP_WITH_TRY/OP_SELECT_OR) -- pops a value, same
                       * never-forces/never-fatal-on-non-attrset semantics as plain OP_HAS_ATTR */
+    OP_LAZY_THUNK_BODY, /* ported from asnix's lazy-thunk-compile experiment (compiler.c's own
+                          * comment on asnix_lazy_thunk_enabled has the full rationale): b = pool
+                          * index of a LazyThunkDescriptor* (compiler.c). The ONLY op in a stub
+                          * IrProgram -- entered exactly like any other thunk body (same dispatch,
+                          * same already-pushed RetFrame), compiles the deferred subtree for real,
+                          * mutates the shared IrProgram in place, falls through into the now-real
+                          * ops[0] in the SAME dispatch context (no re-entrant force/apply call --
+                          * this op's own C handler just updates `ip`/`pool` and LL_GOTOs, the
+                          * direct C equivalent of asnix's own asm handler's final `jmp *%rax`). */
     OP_MK_FORMALSMAP, /* ll-only, no asnix equivalent: a = formal count (nf), b = pool index
                         * of an nf-length array of symbol ids, one per formal POSITION (same
                         * order as the fieldframe's own slots); a sentinel -1 marks a formal

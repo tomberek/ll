@@ -50,6 +50,7 @@ void *ll_handler_table[OP_COUNT] = {
 
     [OP_LAMBDA] = (void *)ll_op_lambda,
     [OP_MK_THUNK] = (void *)ll_op_mk_thunk,
+    [OP_LAZY_THUNK_BODY] = (void *)ll_op_lazy_thunk_body,
 
     [OP_CALL] = (void *)ll_op_call,
     [OP_RET] = (void *)ll_op_ret,

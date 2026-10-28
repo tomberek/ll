@@ -47,6 +47,9 @@ LL_OP_ATTR Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool
 
 LL_OP_ATTR Value ll_op_lambda(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 LL_OP_ATTR Value ll_op_mk_thunk(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
+/* Ported from asnix's lazy-thunk-compile experiment, see ir.h's own
+ * comment on OP_LAZY_THUNK_BODY. */
+LL_OP_ATTR Value ll_op_lazy_thunk_body(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 
 LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
 LL_OP_ATTR Value ll_op_ret(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
