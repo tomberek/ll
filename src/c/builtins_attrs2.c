@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "asnix/art_sym.h"
 #include "asnix/heap.h"
 #include "asnix/ir.h"
 #include "builtins_shared.h"
@@ -67,26 +68,29 @@ static Value build_filterAttrs(void) { return asnix_bshared_make_curried_native(
  * element -- the same anti-pattern M89/M158 already fixed in make_attrs
  * and M195 fixed in zipAttrsWith, just missed here since it's a separate,
  * inline check in a different file, and (unlike those two) had no size
- * threshold at all. Fixed the same way: collect (sym, original index,
- * value) for every element unconditionally first (each element needs
- * forcing + name/value lookup regardless of dedup), sort by (sym, idx)
- * with idx as a tie-break, then a single forward dedupe pass. Sorting by
- * idx as the tie-break means the FIRST entry in each equal-sym run is
- * always the one with the smallest original index -- i.e. the earliest
- * list occurrence -- so the dedupe pass below preserves this builtin's
- * documented "first occurrence of a duplicate name wins" semantics
- * exactly (see prim_listToAttrs's own comment), without ever re-scanning
- * already-collected output. Same insertion-sort-below/qsort-above split
- * and threshold as make_attrs's own ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX. */
-#define ASNIX_LIST_TO_ATTRS_SORT_INSERTION_MAX 32
+ * threshold at all.
+ *
+ * M198: noticed that listToAttrs's dedupe ("first occurrence of a
+ * duplicate name wins") and zipAttrsWith's symbol collection are the
+ * SAME problem: both need "insert a sym, and if it's already present,
+ * keep whatever was there first". That is EXACTLY asnix_art_sym_insert's
+ * own semantics once it carries a Value payload (art_sym.h/.c) -- a
+ * duplicate insert is a complete no-op, so the first-ever-inserted value
+ * is always what survives. So for large lists (> the same 64-entry
+ * threshold zipAttrsWith2_impl uses, same measured crossover -- see
+ * art_sym.h's header comment for the numbers), skip the separate
+ * collect+sort+dedupe passes entirely: insert each (sym, value) directly
+ * into the ART during the single pass over list elements (every element
+ * needs forcing + name/value lookup regardless), then one in-order
+ * traversal yields the final sorted, deduped (sym, value) arrays
+ * make_attrs needs, with no sort and no dedupe pass at all. Below the
+ * threshold, keep the plain collect + insertion-sort(by sym, idx tie-
+ * break for stability) + single dedupe pass from the original M196 fix
+ * -- cheaper than ART's per-key node allocation/traversal overhead at
+ * this size. */
+#define ASNIX_LIST_TO_ATTRS_ART_THRESHOLD 64
 
 typedef struct { uint32_t sym; int64_t idx; Value val; } ListToAttrsEntry;
-
-static int cmp_list_to_attrs_entry(const void *a, const void *b) {
-    const ListToAttrsEntry *ea = a, *eb = b;
-    if (ea->sym != eb->sym) return ea->sym < eb->sym ? -1 : 1;
-    return ea->idx < eb->idx ? -1 : (ea->idx > eb->idx ? 1 : 0);
-}
 
 /* ---------------------------------------------------------------------
  * listToAttrs list -- verified:
@@ -107,6 +111,38 @@ static Value prim_listToAttrs(const Value *args, int64_t argc) {
 
     uint32_t sym_name = asnix_intern("name", 4);
     uint32_t sym_value = asnix_intern("value", 5);
+
+    if (n > ASNIX_LIST_TO_ATTRS_ART_THRESHOLD) {
+        AsnixArtSymSet set;
+        asnix_art_sym_init(&set);
+        for (int64_t i = 0; i < n; i++) {
+            /* Lazy list elements (M23's `map`, etc.) -- force before
+             * checking the tag, same class of fix M23's own concatLists
+             * needed. */
+            Value elem = asnix_force_for_print(elems[i]);
+            ASNIX_REQUIRE_ATTRS(elem, "listToAttrs");
+            int64_t name_idx = asnix_bshared_attrs_find(elem, sym_name);
+            if (name_idx < 0) asnix_bshared_fatal("listToAttrs", "an element is missing the 'name' attribute");
+            int64_t value_idx = asnix_bshared_attrs_find(elem, sym_value);
+            if (value_idx < 0) asnix_bshared_fatal("listToAttrs", "an element is missing the 'value' attribute");
+
+            Value name_v = asnix_force_for_print(asnix_bshared_attrs_value(elem, name_idx));
+            ASNIX_REQUIRE_STRING(name_v, "listToAttrs");
+            int64_t nlen;
+            const char *nbytes;
+            asnix_bshared_string_bytes(name_v, &nbytes, &nlen, "listToAttrs");
+            uint32_t sym = asnix_intern(nbytes, (size_t)nlen);
+
+            asnix_art_sym_insert(&set, sym, asnix_bshared_attrs_value(elem, value_idx));
+        }
+        uint32_t *syms = malloc((size_t)n * sizeof(uint32_t));
+        Value *vals = malloc((size_t)n * sizeof(Value));
+        int64_t out_n = asnix_art_sym_collect_sorted(&set, syms, vals);
+        Value result = asnix_bshared_make_attrs(syms, vals, out_n);
+        free(syms);
+        free(vals);
+        return result;
+    }
 
     ListToAttrsEntry *entries = n > 0 ? malloc((size_t)n * sizeof(ListToAttrsEntry)) : NULL;
 
@@ -132,19 +168,17 @@ static Value prim_listToAttrs(const Value *args, int64_t argc) {
         entries[i].val = asnix_bshared_attrs_value(elem, value_idx);
     }
 
-    if (n <= ASNIX_LIST_TO_ATTRS_SORT_INSERTION_MAX) {
-        for (int64_t i = 1; i < n; i++) {
-            int64_t j = i;
-            ListToAttrsEntry e = entries[i];
-            while (j > 0 && (entries[j - 1].sym > e.sym ||
-                             (entries[j - 1].sym == e.sym && entries[j - 1].idx > e.idx))) {
-                entries[j] = entries[j - 1];
-                j--;
-            }
-            entries[j] = e;
+    /* n <= ASNIX_LIST_TO_ATTRS_ART_THRESHOLD(64) here, so a plain
+     * insertion sort is always cheap enough -- no qsort tier needed. */
+    for (int64_t i = 1; i < n; i++) {
+        int64_t j = i;
+        ListToAttrsEntry e = entries[i];
+        while (j > 0 && (entries[j - 1].sym > e.sym ||
+                         (entries[j - 1].sym == e.sym && entries[j - 1].idx > e.idx))) {
+            entries[j] = entries[j - 1];
+            j--;
         }
-    } else {
-        qsort(entries, (size_t)n, sizeof(ListToAttrsEntry), cmp_list_to_attrs_entry);
+        entries[j] = e;
     }
 
     uint32_t *syms = n > 0 ? malloc((size_t)n * sizeof(uint32_t)) : NULL;

@@ -316,14 +316,18 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
             if (distinct_n == 0 || distinct[distinct_n - 1] != all_syms[i]) distinct[distinct_n++] = all_syms[i];
         }
     } else {
+        /* M198: this call site only needs the distinct sorted sym set,
+         * not a payload -- pass a dummy zero Value and NULL for
+         * out_vals (art_sym_collect_sorted skips writing values entirely
+         * when out_vals is NULL, zero extra cost). */
         AsnixArtSymSet sym_set;
         asnix_art_sym_init(&sym_set);
         for (int64_t i = 0; i < n; i++) {
             int64_t cnt = asnix_bshared_attrs_count(sets[i]);
-            for (int64_t j = 0; j < cnt; j++) asnix_art_sym_insert(&sym_set, asnix_bshared_attrs_sym(sets[i], j));
+            for (int64_t j = 0; j < cnt; j++) asnix_art_sym_insert(&sym_set, asnix_bshared_attrs_sym(sets[i], j), (Value){0});
         }
         distinct = asnix_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t));
-        distinct_n = asnix_art_sym_collect_sorted(&sym_set, distinct);
+        distinct_n = asnix_art_sym_collect_sorted(&sym_set, distinct, NULL);
     }
 
     Value *out_vals = distinct_n > 0 ? asnix_arena_alloc((uint64_t)distinct_n * sizeof(Value)) : NULL;
