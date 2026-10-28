@@ -245,6 +245,11 @@ static Value build_trace(void) { return make_curried_native_noforce((void *)trac
  * eager regardless -- that's the whole point of zipAttrsWith, and there's
  * no way to defer it -- only the call to `f` on top of that grouping is
  * deferred. */
+static int cmp_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
 static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0];
@@ -263,22 +268,39 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     }
 
     /* Collect every (sym) appearing in any input attrset, then dedupe
-     * and sort -- plain insertion sort, same "always small" rationale
-     * as every other such sort in this codebase. */
+     * and sort. M-zip-sort: unlike builtins_shared.c's own make_attrs
+     * (M89/M158, ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX), which already
+     * switches away from plain insertion sort above a size threshold,
+     * this sort was UNCONDITIONALLY O(n^2) regardless of total_attrs --
+     * the count of EVERY entry across EVERY input set, not just the
+     * distinct keys, so it scales with the number of sets merged, not
+     * just the key count. A NixOS module-system merge across hundreds
+     * of module files each contributing a few options is exactly the
+     * shape that makes `total_n` large while `n` (sets) stays the
+     * dominant factor -- the same class of gap M89 already fixed
+     * elsewhere, just missed here since this is a separate, inline
+     * sort in a different file. Same threshold (32), same insertion-
+     * sort-below/qsort-above split; plain uint32_t values here (no
+     * payload to carry alongside, unlike make_attrs's sym+Value pairs),
+     * so no index-array indirection is needed either way. */
     uint32_t *all_syms = total_attrs > 0 ? asnix_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t)) : NULL;
     int64_t total_n = 0;
     for (int64_t i = 0; i < n; i++) {
         int64_t cnt = asnix_bshared_attrs_count(sets[i]);
         for (int64_t j = 0; j < cnt; j++) all_syms[total_n++] = asnix_bshared_attrs_sym(sets[i], j);
     }
-    for (int64_t i = 1; i < total_n; i++) {
-        int64_t j = i;
-        uint32_t s = all_syms[i];
-        while (j > 0 && all_syms[j - 1] > s) {
-            all_syms[j] = all_syms[j - 1];
-            j--;
+    if (total_n <= 32) {
+        for (int64_t i = 1; i < total_n; i++) {
+            int64_t j = i;
+            uint32_t s = all_syms[i];
+            while (j > 0 && all_syms[j - 1] > s) {
+                all_syms[j] = all_syms[j - 1];
+                j--;
+            }
+            all_syms[j] = s;
         }
-        all_syms[j] = s;
+    } else {
+        qsort(all_syms, (size_t)total_n, sizeof(uint32_t), cmp_u32);
     }
     uint32_t *distinct = total_n > 0 ? asnix_arena_alloc((uint64_t)total_n * sizeof(uint32_t)) : NULL;
     int64_t distinct_n = 0;
