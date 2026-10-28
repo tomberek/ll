@@ -457,6 +457,78 @@ Value asnix_bshared_attrs_resolve(Value v) {
     if (scratch_bytes == 0) scratch_bytes = 1; /* malloc(0) is implementation-defined; avoid relying on it */
 
     int64_t n = nleaves;
+
+    /* M-big-leaf-merge: the bottom-up pairwise tree below pays for a
+     * disproportionately large leaf's own size at EVERY tree level (up to
+     * log2(ASNIX_ATTRS_UNION_MAX_LEAVES)=6 times for a 64-leaf union), not
+     * once. Real nixpkgs's classic `foldl' (acc: x: acc // x) {} bigList`
+     * anti-pattern produces exactly this shape: leaves[0] is always the
+     * ever-growing accumulator (asnix_attrs_update's make_union_header
+     * always appends the NEW leaf after the EXISTING ones, so the oldest/
+     * biggest leaf is always leftmost), while leaves[1..] are single-entry
+     * leaves from each fold step. Ported from asnix's own M-big-leaf-merge
+     * fix (builtins_shared.c), adapted to this file's scratch-buffer
+     * design (no asnix_attrs_eager_merge call here at all, unlike asnix's
+     * version -- see the M-garbage-fix comment above for why).
+     *
+     * Special case: when the biggest leaf alone outweighs every other leaf
+     * combined, merge the small leaves together first (cheap, since
+     * they're small) into one combined leaf using the exact same bottom-up
+     * scratch-buffer round logic as the main loop below, then let the
+     * UNCHANGED n==2 tail merge handle (leaf0, combined-small) as its
+     * final, direct-to-arena merge -- O(big_size) paid once instead of
+     * O(big_size * log2(nleaves)). Correctness: restricted to leaves[0]
+     * specifically (not "whichever leaf happens to be biggest") because
+     * that's the only position construction guarantees is safe --
+     * attrs_merge_entries_into's right-biased collision rule (rhs always
+     * wins) needs the big leaf on the lhs and everything newer-and-
+     * combined on the rhs, which is only correct when the big leaf is the
+     * OLDEST (lowest-priority) one, i.e. leaves[0]. The small-leaves-merge
+     * below preserves their own relative priority order (newest-of-the-
+     * rest wins) exactly as the unmodified main loop would. Setting `n =
+     * 2` here and leaving entries_ptr[0]/entries_cnt[0] untouched makes
+     * the `while (n > 2)` loop below a no-op, falling straight through to
+     * the existing n==2 tail merge with no further change needed there. */
+    if (nleaves >= 3) {
+        int64_t rest_count = upper_bound - entries_cnt[0];
+        if (entries_cnt[0] > rest_count) {
+            const char *rptr[ASNIX_ATTRS_UNION_MAX_LEAVES];
+            int64_t rcnt[ASNIX_ATTRS_UNION_MAX_LEAVES];
+            for (int64_t i = 1; i < nleaves; i++) {
+                rptr[i - 1] = entries_ptr[i];
+                rcnt[i - 1] = entries_cnt[i];
+            }
+            int64_t rn = nleaves - 1;
+            while (rn > 1) {
+                void *mem = malloc(scratch_bytes);
+                if (!mem) {
+                    fprintf(stderr, "asnix: out of memory\n");
+                    exit(1);
+                }
+                scratch[n_scratch++] = mem;
+                char *cursor = (char *)mem;
+                int64_t out_n = 0;
+                int64_t i = 0;
+                for (; i + 1 < rn; i += 2) {
+                    int64_t k = attrs_merge_entries_into(rptr[i], rcnt[i], rptr[i + 1], rcnt[i + 1], cursor);
+                    rptr[out_n] = cursor;
+                    rcnt[out_n] = k;
+                    out_n++;
+                    cursor += k * ASNIX_ATTR_SIZE;
+                }
+                if (i < rn) {
+                    rptr[out_n] = rptr[i];
+                    rcnt[out_n] = rcnt[i];
+                    out_n++;
+                }
+                rn = out_n;
+            }
+            entries_ptr[1] = rptr[0];
+            entries_cnt[1] = rcnt[0];
+            n = 2;
+        }
+    }
+
     while (n > 2) {
         void *mem = malloc(scratch_bytes);
         if (!mem) {
