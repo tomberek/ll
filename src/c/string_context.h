@@ -51,8 +51,18 @@ typedef struct {
 typedef struct {
     AsnixCtxBuiltRef *drvs;
     size_t ndrvs, drvs_cap;
+    /* perf: open-addressing dedup indexes for asnix_ctx_add_built/
+     * asnix_ctx_add_opaque/asnix_ctx_add_deep (string_context.c) --
+     * parallel to drvs/srcs/deep below. Mirrors derivation.c's
+     * InputRefSet (drvs_index/srcs_index, same file's dcc_hash_str) --
+     * see string_context.c for why a per-add linear strcmp scan here
+     * was a measured O(n^2) anti-pattern. */
+    size_t *drvs_index;
+    size_t drvs_index_cap;
     char **srcs;
     size_t nsrcs, srcs_cap;
+    size_t *srcs_index;
+    size_t srcs_index_cap;
     /* M80: real Nix's third context-element kind, `NixStringContextElem::
      * DrvDeep` -- "this string refers to the WHOLE closure of this
      * derivation (all its outputs), not just one named output" -- the
@@ -77,6 +87,8 @@ typedef struct {
      * feature -- see M80's own scope notes in docs/architecture.md). */
     char **deep;
     size_t ndeep, deep_cap;
+    size_t *deep_index;
+    size_t deep_index_cap;
 } AsnixStringContext;
 
 void asnix_ctx_init(AsnixStringContext *ctx);

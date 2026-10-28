@@ -295,6 +295,56 @@ static Value prim_getAttr(const Value *args, int64_t argc) {
 
 /* ---- removeAttrs ---- */
 
+/* perf: `remove_syms` used to be membership-tested with an unconditional
+ * linear scan (over all `nnames` entries) for EVERY one of `attrs`'s `n`
+ * entries below -- O(n*nnames) overall, no size threshold at all. Fixed
+ * the same "sort once, then a cheap per-entry lookup" way this codebase's
+ * other dedup/membership anti-patterns of this exact shape were already
+ * fixed (make_attrs's ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX, listToAttrs's
+ * ASNIX_LIST_TO_ATTRS_SORT_INSERTION_MAX): sort `remove_syms` once (plain
+ * insertion sort directly on the uint32_t array below this threshold,
+ * `qsort` above it), then binary-search it per `attrs` entry instead of
+ * rescanning linearly. `remove_syms` carries no payload and duplicate
+ * names in the removal list are harmless either way (removing a name
+ * twice is the same as once) -- unlike listToAttrs's dedupe, this needs
+ * no idx tie-break/stability at all, just a sorted array to binary-search. */
+#define ASNIX_REMOVE_ATTRS_SORT_INSERTION_MAX 32
+
+/* perf (follow-up): sorting+binary-searching `remove_syms` UNCONDITIONALLY
+ * measured as a real, reproducible regression on this project's own
+ * ffmpeg-full benchmark (callgrind) -- real nixpkgs's hottest `removeAttrs`
+ * call site has a LARGE `nnames` (the name list) but a SMALL `n` (the
+ * attrset being filtered), e.g. `removeAttrs smallSet (builtins.attrNames
+ * bigExcludedSet)`. The actual OLD cost there is `n * nnames` with `n`
+ * small -- already cheap in absolute terms -- so paying `nnames log
+ * nnames` to sort a list scanned only a handful of times (once per `n`)
+ * never earns back its own setup cost; raising a threshold on `nnames`
+ * alone didn't fix it either (tried 8 and 64, both still ~+0.2%) since
+ * `nnames` alone is exactly what's large in that call shape. The real
+ * quadratic DANGER is specifically when BOTH `n` and `nnames` are large
+ * (the product, not either alone), so that's what gates the sort below:
+ * skip it entirely and fall back to the original O(n * nnames)
+ * linear-scan-per-entry behavior below this many total comparisons the
+ * old approach would have made; only once the product crosses it does
+ * sort+binary-search actually pay for itself. */
+#define ASNIX_REMOVE_ATTRS_PRODUCT_MAX 2048
+
+static int cmp_u32(const void *a, const void *b) {
+    uint32_t ua = *(const uint32_t *)a, ub = *(const uint32_t *)b;
+    return (ua > ub) - (ua < ub);
+}
+
+static int remove_syms_contains(const uint32_t *sorted, int64_t nnames, uint32_t sym) {
+    int64_t lo = 0, hi = nnames - 1;
+    while (lo <= hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sorted[mid] == sym) return 1;
+        if (sorted[mid] < sym) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return 0;
+}
+
 static Value prim_removeAttrs_apply2(const Value *args, int64_t argc) {
     (void)argc;
     require_attrs(args[0], "removeAttrs");
@@ -315,6 +365,25 @@ static Value prim_removeAttrs_apply2(const Value *args, int64_t argc) {
         remove_syms[i] = asnix_intern(string_bytes(nv), (size_t)string_len(nv));
     }
     int64_t n = attrs_count(attrs);
+    /* Gated on the PRODUCT `n * nnames` (see ASNIX_REMOVE_ATTRS_PRODUCT_MAX's
+     * own comment above, not `nnames` alone) -- below that, skip sorting
+     * entirely and fall back to the original linear scan untouched. */
+    int use_sorted = n * nnames > ASNIX_REMOVE_ATTRS_PRODUCT_MAX;
+    if (use_sorted) {
+        if (nnames <= ASNIX_REMOVE_ATTRS_SORT_INSERTION_MAX) {
+            for (int64_t i = 1; i < nnames; i++) {
+                uint32_t e = remove_syms[i];
+                int64_t j = i;
+                while (j > 0 && remove_syms[j - 1] > e) {
+                    remove_syms[j] = remove_syms[j - 1];
+                    j--;
+                }
+                remove_syms[j] = e;
+            }
+        } else {
+            qsort(remove_syms, (size_t)nnames, sizeof(uint32_t), cmp_u32);
+        }
+    }
     /* perf: single pass, writing straight into one real allocation sized
      * `n` (the worst case, nothing removed) instead of the old scratch
      * (syms, vals) pair sized n that then got copied AGAIN into a
@@ -329,9 +398,14 @@ static Value prim_removeAttrs_apply2(const Value *args, int64_t argc) {
     int64_t out_n = 0;
     for (int64_t i = 0; i < n; i++) {
         uint32_t sym = attrs_entry_sym(attrs, i);
-        int removed = 0;
-        for (int64_t j = 0; j < nnames; j++) {
-            if (remove_syms[j] == sym) { removed = 1; break; }
+        int removed;
+        if (use_sorted) {
+            removed = remove_syms_contains(remove_syms, nnames, sym);
+        } else {
+            removed = 0;
+            for (int64_t j = 0; j < nnames; j++) {
+                if (remove_syms[j] == sym) { removed = 1; break; }
+            }
         }
         if (!removed) {
             /* out entries inherit `attrs`'s own ascending-sym order since
