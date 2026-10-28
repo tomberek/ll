@@ -16,10 +16,100 @@ void asnix_ctx_init(AsnixStringContext *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
-void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const char *output_name) {
+/* perf: dedup indexes for add_built/add_opaque/add_deep below. Before this
+ * fix, each of the three did an unconditional linear strcmp scan over the
+ * growing ctx->drvs/srcs/deep array with NO size threshold and no index at
+ * all -- and asnix_ctx_union_into (further below) calls these once PER
+ * SOURCE ENTRY on every context union, so repeated string concatenation
+ * that accumulates many distinct store-path references (e.g. a wrapper
+ * script interpolating dozens of runtime deps, one `+`/`"${a}${b}..."` at
+ * a time) made this O(n^2) in the number of distinct entries accumulated.
+ * Fixed the identical way derivation.c's InputRefSet already fixed the
+ * same shape of problem (input_ref_add_built/input_ref_add_src, this
+ * file's own hash function ported verbatim from that one as dcc_hash_str):
+ * open addressing, linear probing, power-of-two capacity, grow-and-rehash
+ * at 3/4 load factor, no deletions (nothing in this codebase ever removes
+ * a context entry). */
+static uint64_t dcc_hash_str(const char *s, size_t len) {
+    uint64_t h = 0;
+    size_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t word;
+        memcpy(&word, s + i, 8);
+        h ^= word;
+        h *= 0x517cc1b727220a95ULL;
+    }
+    for (; i < len; i++) {
+        h ^= (uint64_t)(unsigned char)s[i];
+        h *= 0x517cc1b727220a95ULL;
+    }
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    return h;
+}
+
+#define DCC_EMPTY_SLOT SIZE_MAX
+
+/* perf (follow-up): the unconditional hash-index-for-everything version of
+ * this fix measured as a real, reproducible REGRESSION on this project's
+ * own ffmpeg-full/plasma-system benchmarks (+0.45% instructions, callgrind,
+ * isolated from the removeAttrs/rec_overrides_merge fixes) -- the
+ * overwhelming common case is a context with a handful of entries (a
+ * single coercion's worth), where building/maintaining a 16-slot hash
+ * table costs strictly more than the 1-3 strcmp comparisons it replaces.
+ * Gated the same way this session's OTHER sort-based fixes gate their
+ * "small N" fast path (see builtins_shared.c's
+ * ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX): below this many entries, add_*
+ * does the exact original linear scan (zero index overhead, byte-for-
+ * byte the old cost); the index is built lazily, covering all existing
+ * entries at once, the first time a given array's count reaches this
+ * threshold, and kept up to date (same growth policy) from then on --
+ * so the only structures that ever pay the index's overhead are the
+ * pathological ones this fix targets (dozens+ of distinct store-path
+ * references accumulated via repeated unions), exactly the shape real
+ * `derivation.c` InputRefSet contexts hit and small per-call scratch
+ * contexts never do. */
+#define SC_INDEX_THRESHOLD 16
+
+static void ctx_drvs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+    size_t *new_table = malloc(new_cap * sizeof(size_t));
+    for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
     for (size_t i = 0; i < ctx->ndrvs; i++) {
-        if (strcmp(ctx->drvs[i].drv_path, drv_path) == 0 && strcmp(ctx->drvs[i].output_name, output_name) == 0)
-            return;
+        const char *dp = ctx->drvs[i].drv_path, *on = ctx->drvs[i].output_name;
+        uint64_t h = dcc_hash_str(dp, strlen(dp)) ^ (dcc_hash_str(on, strlen(on)) * 0x9e3779b97f4a7c15ULL);
+        size_t slot = h & (new_cap - 1);
+        while (new_table[slot] != DCC_EMPTY_SLOT) slot = (slot + 1) & (new_cap - 1);
+        new_table[slot] = i;
+    }
+    free(ctx->drvs_index);
+    ctx->drvs_index = new_table;
+    ctx->drvs_index_cap = new_cap;
+}
+
+void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const char *output_name) {
+    size_t slot = 0;
+    int have_slot = 0;
+    if (ctx->ndrvs < SC_INDEX_THRESHOLD) {
+        for (size_t i = 0; i < ctx->ndrvs; i++) {
+            if (strcmp(ctx->drvs[i].drv_path, drv_path) == 0 && strcmp(ctx->drvs[i].output_name, output_name) == 0)
+                return;
+        }
+    } else {
+        size_t dp_len = strlen(drv_path), on_len = strlen(output_name);
+        if (ctx->drvs_index_cap == 0) ctx_drvs_index_rehash(ctx, 32);
+        else if ((ctx->ndrvs + 1) * 4 > ctx->drvs_index_cap * 3) ctx_drvs_index_rehash(ctx, ctx->drvs_index_cap * 2);
+        uint64_t h = dcc_hash_str(drv_path, dp_len) ^ (dcc_hash_str(output_name, on_len) * 0x9e3779b97f4a7c15ULL);
+        slot = h & (ctx->drvs_index_cap - 1);
+        for (;;) {
+            size_t idx = ctx->drvs_index[slot];
+            if (idx == DCC_EMPTY_SLOT) break;
+            if (strcmp(ctx->drvs[idx].drv_path, drv_path) == 0 && strcmp(ctx->drvs[idx].output_name, output_name) == 0) return;
+            slot = (slot + 1) & (ctx->drvs_index_cap - 1);
+        }
+        have_slot = 1;
     }
     if (ctx->ndrvs == ctx->drvs_cap) {
         ctx->drvs_cap = ctx->drvs_cap ? ctx->drvs_cap * 2 : 8;
@@ -27,30 +117,93 @@ void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const ch
     }
     ctx->drvs[ctx->ndrvs].drv_path = dup_cstr(drv_path);
     ctx->drvs[ctx->ndrvs].output_name = dup_cstr(output_name);
+    if (have_slot) ctx->drvs_index[slot] = ctx->ndrvs;
     ctx->ndrvs++;
 }
 
-void asnix_ctx_add_opaque(AsnixStringContext *ctx, const char *path) {
+static void ctx_srcs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+    size_t *new_table = malloc(new_cap * sizeof(size_t));
+    for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
     for (size_t i = 0; i < ctx->nsrcs; i++) {
-        if (strcmp(ctx->srcs[i], path) == 0) return;
+        size_t slot = dcc_hash_str(ctx->srcs[i], strlen(ctx->srcs[i])) & (new_cap - 1);
+        while (new_table[slot] != DCC_EMPTY_SLOT) slot = (slot + 1) & (new_cap - 1);
+        new_table[slot] = i;
+    }
+    free(ctx->srcs_index);
+    ctx->srcs_index = new_table;
+    ctx->srcs_index_cap = new_cap;
+}
+
+void asnix_ctx_add_opaque(AsnixStringContext *ctx, const char *path) {
+    size_t slot = 0;
+    int have_slot = 0;
+    if (ctx->nsrcs < SC_INDEX_THRESHOLD) {
+        for (size_t i = 0; i < ctx->nsrcs; i++) {
+            if (strcmp(ctx->srcs[i], path) == 0) return;
+        }
+    } else {
+        size_t len = strlen(path);
+        if (ctx->srcs_index_cap == 0) ctx_srcs_index_rehash(ctx, 32);
+        else if ((ctx->nsrcs + 1) * 4 > ctx->srcs_index_cap * 3) ctx_srcs_index_rehash(ctx, ctx->srcs_index_cap * 2);
+        slot = dcc_hash_str(path, len) & (ctx->srcs_index_cap - 1);
+        for (;;) {
+            size_t idx = ctx->srcs_index[slot];
+            if (idx == DCC_EMPTY_SLOT) break;
+            if (strcmp(ctx->srcs[idx], path) == 0) return;
+            slot = (slot + 1) & (ctx->srcs_index_cap - 1);
+        }
+        have_slot = 1;
     }
     if (ctx->nsrcs == ctx->srcs_cap) {
         ctx->srcs_cap = ctx->srcs_cap ? ctx->srcs_cap * 2 : 8;
         ctx->srcs = realloc(ctx->srcs, ctx->srcs_cap * sizeof(*ctx->srcs));
     }
-    ctx->srcs[ctx->nsrcs++] = dup_cstr(path);
+    ctx->srcs[ctx->nsrcs] = dup_cstr(path);
+    if (have_slot) ctx->srcs_index[slot] = ctx->nsrcs;
+    ctx->nsrcs++;
+}
+
+static void ctx_deep_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+    size_t *new_table = malloc(new_cap * sizeof(size_t));
+    for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
+    for (size_t i = 0; i < ctx->ndeep; i++) {
+        size_t slot = dcc_hash_str(ctx->deep[i], strlen(ctx->deep[i])) & (new_cap - 1);
+        while (new_table[slot] != DCC_EMPTY_SLOT) slot = (slot + 1) & (new_cap - 1);
+        new_table[slot] = i;
+    }
+    free(ctx->deep_index);
+    ctx->deep_index = new_table;
+    ctx->deep_index_cap = new_cap;
 }
 
 /* M80: see string_context.h's own `deep` field comment. */
 void asnix_ctx_add_deep(AsnixStringContext *ctx, const char *drv_path) {
-    for (size_t i = 0; i < ctx->ndeep; i++) {
-        if (strcmp(ctx->deep[i], drv_path) == 0) return;
+    size_t slot = 0;
+    int have_slot = 0;
+    if (ctx->ndeep < SC_INDEX_THRESHOLD) {
+        for (size_t i = 0; i < ctx->ndeep; i++) {
+            if (strcmp(ctx->deep[i], drv_path) == 0) return;
+        }
+    } else {
+        size_t len = strlen(drv_path);
+        if (ctx->deep_index_cap == 0) ctx_deep_index_rehash(ctx, 32);
+        else if ((ctx->ndeep + 1) * 4 > ctx->deep_index_cap * 3) ctx_deep_index_rehash(ctx, ctx->deep_index_cap * 2);
+        slot = dcc_hash_str(drv_path, len) & (ctx->deep_index_cap - 1);
+        for (;;) {
+            size_t idx = ctx->deep_index[slot];
+            if (idx == DCC_EMPTY_SLOT) break;
+            if (strcmp(ctx->deep[idx], drv_path) == 0) return;
+            slot = (slot + 1) & (ctx->deep_index_cap - 1);
+        }
+        have_slot = 1;
     }
     if (ctx->ndeep == ctx->deep_cap) {
         ctx->deep_cap = ctx->deep_cap ? ctx->deep_cap * 2 : 8;
         ctx->deep = realloc(ctx->deep, ctx->deep_cap * sizeof(*ctx->deep));
     }
-    ctx->deep[ctx->ndeep++] = dup_cstr(drv_path);
+    ctx->deep[ctx->ndeep] = dup_cstr(drv_path);
+    if (have_slot) ctx->deep_index[slot] = ctx->ndeep;
+    ctx->ndeep++;
 }
 
 int asnix_ctx_is_empty(const AsnixStringContext *ctx) {

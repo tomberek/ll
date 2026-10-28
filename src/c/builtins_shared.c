@@ -768,6 +768,58 @@ Value asnix_bshared_make_attrs(uint32_t *syms, Value *vals, int64_t count) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
 }
 
+/* perf: for every one of `__overrides`'s `ocount` entries, this used to
+ * linearly scan all `n` of the enclosing `rec {}` block's static bindings
+ * (`meta[0..n-1]`) looking for a same-sym match -- O(n*ocount) overall,
+ * no size threshold at all (same anti-pattern class as this session's
+ * other dedup/membership fixes, e.g. prim_removeAttrs_apply2 just above
+ * in builtins_attrs.c). `rec {}`'s own static bindings are necessarily
+ * distinct syms (a literal attrset/rec block can't declare the same name
+ * twice), so sorting a (sym, original Env-slot index) side array once and
+ * binary-searching it per override -- rather than reaching for an open-
+ * addressing hash table like string_context.c's fix needed -- is enough:
+ * this mechanism is rarely used in real Nix (`rec { __overrides = {...};
+ * ... }`) and `n` is bounded by how many bindings a single `rec {}` block
+ * has (realistically small), so the win is mostly about not regressing
+ * badly on a pathological case rather than a measured hot path. Same
+ * insertion-sort-below/qsort-above threshold convention as the rest of
+ * this codebase (make_attrs's ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX). */
+#define ASNIX_REC_OVERRIDES_SORT_INSERTION_MAX 32
+
+/* perf (follow-up): building+sorting `order` UNCONDITIONALLY measured as a
+ * real, reproducible regression on this project's own ffmpeg-full/plasma-
+ * system benchmarks (callgrind) -- real `rec{}` blocks with `__overrides`
+ * overwhelmingly have few static bindings, where the malloc+sort setup
+ * costs more than the linear scan it replaces. Gated on the PRODUCT
+ * `n * ocount` (same calibration lesson as builtins_attrs.c's removeAttrs
+ * fix, ASNIX_REMOVE_ATTRS_PRODUCT_MAX -- gating on `n` alone still pays
+ * sort overhead for a "few static bindings, many override entries" shape
+ * where the OLD per-override linear scan was already cheap because `n`
+ * itself was small) -- below that, skip the index and fall back to the
+ * original O(n * ocount) linear-scan-per-override behavior (byte-for-byte
+ * the old cost); only once the product crosses it does the sorted-index
+ * path actually pay for itself. */
+#define ASNIX_REC_OVERRIDES_PRODUCT_MAX 2048
+
+typedef struct { uint32_t sym; int64_t idx; } RecOverridesEntry;
+
+static int cmp_rec_overrides_entry(const void *a, const void *b) {
+    const RecOverridesEntry *ea = a, *eb = b;
+    if (ea->sym != eb->sym) return ea->sym < eb->sym ? -1 : 1;
+    return 0;
+}
+
+static int64_t rec_overrides_find(const RecOverridesEntry *sorted, int64_t n, uint32_t sym) {
+    int64_t lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sorted[mid].sym == sym) return sorted[mid].idx;
+        if (sorted[mid].sym < sym) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+
 Value asnix_bshared_rec_overrides_merge(Env *env, int64_t n, const int64_t *meta) {
     int64_t overrides_slot = meta[n];
     Value overrides_val = asnix_force_for_print(env->values[overrides_slot]);
@@ -789,13 +841,42 @@ Value asnix_bshared_rec_overrides_merge(Env *env, int64_t n, const int64_t *meta
         syms[i] = (uint32_t)meta[i];
         vals[i] = env->values[i];
     }
+
+    /* Gated on the PRODUCT (see ASNIX_REC_OVERRIDES_PRODUCT_MAX's own
+     * comment above) -- below that, `order` is never built and the loop
+     * below falls back to the original linear scan untouched. */
+    int use_sorted = n * ocount > ASNIX_REC_OVERRIDES_PRODUCT_MAX;
+    RecOverridesEntry *order = NULL;
+    if (use_sorted) {
+        order = malloc((size_t)n * sizeof(RecOverridesEntry));
+        for (int64_t i = 0; i < n; i++) order[i] = (RecOverridesEntry){ .sym = syms[i], .idx = i };
+        if (n <= ASNIX_REC_OVERRIDES_SORT_INSERTION_MAX) {
+            for (int64_t i = 1; i < n; i++) {
+                RecOverridesEntry e = order[i];
+                int64_t j = i;
+                while (j > 0 && order[j - 1].sym > e.sym) {
+                    order[j] = order[j - 1];
+                    j--;
+                }
+                order[j] = e;
+            }
+        } else {
+            qsort(order, (size_t)n, sizeof(RecOverridesEntry), cmp_rec_overrides_entry);
+        }
+    }
+
     int64_t total = n;
     for (int64_t oi = 0; oi < ocount; oi++) {
         uint32_t osym = asnix_bshared_attrs_sym(overrides_val, oi);
         Value oval = asnix_bshared_attrs_value(overrides_val, oi);
-        int64_t match = -1;
-        for (int64_t i = 0; i < n; i++) {
-            if (syms[i] == osym) { match = i; break; }
+        int64_t match;
+        if (use_sorted) {
+            match = rec_overrides_find(order, n, osym);
+        } else {
+            match = -1;
+            for (int64_t i = 0; i < n; i++) {
+                if (syms[i] == osym) { match = i; break; }
+            }
         }
         if (match >= 0) {
             vals[match] = oval;
@@ -806,6 +887,7 @@ Value asnix_bshared_rec_overrides_merge(Env *env, int64_t n, const int64_t *meta
             total++;
         }
     }
+    free(order);
     Value out = asnix_bshared_make_attrs(syms, vals, total);
     free(syms);
     free(vals);
