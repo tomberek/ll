@@ -128,7 +128,16 @@ int main(int argc, char **argv) {
 
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t0);
     asnix_arena_init(0);
-    asnix_lazy_thunk_enabled = getenv("ASNIX_LAZY_THUNK") != NULL; /* lazy-thunk-compile experiment, ported from asnix */
+    /* Lazy-thunk-compile experiment, ported from asnix: default ON here
+     * (unlike asnix, which keeps it opt-in -- see that repo's own
+     * bytecode-cache interaction, which ll has no equivalent of since it
+     * has no bytecode-cache subsystem at all). Verified clean under both
+     * states (44/44 difftest, 148/148 nixpkgs-hash, byte-identical real-
+     * benchmark output) with a real, substantial win (-6.52% ffmpeg,
+     * -2.79% plasma) and no known blocker, so there's no reason to leave
+     * it behind a flag nobody will ever think to set. ASNIX_EAGER_THUNK=1
+     * is the rollback switch if a real regression ever surfaces. */
+    asnix_lazy_thunk_enabled = getenv("ASNIX_EAGER_THUNK") == NULL;
     Ast *root = asnix_parse(src);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t1);
     IrProgram *prog = asnix_compile(root, base_dir, resolved_path);
