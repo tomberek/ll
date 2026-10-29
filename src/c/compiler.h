@@ -64,4 +64,62 @@ extern int asnix_lazy_thunk_enabled;
  * defined in compiler.c only, nothing outside it needs the layout. */
 IrProgram *asnix_compile_lazy_thunk_body(void *desc);
 
+/* ---------------------------------------------------------------------
+ * Bytecode-cache + lazy-thunk reconciliation (bytecode.c's
+ * PTAG_OP_LAZY_MARKER): LazyThunkDescriptor/ScopeFrame stay opaque to
+ * every other file (see asnix_compile_lazy_thunk_body's own comment
+ * above) -- these accessors are the ONLY sanctioned way to read one from
+ * bytecode.c, and every one returns plain data (an int, a byte string,
+ * or another opaque handle to walk further), never a raw Ast*. The
+ * "_scope"/"_frame_*" family lets bytecode.c walk a LIVE descriptor's
+ * ScopeFrame chain to SERIALIZE it; the "_push_frame"/"_make_cached_"/
+ * "_set_self" family lets it build an equivalent descriptor back up from
+ * deserialized (count, is_with, has_overrides, name) tuples, without
+ * ever needing ScopeFrame's or LazyThunkDescriptor's own struct layout.
+ * --------------------------------------------------------------------- */
+
+/* 0 if `desc`'s deferred value has no real, verbatim, standalone-
+ * reparseable source span (a compiler-synthesized value, e.g. the
+ * hidden AST_SELECT an `inherit (expr) a b;` clause's desugaring can
+ * produce -- see parser.c's parse_binding_stmt_inner comment) -- the
+ * caller must refuse to cache this program in that case, exactly like
+ * bytecode.c's program_op_count did unconditionally before this
+ * feature existed. Otherwise writes the real byte offset to `*out_pos`
+ * and returns 1. */
+int asnix_lazy_thunk_descriptor_src_pos(void *desc, unsigned int *out_pos);
+const char *asnix_lazy_thunk_descriptor_file_path(void *desc);
+const char *asnix_lazy_thunk_descriptor_base_dir(void *desc);
+/* Opaque ScopeFrame* handle, or NULL at/past the root. */
+void *asnix_lazy_thunk_descriptor_scope(void *desc);
+void *asnix_scope_frame_up(void *frame);
+int asnix_scope_frame_count(void *frame);
+int asnix_scope_frame_is_with(void *frame);
+int asnix_scope_frame_has_overrides(void *frame);
+const char *asnix_scope_frame_name(void *frame, int i, size_t *out_len);
+
+/* Pushes one more (innermost) ScopeFrame onto `up_chain` (NULL for the
+ * first/outermost call), deep-copying `names`/`name_lens` into fresh,
+ * never-freed storage (same convention scope_frame_persist already
+ * uses for the live path -- see that function's own comment) since the
+ * caller's own `names[i]` here typically point into a bytecode-cache
+ * mmap that's unmapped right after deserialization returns. Returns the
+ * new (opaque) ScopeFrame* handle, to pass back in as `up_chain` for the
+ * next, more-deeply-nested frame. */
+void *asnix_lazy_scope_push_frame(void *up_chain, int count, int is_with, int has_overrides,
+                                   const char **names, const size_t *name_lens);
+
+/* Builds a cache-load LazyThunkDescriptor: `self` starts unset (the
+ * stub IrProgram it belongs to doesn't exist yet at this point -- same
+ * chicken-and-egg order the live path's own emit_attrset_field_value
+ * resolves via its own two-step `ib_finish` then `desc->self = ...`) --
+ * call asnix_lazy_thunk_descriptor_set_self once the caller has built
+ * that one-op program. `file_path`/`base_dir`/`scope_chain` are taken by
+ * pointer, not copied again -- the caller must have already allocated
+ * them in fresh, never-freed storage (mirroring every other "own it
+ * forever" convention this experiment already uses). Returns an opaque
+ * `void *` suitable for ib_mk_lazy_thunk_stub's own pool slot. */
+void *asnix_make_cached_lazy_thunk_descriptor(unsigned int reparse_pos, const char *file_path,
+                                               const char *base_dir, void *scope_chain);
+void asnix_lazy_thunk_descriptor_set_self(void *desc, IrProgram *self);
+
 #endif /* ASNIX_COMPILER_H */

@@ -30,4 +30,13 @@
  * docs/architecture.md M134/M135. */
 Ast *asnix_parse(const char *src);
 
+/* Marker-reparse addition (see parser.c's own comment on this function):
+ * parses exactly one expression starting at `src[start_offset]`, where
+ * `src` is a full file buffer an earlier asnix_parse(src) call (in a
+ * DIFFERENT, now-dead process) already walked once. Used only by
+ * compiler.c's asnix_compile_lazy_thunk_body, for a LazyThunkDescriptor
+ * that was reconstructed from a bytecode-cache entry instead of built
+ * live during that file's own original compile. */
+Ast *asnix_parse_subexpr(const char *src, size_t start_offset);
+
 #endif /* ASNIX_PARSER_H */

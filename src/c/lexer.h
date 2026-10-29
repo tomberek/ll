@@ -238,6 +238,22 @@ void asnix_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t 
 typedef struct Lexer Lexer;
 
 Lexer *lexer_new(const char *src);
+
+/* Marker-reparse addition (parser.c's asnix_parse_subexpr, bytecode.c's
+ * PTAG_OP_LAZY_MARKER): same as lexer_new, except an unmatched '}' found
+ * with nothing left on this Lexer's OWN mode stack to pop is treated as
+ * an ordinary (if slightly fictitious) TOK_RBRACE instead of a fatal
+ * syntax error -- expected and harmless here, since this Lexer starts
+ * reading PARTWAY into a larger buffer whose own enclosing `{`/`${` (if
+ * any) it never saw opened, and the one-token-of-lookahead this file's
+ * own cur()/peek2() convention always needs can legitimately overread
+ * into that enclosing construct's own closer, which the caller
+ * (asnix_parse_subexpr) always discards unconsumed anyway. An ordinary
+ * lexer_new() Lexer has no such excuse -- its mode stack only ever grows
+ * from tokens IT ITSELF produced, so the same situation there is a real,
+ * fatal syntax error, unchanged from before this addition. */
+Lexer *lexer_new_lenient(const char *src);
+
 Token lexer_next(Lexer *lx);
 void lexer_free(Lexer *lx);
 

@@ -379,6 +379,27 @@ struct Lexer {
     LexMode cur;
     Token pending;
     int has_pending;
+    /* Marker-reparse addition (parser.c's asnix_parse_subexpr): 0 for
+     * every ordinary Lexer (lexer_new), whose mode stack starts empty
+     * and only ever grows from THIS SAME Lexer's own `{`/`${` tokens --
+     * for that case, reaching a `}` with nothing left to pop (modes_len
+     * == 1) really is a genuine syntax error (an actual unmatched '}' in
+     * the source). Set to 1 only by lexer_new_lenient, used when lexing
+     * starts PARTWAY into a larger buffer whose own enclosing `{`/`${`
+     * (if any) this Lexer never saw opened: asnix_parse_subexpr's
+     * caller only ever wants ONE expression's worth of real tokens, but
+     * the 2-token lookahead this file's own cur()/peek2() convention
+     * needs (see lexer_new's own comment) unavoidably fetches one token
+     * PAST that expression's own end before parse_expr ever returns --
+     * if that lookahead token happens to be the `}` that closes some
+     * OUTER construct (an enclosing attrset/rec/string-interpolation
+     * this Lexer has no record of), it is NOT a real syntax error, just
+     * an artifact of always needing one token of lookahead; the fix is
+     * to not crash on it, since asnix_parse_subexpr's caller (compiler.c)
+     * immediately discards the whole Lexer right after parse_expr
+     * returns and never actually consumes this one over-read token
+     * either way. */
+    int lenient;
 };
 
 static void mode_push(Lexer *lx, LexMode mode) {
@@ -1104,6 +1125,18 @@ static Token lex_normal(Lexer *lx) {
         }
         if (c == '}') {
             if (lx->modes_len == 1) {
+                /* See Lexer's own `lenient` field comment: for a lenient
+                 * (marker-reparse) Lexer, this is expected -- just an
+                 * outer construct's own closer surfacing as this
+                 * expression's unavoidable one-token-of-lookahead
+                 * overread, never actually consumed by anything. Return
+                 * it as an ordinary (if slightly fictitious) TOK_RBRACE
+                 * rather than popping a mode that was never pushed. */
+                if (lx->lenient) {
+                    i++;
+                    lx->pos = i;
+                    return mk_tok(TOK_RBRACE, tok_start, i);
+                }
                 fprintf(stderr, "asnix: unmatched '}'\n");
                 exit(1);
             }
@@ -1235,7 +1268,7 @@ Token lexer_next(Lexer *lx) {
     return lex_path_run(lx);
 }
 
-Lexer *lexer_new(const char *src) {
+static Lexer *lexer_new_ex(const char *src, int lenient) {
     Lexer *lx = malloc(sizeof(Lexer));
     lx->src = src;
     lx->pos = 0;
@@ -1244,7 +1277,18 @@ Lexer *lexer_new(const char *src) {
     lx->modes_cap = 0;
     mode_push(lx, MODE_NORMAL);
     lx->has_pending = 0;
+    lx->lenient = lenient;
     return lx;
+}
+
+Lexer *lexer_new(const char *src) {
+    return lexer_new_ex(src, 0);
+}
+
+/* Marker-reparse addition -- see Lexer's own `lenient` field comment
+ * above and parser.c's asnix_parse_subexpr (the only caller). */
+Lexer *lexer_new_lenient(const char *src) {
+    return lexer_new_ex(src, 1);
 }
 
 void lexer_free(Lexer *lx) {

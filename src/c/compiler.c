@@ -1,4 +1,9 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
+/* fileno()/strdup() are POSIX, not C11 -- needs an explicit feature-test
+ * macro under -std=c11 (see Makefile's CFLAGS and eval_file.c's
+ * identical comment on the same obstacle). Needed by this file's own
+ * marker-reparse addition, reparse_source_for_file. */
+#define _DEFAULT_SOURCE
 #include "compiler.h"
 
 #include <stdint.h>
@@ -16,6 +21,8 @@
 #include "builtins_regex.h"  /* M110: asnix_prim_match2_impl */
 #include "builtins_shared.h"
 #include "eval_file.h" /* M80: asnix_eval_top_level_file, for AST_CURPOS's `file` field */
+#include "parser.h" /* marker-reparse addition: asnix_parse_subexpr, for a cache-loaded
+                      * lazy-thunk stub's first force (asnix_compile_lazy_thunk_body) */
 #include "symtab.h"
 #include "tryeval.h"
 #include "value_util.h"
@@ -464,10 +471,25 @@ int asnix_lazy_thunk_enabled = 0;
  * OP_MK_THUNK site points at, mutated in place on upgrade. */
 typedef struct LazyThunkDescriptor {
     IrProgram *self;
+    /* NULL for a descriptor reconstructed from a bytecode-cache marker
+     * (bytecode.c's PTAG_OP_LAZY_MARKER) -- that process never had this
+     * file's own live Ast at all, only the byte offset below. Non-NULL
+     * for the ordinary live/in-process-compile path (emit_attrset_field_
+     * value), exactly as before this feature existed. */
     Ast *body;
     ScopeFrame *scope;
     const char *file_path;
     const char *base_dir;
+    /* Live path: `body`'s own `src_pos` at descriptor-creation time --
+     * 0 if `body` has no real, verbatim, reparseable source span (see
+     * parser.c's parse_binding_stmt_inner comment); bytecode.c's
+     * write_lazy_thunk_marker refuses to cache this stub when 0,
+     * identical to the unconditional refusal this feature replaces.
+     * Cache-load path (`body == NULL`): the byte offset within
+     * `file_path`'s own source text to asnix_parse_subexpr from --
+     * always valid/nonzero here, since a 0 value never gets written to
+     * a marker in the first place. */
+    uint32_t value_src_pos;
 } LazyThunkDescriptor;
 
 /* Deep-copies a ScopeFrame chain (walking ->up) into freshly malloc'd,
@@ -494,11 +516,78 @@ static ScopeFrame *scope_frame_persist(ScopeFrame *stack_scope) {
 
 static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
 
+/* Marker-reparse addition: per-process, never-freed memoization of
+ * "file path -> full source text", keyed by `file_path` (the same
+ * string every descriptor sharing one cache-loaded file already carries
+ * -- see LazyThunkDescriptor's own comment). Lets asnix_compile_lazy_
+ * thunk_body's cache-load branch reopen a file's source text ONCE no
+ * matter how many of that file's own deferred fields eventually get
+ * forced, instead of once per force -- and, more importantly, lets a
+ * cache HIT whose program contains such stubs skip reading the source
+ * file at all for every field that's NEVER forced (this project's own
+ * measured norm: 90.7% of real ffmpeg-closure thunk bodies, per asnix's
+ * own lazy-thunk-compile-proposal.md) -- reading it eagerly at cache-
+ * load time, the way eval_file.c keeps a LIVE compile's `src` alive,
+ * would defeat that laziness and much of the fast cache-hit path's own
+ * "no source-file I/O at all" benefit (bytecode_cache.c's own M102
+ * comment) for every file that has at least one deferred field, which
+ * is most of them. A simple linked list, not a hash table: the number
+ * of DISTINCT files whose deferred fields actually get forced in one
+ * process is small (bounded by the closure's own file count, at most a
+ * few thousand on a real nixpkgs eval) and this is only ever consulted
+ * on an actual force of a cache-reconstructed stub, not once per op. */
+typedef struct ReparseSrcEntry {
+    char *path;
+    char *src; /* never freed -- same "a deferred stub's strings may still alias this"
+                  convention eval_file.c's own free(src) gating already establishes */
+    struct ReparseSrcEntry *next;
+} ReparseSrcEntry;
+static ReparseSrcEntry *g_reparse_src_cache = NULL;
+
+static const char *reparse_source_for_file(const char *path) {
+    for (ReparseSrcEntry *e = g_reparse_src_cache; e; e = e->next) {
+        if (strcmp(e->path, path) == 0) return e->src;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "asnix: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
+        exit(1);
+    }
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(f);
+        fprintf(stderr, "asnix: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
+        exit(1);
+    }
+    size_t size = (size_t)st.st_size;
+    char *buf = malloc(size + 1);
+    size_t got = fread(buf, 1, size, f);
+    fclose(f);
+    buf[got] = '\0';
+    ReparseSrcEntry *e = malloc(sizeof(ReparseSrcEntry));
+    e->path = strdup(path);
+    e->src = buf;
+    e->next = g_reparse_src_cache;
+    g_reparse_src_cache = e;
+    return buf;
+}
+
 /* C bridge for OP_LAZY_THUNK_BODY's handler (src/llvm/ops/
  * op_lazy_thunk_body.c) -- ported from asnix. Runs the exact same
  * compile_expr/ib_finish pipeline a top-level asnix_compile() call
  * would, mid-dispatch, saving/restoring the two file-scope globals
- * compile_expr depends on beyond its explicit parameters. */
+ * compile_expr depends on beyond its explicit parameters.
+ *
+ * Marker-reparse addition: `desc->body == NULL` means this descriptor
+ * was reconstructed from a bytecode-cache marker (bytecode.c's
+ * PTAG_OP_LAZY_MARKER), not built live during this process's own
+ * compile -- there is no Ast at all yet, only a byte offset
+ * (`value_src_pos`) into `file_path`'s own source text. Reparse exactly
+ * that one expression first (asnix_parse_subexpr), THEN fall into the
+ * same compile_expr/ib_finish pipeline the live path always used --
+ * from this point on the two paths are identical: compile_expr has no
+ * way to tell a freshly-reparsed Ast apart from one that's been sitting
+ * in memory since this same process's own original parse. */
 IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
     LazyThunkDescriptor *desc = (LazyThunkDescriptor *)desc_void;
     const char *saved_base_dir = g_compile_base_dir;
@@ -506,8 +595,14 @@ IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
     g_compile_base_dir = desc->base_dir;
     g_compile_file_path = desc->file_path;
 
+    Ast *body = desc->body;
+    if (!body) {
+        const char *src = reparse_source_for_file(desc->file_path);
+        body = asnix_parse_subexpr(src, desc->value_src_pos);
+    }
+
     IrBuilder *real_b = ib_new();
-    compile_expr(real_b, desc->body, desc->scope);
+    compile_expr(real_b, body, desc->scope);
     ib_ret(real_b);
     IrProgram *real = ib_finish(real_b);
 
@@ -518,6 +613,107 @@ IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
     desc->self->pool = real->pool;
     free(real);
     return desc->self;
+}
+
+/* ---------------------------------------------------------------------
+ * Bytecode-cache accessors/constructors -- see compiler.h's own comment
+ * on each declaration for the full contract. Kept right next to
+ * LazyThunkDescriptor/ScopeFrame's own definitions (both file-local to
+ * this translation unit) since these functions are the only code
+ * outside this file ever allowed to touch either struct's fields.
+ * --------------------------------------------------------------------- */
+
+int asnix_lazy_thunk_descriptor_src_pos(void *desc_void, unsigned int *out_pos) {
+    LazyThunkDescriptor *desc = (LazyThunkDescriptor *)desc_void;
+    if (desc->value_src_pos == 0) return 0;
+    *out_pos = desc->value_src_pos;
+    return 1;
+}
+
+const char *asnix_lazy_thunk_descriptor_file_path(void *desc_void) {
+    return ((LazyThunkDescriptor *)desc_void)->file_path;
+}
+
+const char *asnix_lazy_thunk_descriptor_base_dir(void *desc_void) {
+    return ((LazyThunkDescriptor *)desc_void)->base_dir;
+}
+
+void *asnix_lazy_thunk_descriptor_scope(void *desc_void) {
+    return ((LazyThunkDescriptor *)desc_void)->scope;
+}
+
+void *asnix_scope_frame_up(void *frame) {
+    return frame ? ((ScopeFrame *)frame)->up : NULL;
+}
+
+int asnix_scope_frame_count(void *frame) {
+    return (int)((ScopeFrame *)frame)->count;
+}
+
+int asnix_scope_frame_is_with(void *frame) {
+    return ((ScopeFrame *)frame)->is_with;
+}
+
+int asnix_scope_frame_has_overrides(void *frame) {
+    return ((ScopeFrame *)frame)->has_overrides;
+}
+
+const char *asnix_scope_frame_name(void *frame, int i, size_t *out_len) {
+    ScopeFrame *f = (ScopeFrame *)frame;
+    *out_len = f->name_lens[i];
+    return f->names[i];
+}
+
+void *asnix_lazy_scope_push_frame(void *up_chain, int count, int is_with, int has_overrides,
+                                   const char **names, const size_t *name_lens) {
+    ScopeFrame *f = malloc(sizeof(ScopeFrame));
+    f->up = (ScopeFrame *)up_chain;
+    f->count = (size_t)count;
+    f->is_with = is_with;
+    f->has_overrides = has_overrides;
+    f->names = NULL;
+    f->name_lens = NULL;
+    if (count > 0) {
+        const char **n = malloc((size_t)count * sizeof(char *));
+        size_t *l = malloc((size_t)count * sizeof(size_t));
+        for (int i = 0; i < count; i++) {
+            /* Deep-copy the name bytes themselves (not just the pointer)
+             * -- `names[i]` here typically points into a bytecode-cache
+             * mmap that gets munmap'd right after asnix_bytecode_
+             * deserialize returns (bytecode_cache.c's lookup_fast/
+             * lookup_verify), unlike the live scope_frame_persist case,
+             * where every name instead aliases `src` (kept alive for
+             * the process's own remaining lifetime -- see eval_file.c's
+             * free(src) gating), which is never true here. */
+            size_t len = name_lens[i];
+            char *copy = malloc(len + 1);
+            memcpy(copy, names[i], len);
+            copy[len] = '\0';
+            n[i] = copy;
+            l[i] = len;
+        }
+        f->names = n;
+        f->name_lens = l;
+    }
+    return f;
+}
+
+void *asnix_make_cached_lazy_thunk_descriptor(unsigned int reparse_pos, const char *file_path,
+                                               const char *base_dir, void *scope_chain) {
+    LazyThunkDescriptor *desc = malloc(sizeof(LazyThunkDescriptor));
+    desc->self = NULL; /* set via asnix_lazy_thunk_descriptor_set_self once the caller
+                           has built the one-op stub IrProgram this descriptor belongs to */
+    desc->body = NULL; /* marks this as a cache-load (reparse-first) descriptor --
+                           see asnix_compile_lazy_thunk_body's own comment */
+    desc->scope = (ScopeFrame *)scope_chain;
+    desc->file_path = file_path;
+    desc->base_dir = base_dir;
+    desc->value_src_pos = reparse_pos;
+    return desc;
+}
+
+void asnix_lazy_thunk_descriptor_set_self(void *desc_void, IrProgram *self) {
+    ((LazyThunkDescriptor *)desc_void)->self = self;
 }
 
 /* Replaces the usual "build a thunk_b, compile_expr into it, ib_ret,
@@ -538,6 +734,13 @@ static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value
     desc->scope = scope_frame_persist(value_scope);
     desc->file_path = g_compile_file_path;
     desc->base_dir = g_compile_base_dir;
+    /* Bytecode-cache marker addition: `value->src_pos` is 0 unless
+     * parser.c's parse_binding_stmt_inner stamped it (only the ONE real,
+     * verbatim RHS-of-`=` expression it parses gets one -- see that
+     * call site's own comment); bytecode.c's write_lazy_thunk_marker
+     * refuses to cache a program whose stub has this at 0, falling back
+     * to the pre-existing unconditional refusal for that one case. */
+    desc->value_src_pos = value->src_pos;
     IrBuilder *stub_b = ib_new();
     ib_mk_lazy_thunk_stub(stub_b, desc);
     IrProgram *stub_prog = ib_finish(stub_b);

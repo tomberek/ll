@@ -16,6 +16,9 @@
 #include "asnix/arena.h"
 #include "asnix/heap.h"
 #include "builtins_shared.h"
+#include "compiler.h" /* marker-reparse addition: asnix_lazy_thunk_descriptor_*/
+                      /* asnix_lazy_scope_push_frame/asnix_make_cached_lazy_thunk_descriptor --
+                       * see PTAG_OP_LAZY_MARKER's own comment below */
 #include "op_dispatch.h" /* ll_handler_table -- see this file's own header comment */
 #include "ops/ops.h"      /* ll_op_push_int_run -- see handler_to_op_id's own comment */
 #include "symtab.h"
@@ -398,6 +401,27 @@ enum {
                           * "attribute 'y' missing" on a cache hit, 'y' being whatever
                           * this process coincidentally interned at the stale id
                           * `builtins.attrNames` itself was compiled against. */
+    PTAG_OP_LAZY_MARKER = 12, /* Lazy-thunk + bytecode-cache reconciliation: an OP_MK_THUNK
+                          * whose child is an UNRESOLVED OP_LAZY_THUNK_BODY stub (compiler.c's
+                          * emit_attrset_field_value), written as a portable MARKER instead of
+                          * refusing to cache the whole program (program_op_count's own prior,
+                          * unconditional refusal -- still the fallback here whenever this
+                          * marker can't be built, see write_lazy_thunk_marker). Payload: the
+                          * reparse byte offset (one varint), `file_path`/`base_dir` (two
+                          * length-prefixed byte strings -- needed so a later force's
+                          * asnix_parse_subexpr/compile_expr gets the exact same `import`/
+                          * `__curPos` context the live path's own descriptor would have
+                          * captured), then the ScopeFrame chain the deferred value's lexical
+                          * lookups need, OUTERMOST frame first: frame-count (one varint), then
+                          * per frame: count + is_with + has_overrides (three varints) followed
+                          * by `count` length-prefixed name byte strings. On load, this becomes
+                          * a LazyThunkDescriptor with `body == NULL` -- asnix_compile_lazy_
+                          * thunk_body's own first-force check reparses `file_path`'s source
+                          * text (reopened and memoized once per distinct path, see compiler.c's
+                          * reparse_source_for_file -- NOT the bytecode-cache entry's own mmap,
+                          * which is already unmapped by the time deserialization returns) at
+                          * that byte offset before compiling, instead of using an already-
+                          * parsed Ast it never had. */
     PTAG_OP_SYM_B = 9,  /* same, but the bare symbol id is in `b` -- OP_WITH_TRY,
                           * OP_SELECT_OR, OP_HAS_ATTR_IF (M162) (all three also have a real
                           * jump-delta in `a`, passed through unchanged). */
@@ -432,6 +456,50 @@ enum {
 
 static int write_program(WBuf *b, IrProgram *prog);
 static int write_one_op(WBuf *b, IrOp *op, int64_t *pool);
+
+/* Writes PTAG_OP_LAZY_MARKER for `desc` (an unresolved OP_LAZY_THUNK_BODY
+ * stub's descriptor, opaque here -- see compiler.h's own accessor
+ * comments) -- returns -1 (write nothing, caller must refuse to cache
+ * the whole program, exactly like before this feature existed) whenever
+ * `desc`'s deferred value has no real, reparseable source span. See
+ * PTAG_OP_LAZY_MARKER's own enum comment for the wire layout. */
+static int write_lazy_thunk_marker(WBuf *b, void *desc) {
+    unsigned int pos;
+    if (!asnix_lazy_thunk_descriptor_src_pos(desc, &pos)) return -1;
+    const char *file_path = asnix_lazy_thunk_descriptor_file_path(desc);
+    const char *base_dir = asnix_lazy_thunk_descriptor_base_dir(desc);
+    wbuf_u8(b, PTAG_OP_LAZY_MARKER);
+    wbuf_i64(b, (int64_t)pos);
+    wbuf_bytes_with_len(b, file_path, strlen(file_path));
+    wbuf_bytes_with_len(b, base_dir, strlen(base_dir));
+
+    /* Collect the chain innermost-first (the only order `_up` walking
+     * can produce), then emit it outermost-first (see the enum comment)
+     * -- two small, bounded passes over the same (always shallow: a
+     * handful of enclosing let/rec/lambda/with levels, never remotely
+     * close to a real file's total node count) chain. */
+    void *scope = asnix_lazy_thunk_descriptor_scope(desc);
+    size_t frame_count = 0;
+    for (void *f = scope; f; f = asnix_scope_frame_up(f)) frame_count++;
+    void **frames = frame_count ? malloc(frame_count * sizeof(void *)) : NULL;
+    size_t fi = 0;
+    for (void *f = scope; f; f = asnix_scope_frame_up(f)) frames[fi++] = f;
+    wbuf_i64(b, (int64_t)frame_count);
+    for (size_t i = frame_count; i-- > 0;) {
+        void *f = frames[i];
+        int count = asnix_scope_frame_count(f);
+        wbuf_i64(b, count);
+        wbuf_i64(b, asnix_scope_frame_is_with(f));
+        wbuf_i64(b, asnix_scope_frame_has_overrides(f));
+        for (int ni = 0; ni < count; ni++) {
+            size_t len;
+            const char *name = asnix_scope_frame_name(f, ni, &len);
+            wbuf_bytes_with_len(b, name, len);
+        }
+    }
+    free(frames);
+    return b->failed ? -1 : 0;
+}
 
 static size_t program_op_count(IrProgram *prog) {
     size_t n = 0;
@@ -566,6 +634,20 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
              * pushes one pool slot, not a {ops,pool} pair) -- dereference
              * it directly instead of reading two separate pool slots. */
             IrProgram *child = (IrProgram *)(intptr_t)pool[op->b];
+            /* Lazy-thunk + bytecode-cache reconciliation: a not-yet-
+             * forced child whose ONLY op is OP_LAZY_THUNK_BODY is a
+             * stub (compiler.c's emit_attrset_field_value), not an
+             * ordinary compiled program -- program_op_count would
+             * refuse it (and, by propagation, this whole top-level
+             * write_program call) outright; try the portable marker
+             * encoding first instead. write_lazy_thunk_marker itself
+             * falls back to -1 (same refusal as before) whenever the
+             * stub's own deferred value has no real reparseable source
+             * span -- see that function's own comment. */
+            if (handler_to_op_id(child->ops[0].handler) == OP_LAZY_THUNK_BODY) {
+                void *desc = (void *)(intptr_t)child->pool[child->ops[0].b];
+                return write_lazy_thunk_marker(b, desc);
+            }
             wbuf_u8(b, PTAG_OP_THUNK);
             return write_program(b, child);
         }
@@ -984,6 +1066,74 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             if (nf == 0) idx = db_pool_add(d, 0); /* keep `b` a valid pool index even for
                                                     * a (vanishingly rare) zero-formal case */
             db_emit(d, OP_MK_FORMALSMAP, nf, idx);
+            return d->failed ? -1 : 0;
+        }
+        case PTAG_OP_LAZY_MARKER: {
+            /* Mirrors PTAG_OP_THUNK's own shape (a self-contained
+             * one-op child program, boxed into its own IrProgram*, then
+             * referenced by an OP_MK_THUNK emitted into the PARENT `d`)
+             * -- see that case's own "every nested program needs its
+             * OWN ir_link call" comment, which applies identically
+             * here: the stub's single op must go through ir_link before
+             * anything ever dispatches through it, exactly like the
+             * live path's own ib_mk_lazy_thunk_stub/ib_finish output
+             * does (that one gets linked later, as part of whatever
+             * encloses it; this one needs it done explicitly, right
+             * here, since nothing else will). */
+            int64_t pos = rcur_i64(r);
+            size_t fp_len, bd_len;
+            const char *fp = rcur_bytes_with_len(r, &fp_len);
+            const char *bd = rcur_bytes_with_len(r, &bd_len);
+            int64_t frame_count = rcur_i64(r);
+            if (r->failed || pos < 0 || pos > 0xFFFFFFFFLL || frame_count < 0 || frame_count > 1000000)
+                return -1;
+            char *file_path = malloc(fp_len + 1);
+            memcpy(file_path, fp, fp_len);
+            file_path[fp_len] = '\0';
+            char *base_dir = malloc(bd_len + 1);
+            memcpy(base_dir, bd, bd_len);
+            base_dir[bd_len] = '\0';
+
+            void *scope_chain = NULL;
+            for (int64_t fi = 0; fi < frame_count; fi++) {
+                int64_t count = rcur_i64(r);
+                int64_t is_with = rcur_i64(r);
+                int64_t has_overrides = rcur_i64(r);
+                if (r->failed || count < 0 || count > 1000000) return -1;
+                const char **names = count > 0 ? malloc((size_t)count * sizeof(char *)) : NULL;
+                size_t *lens = count > 0 ? malloc((size_t)count * sizeof(size_t)) : NULL;
+                int ok = 1;
+                for (int64_t ni = 0; ni < count; ni++) {
+                    size_t nlen;
+                    const char *nm = rcur_bytes_with_len(r, &nlen);
+                    if (r->failed) {
+                        ok = 0;
+                        break;
+                    }
+                    names[ni] = nm;
+                    lens[ni] = nlen;
+                }
+                if (ok) scope_chain = asnix_lazy_scope_push_frame(scope_chain, (int)count, (int)is_with,
+                                                                   (int)has_overrides, names, lens);
+                free(names);
+                free(lens);
+                if (!ok) return -1;
+            }
+
+            void *desc = asnix_make_cached_lazy_thunk_descriptor((unsigned int)pos, file_path, base_dir,
+                                                                  scope_chain);
+            DBuilder stub = { 0 };
+            int64_t desc_idx = db_pool_add(&stub, (int64_t)(intptr_t)desc);
+            db_emit(&stub, OP_LAZY_THUNK_BODY, 0, desc_idx);
+            if (stub.failed) return -1;
+            ir_link(stub.ops, stub.len);
+            IrProgram *stub_prog = malloc(sizeof(IrProgram));
+            stub_prog->ops = stub.ops;
+            stub_prog->pool = stub.pool;
+            asnix_lazy_thunk_descriptor_set_self(desc, stub_prog);
+
+            int64_t idx = db_pool_add(d, (int64_t)(intptr_t)stub_prog);
+            db_emit(d, OP_MK_THUNK, 0, idx);
             return d->failed ? -1 : 0;
         }
         case PTAG_OP_ATTRS: {

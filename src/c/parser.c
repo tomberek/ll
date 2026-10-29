@@ -629,6 +629,14 @@ typedef struct {
     Token next; /* peek2() */
     const char *src; /* M80: the buffer every Token.pos/.start points into -- see
                        * curpos_line_col below, parser.h's own asnix_parse comment. */
+    const char *curpos_base; /* Marker-reparse addition: the TRUE file-start pointer for
+                       * `__curPos`'s line/column (curpos_line_col below) -- equal to `src`
+                       * for an ordinary asnix_parse() call (whose Lexer starts right at the
+                       * real file start, so the two coincide), but asnix_parse_subexpr's
+                       * Lexer starts partway into the real file (at some byte offset into the
+                       * SAME underlying buffer) while `__curPos`'s line/col must still be
+                       * reported relative to the real file start, not the sub-parse's own
+                       * token-offset-0 point -- see that function's own comment. */
 } Parser;
 
 /* M80: 1-based line/column of `at` (a pointer into `src`, e.g. a
@@ -904,6 +912,17 @@ static Ast *build_dynamic_chain_value(AttrSeg *segs, size_t start, size_t count,
  * checks entirely, which exist only for names a *user* could write). */
 static int g_inherit_hidden_counter = 0;
 
+/* Lazy-thunk-plus-bytecode-cache reconciliation (see compiler.c's own
+ * LazyThunkDescriptor comment): when a deferred attrset-field value gets
+ * cached as an unresolved stub, bytecode.c needs a real source byte
+ * offset to reparse `value` from in a FRESH process (Ast->src_pos is
+ * normally only populated under ASNIX_IRDUMP_LINE_TRACKING -- a debug-
+ * only build variant, never set in production -- so it's always 0 here
+ * otherwise). Declared `extern` rather than pulling in the whole of
+ * compiler.h, to avoid adding an include-order dependency to this file
+ * for one flag. */
+extern int asnix_lazy_thunk_enabled;
+
 /* Lazy-thunk-compile experiment, ported from asnix (see ast.h's own
  * comment on asnix_ast_enter_retained): wraps the real
  * parse_binding_stmt_inner below so every Ast node it builds for ANY
@@ -1105,10 +1124,29 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
         attrsegvec_push(parse_attr_segment(p, "an attribute name"));
     }
     expect(p, TOK_EQUALS, "'='");
+    /* Real source byte offset of this RHS's first token -- see the
+     * marker-reparse comment on g_inherit_hidden_counter above. Captured
+     * unconditionally (cheap: one extra local + field write per
+     * attrset/let binding, gated on the one flag that makes it matter)
+     * so a later cache-store of a not-yet-forced lazy-thunk stub wrapping
+     * THIS exact value can record a byte offset that reparses back to an
+     * equivalent Ast, instead of bytecode.c's pre-existing hard refusal
+     * to cache any program containing an unresolved stub at all. */
+    uint32_t value_src_pos = cur(p).start;
     Ast *value = parse_expr(p); /* may recurse into another attrsegvec user -- that fully
                                   * commits and unwinds before returning, so it's still safe
                                   * to commit THIS span only now, below (see SCRATCH_VEC's
                                   * own safety argument) */
+    /* Only this exact leaf value -- not the synthetic nested AST_ATTRSET
+     * wrappers attrpath sugar (`a.b.c = v;`) builds around it via
+     * insert_attrpath/finalize_bt_node below -- corresponds to a real,
+     * verbatim, standalone-parseable span of the source buffer (the
+     * wrappers don't appear in source at all, e.g. `a.b.c = v;` has no
+     * literal `{ b = { c = v; }; }` text anywhere); those keep src_pos's
+     * default 0 ("no known span"), which bytecode.c treats as "fall back
+     * to the old refuse-to-cache behavior for this stub" -- see that
+     * file's PTAG_OP_LAZY_MARKER comment. */
+    if (asnix_lazy_thunk_enabled) value->src_pos = value_src_pos;
     expect(p, TOK_SEMI, "';'");
 
     size_t segs_count;
@@ -1331,7 +1369,7 @@ static Ast *parse_atom(Parser *p) {
             if (t.kind == TOK_IDENT && tok_len(t) == 8 && memcmp(tok_text(p, t), "__curPos", 8) == 0) {
                 advance(p);
                 Ast *n = asnix_ast_new_at(AST_CURPOS, cur(p).start);
-                curpos_line_col(p->src, p->src + t.start, &n->as.curpos.line, &n->as.curpos.column);
+                curpos_line_col(p->curpos_base, p->src + t.start, &n->as.curpos.line, &n->as.curpos.column);
                 return n;
             }
             advance(p);
@@ -2150,11 +2188,64 @@ static Ast *parse_expr(Parser *p) {
  * an empty file primes both slots to TOK_EOF, same as before). */
 Ast *asnix_parse(const char *src) {
     Lexer *lx = lexer_new(src);
-    Parser p = { .lx = lx, .src = src };
+    Parser p = { .lx = lx, .src = src, .curpos_base = src };
     p.tok = lexer_next(lx);
     p.next = lexer_next(lx);
     Ast *result = parse_expr(&p);
     expect(&p, TOK_EOF, "end of input");
+    lexer_free(lx);
+    return result;
+}
+
+/* Marker-reparse addition (bytecode-cache + lazy-thunk reconciliation --
+ * see compiler.c's LazyThunkDescriptor comment and bytecode.c's
+ * PTAG_OP_LAZY_MARKER comment): parses exactly ONE expression starting
+ * at byte offset `start_offset` within `src`, which is the SAME full,
+ * NUL-terminated file buffer an ordinary asnix_parse(src) call would
+ * have used (never a fresh copy) -- `start_offset` always lands right
+ * after a `name = ` (or attrpath-sugar `a.b.c = `) token sequence, at
+ * the first token of that binding's RHS (see parser.c's own
+ * parse_binding_stmt_inner, which is the only place that ever stamps a
+ * value Ast's `src_pos` with a real, reparseable span).
+ *
+ * Deliberately does NOT call `expect(&p, TOK_EOF, ...)` the way
+ * asnix_parse does -- unlike a whole top-level file, there is always
+ * real, meaningful content after this one expression ends (at minimum
+ * the `;` that closed the original binding statement, usually a lot
+ * more: sibling bindings, the enclosing `}`, everything after it). This
+ * is exactly why no explicit end-of-range length is needed either: the
+ * Lexer here is a pure forward-scanning cursor over `src` with no
+ * dependency on what precedes its own starting point (confirmed:
+ * lexer_new just stores a `const char *`/`pos` pair, see lexer.c), so
+ * pointing it at `src + start_offset` is exactly as safe as pointing it
+ * at `src + 0` (asnix_parse's own case) -- `parse_expr` naturally stops
+ * consuming tokens the instant this one expression is grammatically
+ * complete (recursive descent, not a greedy consume-until-EOF loop), and
+ * this function simply never looks at (or lexes past what it needs to
+ * confirm the expression ended -- at most one token of lookahead via
+ * `p.next`) whatever real content follows. `src`'s true start (not
+ * `start_offset`) is passed as `curpos_base` so a `__curPos` inside the
+ * reparsed expression still reports its real, absolute line/column
+ * (see Parser's own `curpos_base` field comment) -- `__curPos`'s own
+ * `file` field (ast.h's AST_CURPOS comment) is set later, by
+ * compile_expr, from the current `g_compile_file_path` global, same as
+ * any other compile of this same body would set it, so that part needs
+ * no special handling here at all. */
+Ast *asnix_parse_subexpr(const char *src, size_t start_offset) {
+    /* lexer_new_lenient, NOT lexer_new -- see that function's own
+     * comment. Found the hard way: forcing a cache-loaded deferred
+     * field whose value is the LAST binding before its enclosing `}`
+     * (e.g. `rec { a = 1; b = a + 1; }`, forcing `b`) crashed with
+     * "asnix: unmatched '}'" -- the ordinary lexer_new's ONE token of
+     * required lookahead past this expression's own end (`cur()`/
+     * `peek2()`'s 2-slot buffer, primed below) reached the enclosing
+     * rec{}'s own closing brace, which THIS fresh Lexer, starting mid-
+     * file, never recorded the matching `{` for. */
+    Lexer *lx = lexer_new_lenient(src + start_offset);
+    Parser p = { .lx = lx, .src = src + start_offset, .curpos_base = src };
+    p.tok = lexer_next(lx);
+    p.next = lexer_next(lx);
+    Ast *result = parse_expr(&p);
     lexer_free(lx);
     return result;
 }
