@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -41,11 +41,11 @@
  * dead-branch eliminator that notices an OP_IF's condition is a
  * compile-time constant and wants to drop the untaken side), not a
  * transform expected to fire today. Verified by running the full
- * ASNIX_IR_OPT=1 vs. unset diff sweep with this pass registered anyway
+ * LL_IR_OPT=1 vs. unset diff sweep with this pass registered anyway
  * (see the commit message / session report for the exact counts).
  *
  * REMOVAL ORDERING -- the one real subtlety here, worth a long comment:
- * asnix_irpass_remove's own safety check (irpass.c) scans EVERY op
+ * ll_irpass_remove's own safety check (irpass.c) scans EVERY op
  * currently in the array (dead or live, not just ones outside the range
  * being removed) and is fatal if ANY of them has a jump target landing
  * inside [start, start+count) -- including an op that is ITSELF inside
@@ -65,7 +65,7 @@
  * a first draft of this pass's own spec suggested. This is safe by a
  * short inductive argument that only relies on the forward-jump
  * invariant established above (and, independently, re-checked by
- * asnix_irpass_remove itself on every single call -- this pass never
+ * ll_irpass_remove itself on every single call -- this pass never
  * bypasses that check, it just arranges to never need to trip it):
  *   - every jump TO a dead index must itself come from a DEAD op: if a
  *     REACHABLE op jumped to index d, d would have been marked reachable
@@ -77,7 +77,7 @@
  *     by the time we remove index d, every op that could possibly jump
  *     to d (which must be dead AND have a smaller index) has ALREADY
  *     been removed in an earlier iteration of this same sweep -- so
- *     asnix_irpass_remove's own scan finds no surviving jump into
+ *     ll_irpass_remove's own scan finds no surviving jump into
  *     [d, d+1) and never trips its fatal check.
  * Each removal shifts every later index down by exactly one; since we
  * only ever remove indices drawn from our own ascending dead list, the
@@ -118,7 +118,7 @@ static void dce_mark_reachable(const IrOp *ops, size_t n, unsigned char *reachab
         }
         /* (b) every jump-delta-bearing op's own target. */
         if (dce_op_is_jump(id)) {
-            int64_t target = (int64_t)i + ops[i].a / ASNIX_IROP_SIZE;
+            int64_t target = (int64_t)i + ops[i].a / LL_IROP_SIZE;
             if (target >= 0 && (size_t)target < n && !reachable[(size_t)target]) {
                 reachable[(size_t)target] = 1;
                 stack[sp++] = (size_t)target;
@@ -137,7 +137,7 @@ static void dce_mark_reachable(const IrOp *ops, size_t n, unsigned char *reachab
 static int dead_code_eliminate(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size_t *pool_cap) {
     (void)pool;
     (void)pool_len;
-    (void)pool_cap; /* M118 strconcat-fold extension widened AsnixIrPass's signature for every
+    (void)pool_cap; /* M118 strconcat-fold extension widened LlIrPass's signature for every
                       * pass uniformly (see irpass.h) -- this pass only removes unreachable ops,
                       * never touches the constant pool. */
     size_t n = *len;
@@ -163,7 +163,7 @@ static int dead_code_eliminate(IrOp *ops, size_t *len, int64_t **pool, size_t *p
          * iteration (we only ever remove indices from THIS SAME
          * ascending dead list). Its current position is therefore
          * orig_i - removed_so_far. */
-        asnix_irpass_remove(ops, len, orig_i - removed_so_far, 1);
+        ll_irpass_remove(ops, len, orig_i - removed_so_far, 1);
         removed_so_far++;
         removed_any = 1;
     }
@@ -171,6 +171,6 @@ static int dead_code_eliminate(IrOp *ops, size_t *len, int64_t **pool, size_t *p
     return removed_any;
 }
 
-void asnix_irpass_register_dce(void) {
-    asnix_irpass_register("dce", dead_code_eliminate);
+void ll_irpass_register_dce(void) {
+    ll_irpass_register("dce", dead_code_eliminate);
 }

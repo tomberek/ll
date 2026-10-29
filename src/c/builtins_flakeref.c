@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/ir.h" /* asnix_force_for_print */
+#include "ll/arena.h"
+#include "ll/ir.h" /* ll_force_for_print */
 #include "base64.h"
 #include "builtins_shared.h"
 #include "symtab.h"
@@ -24,10 +24,10 @@
  * file use plain malloc/free (freed before returning), the same pattern
  * builtins_m54.c's toXML uses for its open_memstream buffer -- final
  * results are always copied into a fresh arena-backed Value via
- * asnix_make_string_value/asnix_bshared_make_attrs before returning.
+ * ll_make_string_value/ll_bshared_make_attrs before returning.
  * --------------------------------------------------------------------- */
 
-static void fr_fatal(const char *who, const char *msg) { asnix_bshared_fatal(who, msg); }
+static void fr_fatal(const char *who, const char *msg) { ll_bshared_fatal(who, msg); }
 
 static _Noreturn void fr_fatalf(const char *who, const char *fmt, ...) {
     char buf[512];
@@ -35,13 +35,13 @@ static _Noreturn void fr_fatalf(const char *who, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    asnix_bshared_fatal(who, buf);
-    exit(1); /* unreachable -- asnix_bshared_fatal never returns */
+    ll_bshared_fatal(who, buf);
+    exit(1); /* unreachable -- ll_bshared_fatal never returns */
 }
 
 /* ---------------------------------------------------------------------
  * Tiny growable byte buffer (malloc/realloc), used to assemble output
- * strings before handing them to asnix_make_string_value.
+ * strings before handing them to ll_make_string_value.
  * --------------------------------------------------------------------- */
 typedef struct {
     char *buf;
@@ -67,7 +67,7 @@ static void sb_bytes(SB *sb, const char *s, int64_t len) {
 static void sb_cstr(SB *sb, const char *s) { sb_bytes(sb, s, (int64_t)strlen(s)); }
 static void sb_char(SB *sb, char c) { sb_bytes(sb, &c, 1); }
 static Value sb_finish(SB *sb) {
-    Value v = asnix_make_string_value(sb->buf, (size_t)sb->len);
+    Value v = ll_make_string_value(sb->buf, (size_t)sb->len);
     free(sb->buf);
     return v;
 }
@@ -184,7 +184,7 @@ static int fr_parse_uint(const char *s, int64_t len, int64_t *out) {
     for (; i < len; i++) {
         if (s[i] < '0' || s[i] > '9') return 0;
         v = v * 10 + (s[i] - '0');
-        if (v > ASNIX_INT_MAX) return 0;
+        if (v > LL_INT_MAX) return 0;
     }
     *out = v;
     return 1;
@@ -313,7 +313,7 @@ static char *fr_normalize_rev(const char *s, int64_t len, int64_t *outlen) {
     }
     if (len > 5 && memcmp(s, "sha1-", 5) == 0) {
         unsigned char raw[32];
-        int64_t n = asnix_base64_decode(s + 5, (size_t)(len - 5), raw, sizeof raw);
+        int64_t n = ll_base64_decode(s + 5, (size_t)(len - 5), raw, sizeof raw);
         if (n == 20) {
             static const char hex[] = "0123456789abcdef";
             char *out = malloc(40);
@@ -364,19 +364,19 @@ static void fr_narhash_or_dummy(const char *s, int64_t len, const char **out, in
  * otherwise (never fatal just for being absent -- callers decide
  * optional vs required). */
 static int fr_find(Value attrs, const char *name, Value *out) {
-    int64_t idx = asnix_bshared_attrs_find(attrs, asnix_intern(name, strlen(name)));
+    int64_t idx = ll_bshared_attrs_find(attrs, ll_intern(name, strlen(name)));
     if (idx < 0) return 0;
-    Value v = asnix_force_for_print(asnix_bshared_attrs_value(attrs, idx));
-    if (asnix_tag_of(v) == ASNIX_TAG_INT && asnix_int_value(v) < 0) {
+    Value v = ll_force_for_print(ll_bshared_attrs_value(attrs, idx));
+    if (ll_tag_of(v) == LL_TAG_INT && ll_int_value(v) < 0) {
         fr_fatalf("flakeRefToString", "negative value given for flake ref attr %s: %lld", name,
-                  (long long)asnix_int_value(v));
+                  (long long)ll_int_value(v));
     }
     *out = v;
     return 1;
 }
 static void fr_string_bytes(Value v, const char *name, const char **bytes, int64_t *len) {
-    if (asnix_tag_of(v) != ASNIX_TAG_PTR) fr_fatalf("flakeRefToString", "flake ref attr '%s' is not a string", name);
-    *bytes = asnix_ptr_bytes(v, len);
+    if (ll_tag_of(v) != LL_TAG_PTR) fr_fatalf("flakeRefToString", "flake ref attr '%s' is not a string", name);
+    *bytes = ll_ptr_bytes(v, len);
 }
 
 /* ===========================================================================
@@ -408,19 +408,19 @@ static int64_t fr_split_segments(const char *s, int64_t len, const char **seg, i
 static Value fr_decode_to_string(const char *s, int64_t len) {
     int64_t dlen;
     char *d = fr_pct_decode(s, len, &dlen);
-    Value v = asnix_make_string_value(d, (size_t)dlen);
+    Value v = ll_make_string_value(d, (size_t)dlen);
     free(d);
     return v;
 }
 
 static Value fr_string_attr(const char *key, const char *bytes, int64_t len) {
     (void)key;
-    return asnix_make_string_value(bytes, (size_t)len);
+    return ll_make_string_value(bytes, (size_t)len);
 }
 
 /* Small fixed-capacity attr-list builder shared by every parse_* /
  * *_to_string function below -- avoids six near-identical "collect
- * syms/vals, call asnix_bshared_make_attrs" blocks. */
+ * syms/vals, call ll_bshared_make_attrs" blocks. */
 typedef struct {
     uint32_t syms[16];
     Value vals[16];
@@ -428,11 +428,11 @@ typedef struct {
 } AttrBuilder;
 static void ab_init(AttrBuilder *ab) { ab->n = 0; }
 static void ab_put(AttrBuilder *ab, const char *name, Value v) {
-    ab->syms[ab->n] = asnix_intern(name, strlen(name));
+    ab->syms[ab->n] = ll_intern(name, strlen(name));
     ab->vals[ab->n] = v;
     ab->n++;
 }
-static Value ab_finish(AttrBuilder *ab) { return asnix_bshared_make_attrs(ab->syms, ab->vals, ab->n); }
+static Value ab_finish(AttrBuilder *ab) { return ll_bshared_make_attrs(ab->syms, ab->vals, ab->n); }
 
 /* ---- github:/gitlab: (and any other "owner/repo"-shaped forge) ------ */
 static Value fr_parse_forge(const char *type, const char *rest, int64_t restlen) {
@@ -694,8 +694,8 @@ static Value fr_parse_path(const char *rest, int64_t restlen, int is_explicit) {
     free(path_text);
     if (q_rev) ab_put(&ab, "rev", fr_string_attr("rev", q_rev->val, q_rev->vallen));
     int64_t iv;
-    if (q_revCount && fr_parse_uint(q_revCount->val, q_revCount->vallen, &iv)) ab_put(&ab, "revCount", asnix_make_int(iv));
-    if (q_lastModified && fr_parse_uint(q_lastModified->val, q_lastModified->vallen, &iv)) ab_put(&ab, "lastModified", asnix_make_int(iv));
+    if (q_revCount && fr_parse_uint(q_revCount->val, q_revCount->vallen, &iv)) ab_put(&ab, "revCount", ll_make_int(iv));
+    if (q_lastModified && fr_parse_uint(q_lastModified->val, q_lastModified->vallen, &iv)) ab_put(&ab, "lastModified", ll_make_int(iv));
     if (q_narHash) ab_put(&ab, "narHash", fr_string_attr("narHash", q_narHash->val, q_narHash->vallen));
     if (q_dir) ab_put(&ab, "dir", fr_string_attr("dir", q_dir->val, q_dir->vallen));
     return ab_finish(&ab);
@@ -910,11 +910,11 @@ static Value fr_parse_git(const char *url_body, int64_t url_body_len) {
     ab_put(&ab, "url", url_val);
     if (q_ref) ab_put(&ab, "ref", fr_string_attr("ref", q_ref->val, q_ref->vallen));
     if (q_rev) ab_put(&ab, "rev", fr_string_attr("rev", q_rev->val, q_rev->vallen));
-    if (q_shallow) ab_put(&ab, "shallow", fr_eq(q_shallow->val, q_shallow->vallen, "1") ? ASNIX_TRUE : ASNIX_FALSE);
-    if (q_submodules) ab_put(&ab, "submodules", fr_eq(q_submodules->val, q_submodules->vallen, "1") ? ASNIX_TRUE : ASNIX_FALSE);
-    if (q_lfs) ab_put(&ab, "lfs", fr_eq(q_lfs->val, q_lfs->vallen, "1") ? ASNIX_TRUE : ASNIX_FALSE);
-    if (q_exportIgnore) ab_put(&ab, "exportIgnore", fr_eq(q_exportIgnore->val, q_exportIgnore->vallen, "1") ? ASNIX_TRUE : ASNIX_FALSE);
-    if (q_allRefs) ab_put(&ab, "allRefs", fr_eq(q_allRefs->val, q_allRefs->vallen, "1") ? ASNIX_TRUE : ASNIX_FALSE);
+    if (q_shallow) ab_put(&ab, "shallow", fr_eq(q_shallow->val, q_shallow->vallen, "1") ? LL_TRUE : LL_FALSE);
+    if (q_submodules) ab_put(&ab, "submodules", fr_eq(q_submodules->val, q_submodules->vallen, "1") ? LL_TRUE : LL_FALSE);
+    if (q_lfs) ab_put(&ab, "lfs", fr_eq(q_lfs->val, q_lfs->vallen, "1") ? LL_TRUE : LL_FALSE);
+    if (q_exportIgnore) ab_put(&ab, "exportIgnore", fr_eq(q_exportIgnore->val, q_exportIgnore->vallen, "1") ? LL_TRUE : LL_FALSE);
+    if (q_allRefs) ab_put(&ab, "allRefs", fr_eq(q_allRefs->val, q_allRefs->vallen, "1") ? LL_TRUE : LL_FALSE);
     if (q_dir) ab_put(&ab, "dir", fr_string_attr("dir", q_dir->val, q_dir->vallen));
     return ab_finish(&ab);
 }
@@ -958,8 +958,8 @@ static Value fr_parse_tarball_or_file(const char *type, const char *url_body, in
     ab_put(&ab, "url", url_val);
     if (q_rev) ab_put(&ab, "rev", fr_string_attr("rev", q_rev->val, q_rev->vallen));
     int64_t iv;
-    if (q_revCount && fr_parse_uint(q_revCount->val, q_revCount->vallen, &iv)) ab_put(&ab, "revCount", asnix_make_int(iv));
-    if (q_lastModified && fr_parse_uint(q_lastModified->val, q_lastModified->vallen, &iv)) ab_put(&ab, "lastModified", asnix_make_int(iv));
+    if (q_revCount && fr_parse_uint(q_revCount->val, q_revCount->vallen, &iv)) ab_put(&ab, "revCount", ll_make_int(iv));
+    if (q_lastModified && fr_parse_uint(q_lastModified->val, q_lastModified->vallen, &iv)) ab_put(&ab, "lastModified", ll_make_int(iv));
     if (q_narHash) ab_put(&ab, "narHash", fr_string_attr("narHash", q_narHash->val, q_narHash->vallen));
     if (q_dir) ab_put(&ab, "dir", fr_string_attr("dir", q_dir->val, q_dir->vallen));
     /* `name` is recognized (so it's never misreported as an "unknown
@@ -973,9 +973,9 @@ static Value fr_parse_tarball_or_file(const char *type, const char *url_body, in
 
 static Value prim_parseFlakeRef(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "parseFlakeRef");
+    LL_REQUIRE_STRING(args[0], "parseFlakeRef");
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(args[0], &len);
+    const char *bytes = ll_ptr_bytes(args[0], &len);
 
     /* Strip a trailing fragment globally -- an EMPTY fragment ("...#")
      * is silently dropped (confirmed: "nixpkgs#", "tarball+http://.../a#"
@@ -1147,8 +1147,8 @@ static Value fr_path_to_string(Value attrs) {
         qout_add(q, &qn, "dir", b, l);
     }
     if (fr_find(attrs, "lastModified", &v)) {
-        if (asnix_tag_of(v) != ASNIX_TAG_INT) fr_fatal("flakeRefToString", "'lastModified' must be an integer");
-        qout_add_int(q, &qn, "lastModified", asnix_int_value(v));
+        if (ll_tag_of(v) != LL_TAG_INT) fr_fatal("flakeRefToString", "'lastModified' must be an integer");
+        qout_add_int(q, &qn, "lastModified", ll_int_value(v));
     }
     if (fr_find(attrs, "narHash", &v)) {
         const char *b;
@@ -1163,8 +1163,8 @@ static Value fr_path_to_string(Value attrs) {
         qout_add(q, &qn, "rev", b, l);
     }
     if (fr_find(attrs, "revCount", &v)) {
-        if (asnix_tag_of(v) != ASNIX_TAG_INT) fr_fatal("flakeRefToString", "'revCount' must be an integer");
-        qout_add_int(q, &qn, "revCount", asnix_int_value(v));
+        if (ll_tag_of(v) != LL_TAG_INT) fr_fatal("flakeRefToString", "'revCount' must be an integer");
+        qout_add_int(q, &qn, "revCount", ll_int_value(v));
     }
     sb_append_query(&sb, q, qn);
     return sb_finish(&sb);
@@ -1218,7 +1218,7 @@ static Value fr_git_to_string(Value attrs) {
     static const char *const bool_keys[] = { "shallow", "submodules", "lfs", "exportIgnore" };
     for (int bi = 0; bi < 4; bi++) {
         if (fr_find(attrs, bool_keys[bi], &v)) {
-            if (asnix_tag_of(v) == ASNIX_TAG_IMM && asnix_imm_subtag(v) == ASNIX_IMM_TRUE) qout_add_if_absent(q, &qn, bool_keys[bi], "1", 1);
+            if (ll_tag_of(v) == LL_TAG_IMM && ll_imm_subtag(v) == LL_IMM_TRUE) qout_add_if_absent(q, &qn, bool_keys[bi], "1", 1);
         }
     }
     if (fr_find(attrs, "dir", &v)) {
@@ -1326,8 +1326,8 @@ static Value fr_file_to_string(Value attrs) {
 
 static Value prim_flakeRefToString(const Value *args, int64_t argc) {
     (void)argc;
-    Value attrs = asnix_force_for_print(args[0]);
-    ASNIX_REQUIRE_ATTRS(attrs, "flakeRefToString");
+    Value attrs = ll_force_for_print(args[0]);
+    LL_REQUIRE_ATTRS(attrs, "flakeRefToString");
     Value type_v;
     if (!fr_find(attrs, "type", &type_v)) fr_fatal("flakeRefToString", "flake reference has no 'type' attribute");
     const char *tb;
@@ -1348,11 +1348,11 @@ static Value prim_flakeRefToString(const Value *args, int64_t argc) {
     fr_fatalf("flakeRefToString", "unsupported flake ref type '%.*s'", (int)tl, tb);
 }
 
-static Value build_parseFlakeRef(void) { return asnix_bshared_make_primop((void *)prim_parseFlakeRef, 1); }
-static Value build_flakeRefToString(void) { return asnix_bshared_make_primop((void *)prim_flakeRefToString, 1); }
+static Value build_parseFlakeRef(void) { return ll_bshared_make_primop((void *)prim_parseFlakeRef, 1); }
+static Value build_flakeRefToString(void) { return ll_bshared_make_primop((void *)prim_flakeRefToString, 1); }
 
-const AsnixBuiltinFlakerefDef ASNIX_FLAKEREF_BUILTINS[] = {
+const LlBuiltinFlakerefDef LL_FLAKEREF_BUILTINS[] = {
     { "parseFlakeRef", build_parseFlakeRef },
     { "flakeRefToString", build_flakeRefToString },
 };
-const size_t ASNIX_FLAKEREF_BUILTINS_COUNT = sizeof(ASNIX_FLAKEREF_BUILTINS) / sizeof(ASNIX_FLAKEREF_BUILTINS[0]);
+const size_t LL_FLAKEREF_BUILTINS_COUNT = sizeof(LL_FLAKEREF_BUILTINS) / sizeof(LL_FLAKEREF_BUILTINS[0]);

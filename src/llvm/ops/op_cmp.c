@@ -5,7 +5,7 @@
 
 LL_OP_ATTR Value ll_op_eq(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
-    int eq = asnix_bshared_value_eq_op(lhs, rhs);
+    int eq = ll_bshared_value_eq_op(lhs, rhs);
     vs--;
     vs[-1] = eq ? ll_true() : ll_false();
     LL_NEXT(ip, env, vs, pool, rs);
@@ -13,7 +13,7 @@ LL_OP_ATTR Value ll_op_eq(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
 
 LL_OP_ATTR Value ll_op_neq(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
-    int eq = asnix_bshared_value_eq_op(lhs, rhs);
+    int eq = ll_bshared_value_eq_op(lhs, rhs);
     vs--;
     vs[-1] = eq ? ll_false() : ll_true();
     LL_NEXT(ip, env, vs, pool, rs);
@@ -22,12 +22,12 @@ LL_OP_ATTR Value ll_op_neq(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
 LL_OP_ATTR Value ll_op_lt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         result = (l < r) ? ll_true() : ll_false();
     } else {
-        result = asnix_cmp_lt_values(lhs, rhs);
+        result = ll_cmp_lt_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -37,12 +37,12 @@ LL_OP_ATTR Value ll_op_lt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
 LL_OP_ATTR Value ll_op_gt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         result = (l > r) ? ll_true() : ll_false();
     } else {
-        result = asnix_cmp_gt_values(lhs, rhs);
+        result = ll_cmp_gt_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -52,12 +52,12 @@ LL_OP_ATTR Value ll_op_gt(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
 LL_OP_ATTR Value ll_op_le(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         result = (l <= r) ? ll_true() : ll_false();
     } else {
-        result = asnix_cmp_le_values(lhs, rhs);
+        result = ll_cmp_le_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -67,12 +67,12 @@ LL_OP_ATTR Value ll_op_le(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
 LL_OP_ATTR Value ll_op_ge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         result = (l >= r) ? ll_true() : ll_false();
     } else {
-        result = asnix_cmp_ge_values(lhs, rhs);
+        result = ll_cmp_ge_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -81,12 +81,12 @@ LL_OP_ATTR Value ll_op_ge(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame
 
 LL_OP_ATTR Value ll_op_not(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value v = vs[-1];
-    if ((v.raw & ASNIX_TAG_MASK) != ASNIX_TAG_IMM) goto type_error;
+    if ((v.raw & LL_TAG_MASK) != LL_TAG_IMM) goto type_error;
     {
-        uint64_t sub = v.raw >> ASNIX_TAG_BITS;
-        if (sub == ASNIX_IMM_TRUE) {
+        uint64_t sub = v.raw >> LL_TAG_BITS;
+        if (sub == LL_IMM_TRUE) {
             vs[-1] = ll_false();
-        } else if (sub == ASNIX_IMM_FALSE) {
+        } else if (sub == LL_IMM_FALSE) {
             vs[-1] = ll_true();
         } else {
             goto type_error;
@@ -95,7 +95,7 @@ LL_OP_ATTR Value ll_op_not(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
     LL_NEXT(ip, env, vs, pool, rs);
 type_error:
     {
-        static const char msg[] = "asnix: '!' operand is not a boolean, aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+        static const char msg[] = "ll: '!' operand is not a boolean, aborting\n";
+        ll_fatal(msg, sizeof(msg) - 1);
     }
 }

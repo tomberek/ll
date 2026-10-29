@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_LIST2_H
-#define ASNIX_BUILTINS_LIST2_H
+#ifndef LL_BUILTINS_LIST2_H
+#define LL_BUILTINS_LIST2_H
 
 #include <stddef.h>
 
-#include "builtins_misc.h" /* shared AsnixBuiltinMiscDef/-Builder {name, build()} shape */
+#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
 
 /*
  * Second round of list builtins, added alongside genericClosure
@@ -20,10 +20,10 @@
  * mechanism every entry's `build()` uses.
  */
 
-extern const AsnixBuiltinMiscDef ASNIX_LIST2_BUILTINS[];
-extern const size_t ASNIX_LIST2_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_LIST2_BUILTINS[];
+extern const size_t LL_LIST2_BUILTINS_COUNT;
 
-#include "asnix/value.h" /* Value */
+#include "ll/value.h" /* Value */
 #include <stdint.h>       /* int64_t */
 
 /* M110: exported so compiler.c's try_fused_native_call2 can fuse a
@@ -32,8 +32,8 @@ extern const size_t ASNIX_LIST2_BUILTINS_COUNT;
  * hops -- see compiler.c's own comment for the recognition + safety
  * conditions. `elem`'s is NOFORCE (see its own comment above); `any`/
  * `all` are ordinary force-by-default natives. */
-Value asnix_prim_elem2_impl(const Value *args, int64_t argc);
-Value asnix_prim_any2_impl(const Value *args, int64_t argc);
-Value asnix_prim_all2_impl(const Value *args, int64_t argc);
+Value ll_prim_elem2_impl(const Value *args, int64_t argc);
+Value ll_prim_any2_impl(const Value *args, int64_t argc);
+Value ll_prim_all2_impl(const Value *args, int64_t argc);
 
-#endif /* ASNIX_BUILTINS_LIST2_H */
+#endif /* LL_BUILTINS_LIST2_H */

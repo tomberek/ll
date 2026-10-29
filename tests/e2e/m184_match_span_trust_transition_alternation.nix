@@ -5,7 +5,7 @@
 # it's the sharpest available probe of "does the custom engine's own
 # existence verdict, once trusted and used WITHOUT regexec() at all,
 # still agree with real Nix" -- 12 subjects, more than
-# ASNIX_REGEX_SPAN_VERIFY_CALLS (8), so this exercises calls both
+# LL_REGEX_SPAN_VERIFY_CALLS (8), so this exercises calls both
 # during the verification window (glibc-driven, as before) AND after
 # the trust flip (custom-engine-driven, the new M184 fast path), with
 # the LAST three subjects repeating the FIRST three to directly confirm

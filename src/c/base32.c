@@ -12,14 +12,14 @@ static int base32_char_value(char c) {
     return -1;
 }
 
-size_t asnix_base32_encoded_length(size_t n) {
+size_t ll_base32_encoded_length(size_t n) {
     if (n == 0) return 0;
     return (n * 8 - 1) / 5 + 1;
 }
 
-void asnix_base32_encode(const uint8_t *data, size_t len, char *out) {
+void ll_base32_encode(const uint8_t *data, size_t len, char *out) {
     if (len == 0) return;
-    size_t enc_len = asnix_base32_encoded_length(len);
+    size_t enc_len = ll_base32_encoded_length(len);
     for (size_t idx = 0; idx < enc_len; idx++) {
         size_t n = enc_len - 1 - idx;
         unsigned int b = (unsigned int)(n * 5);
@@ -33,7 +33,7 @@ void asnix_base32_encode(const uint8_t *data, size_t len, char *out) {
     }
 }
 
-int asnix_base32_decode(const char *s, size_t len, uint8_t *out, size_t out_len) {
+int ll_base32_decode(const char *s, size_t len, uint8_t *out, size_t out_len) {
     memset(out, 0, out_len);
     for (size_t n = 0; n < len; n++) {
         char c = s[len - n - 1];

@@ -16,10 +16,10 @@
 
 LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
-    Value raw = ll_env_lookup(env, depth, slot);
+    Value raw = ll_env_lookup_fast(env, depth, slot);
     raw = ll_resolve_indirection(raw);
 
-    if ((raw.raw & ASNIX_TAG_MASK) != ASNIX_TAG_THUNK) {
+    if ((raw.raw & LL_TAG_MASK) != LL_TAG_THUNK) {
         ll_check_valstack(vs);
         vs[0] = raw;
         vs++;
@@ -28,9 +28,9 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
 
     Thunk *t = (Thunk *)ll_untag(raw);
     int64_t state_word = t->state;
-    int64_t state_tag = state_word & ASNIX_TAG_MASK;
+    int64_t state_tag = state_word & LL_TAG_MASK;
 
-    if (state_tag == ASNIX_THUNK_STATE_FORCED) {
+    if (state_tag == LL_THUNK_STATE_FORCED) {
         Value cached;
         cached.raw = t->env;
         ll_check_valstack(vs);
@@ -38,26 +38,26 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
         vs++;
         LL_NEXT(ip, env, vs, pool, rs);
     }
-    if (state_tag == ASNIX_THUNK_STATE_IN_PROGRESS) {
-        static const char msg[] = "asnix: infinite recursion forcing a thunk (blackhole), aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+    if (state_tag == LL_THUNK_STATE_IN_PROGRESS) {
+        static const char msg[] = "ll: infinite recursion forcing a thunk (blackhole), aborting\n";
+        ll_fatal(msg, sizeof(msg) - 1);
     }
-    if (state_tag == ASNIX_THUNK_STATE_FAILED) {
+    if (state_tag == LL_THUNK_STATE_FAILED) {
         /* M82: matches op_var_ref.S's own .Lvar_ref_reraise -- route
-         * through asnix_tryeval_raise_or_fatal (tryeval.c), not
-         * asnix_fatal directly, so re-forcing a thunk whose first
+         * through ll_tryeval_raise_or_fatal (tryeval.c), not
+         * ll_fatal directly, so re-forcing a thunk whose first
          * evaluation failed inside an active builtins.tryEval
          * re-raises (catchable again) instead of unconditionally
          * aborting the whole process. Falls back to exactly
-         * asnix_fatal's own write+exit(1) behavior when no tryEval is
+         * ll_fatal's own write+exit(1) behavior when no tryEval is
          * active. */
-        static const char msg[] = "asnix: re-evaluation of a thunk whose first evaluation failed, aborting\n";
-        asnix_tryeval_raise_or_fatal(msg, sizeof(msg) - 1); /* _Noreturn */
+        static const char msg[] = "ll: re-evaluation of a thunk whose first evaluation failed, aborting\n";
+        ll_tryeval_raise_or_fatal(msg, sizeof(msg) - 1); /* _Noreturn */
     }
 
     /* UNFORCED: state_word IS the clean IrProgram* (low tag bits 0). */
     IrProgram *body_prog = (IrProgram *)(uintptr_t)state_word;
-    t->state = ASNIX_THUNK_STATE_IN_PROGRESS;
+    t->state = LL_THUNK_STATE_IN_PROGRESS;
 
     ll_check_retsp(rs);
     rs[0].ip = ip + 1;
@@ -67,8 +67,8 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
     rs++;
 
     Env *thunk_env = (Env *)(uintptr_t)t->env;
-    t->env = (uint64_t)(uintptr_t)asnix_inprogress_head;
-    asnix_inprogress_head = t;
+    t->env = (uint64_t)(uintptr_t)ll_inprogress_head;
+    ll_inprogress_head = t;
 
     env = thunk_env;
     pool = body_prog->pool;
@@ -78,12 +78,12 @@ LL_OP_ATTR Value ll_op_var_ref(IrOp *ip, Env *env, Value *vs, int64_t *pool, Ret
 
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_var_ref_raw.S --
  * pushes the slot's raw content verbatim, with NO forcing at all (not
- * even thunk-forcing) -- needed by asnix_bshared_make_curried_native_noforce
+ * even thunk-forcing) -- needed by ll_bshared_make_curried_native_noforce
  * (builtins_shared.c), which root_env.c's merged builtins attrset
  * reaches during construction even for a trivial top-level eval. */
 LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t depth = ip->a, slot = ip->b;
-    Value raw = ll_env_lookup(env, depth, slot);
+    Value raw = ll_env_lookup_fast(env, depth, slot);
     ll_check_valstack(vs);
     vs[0] = raw;
     vs++;
@@ -94,10 +94,10 @@ LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool,
  * pushes a Cell wrapping a pointer straight at the target Env slot
  * (not its value), emitted only by compiler.c's try_cell_ref for a
  * bare-variable sub-expression about to be thunked -- see heap.h's
- * ASNIX_CELL_MARKER comment. Same depth-walk env.h's own
- * asnix_env_lookup does internally, replicated here because this op
+ * LL_CELL_MARKER comment. Same depth-walk env.h's own
+ * ll_env_lookup does internally, replicated here because this op
  * needs the slot's ADDRESS, not its dereferenced value; env.h's own
- * asnix_env_arena_base/ASNIX_ENV_WITH_TAG are both already vendored
+ * ll_env_arena_base/LL_ENV_WITH_TAG are both already vendored
  * and declared for exactly this kind of walk.
  *
  * M-skip-cell: a Cell is only ever needed to defer the READ itself, for
@@ -114,7 +114,7 @@ LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool,
  * conformance's eval-okay-eq-slot-elem.nix/-identity.nix regressed,
  * caught by the full test gate): `==` has NO structural equality for
  * functions (always false) UNLESS a slot-IDENTITY shortcut fires first
- * (asnix_bshared_slot_identical, builtins_shared.c) -- and a Cell is
+ * (ll_bshared_slot_identical, builtins_shared.c) -- and a Cell is
  * the ONLY thing that shortcut currently recognizes as "this is
  * deliberately aliasing a shared slot," not "two independently-forced
  * values that happen to read the same bits." Confirmed against real
@@ -125,7 +125,7 @@ LL_OP_ATTR Value ll_op_var_ref_raw(IrOp *ip, Env *env, Value *vs, int64_t *pool,
  * same slot). Skipping the Cell for an already-populated FUNCTION-typed
  * slot (Closure/PrimOp) would make a list/attrs element behave like a
  * direct operand instead -- collapsing exactly the distinction real Nix
- * (and asnix_bshared_slot_identical) relies on. Every OTHER already-
+ * (and ll_bshared_slot_identical) relies on. Every OTHER already-
  * populated kind is safe to fast-path: an unforced Thunk pointer is
  * already compared by raw pointer identity (that function's own second
  * branch), and anything else (Attrs/List/String/Path/int/bool) has REAL
@@ -135,13 +135,13 @@ LL_OP_ATTR Value ll_op_var_ref_cell(IrOp *ip, Env *env, Value *vs, int64_t *pool
     int64_t depth = ip->a, slot = ip->b;
     Env *e = env;
     for (int64_t d = 0; d < depth; d++) {
-        uintptr_t up = e->up & ~(uintptr_t)ASNIX_ENV_WITH_TAG;
-        e = (Env *)((uint8_t *)asnix_env_arena_base + up);
+        uintptr_t up = e->up & ~(uintptr_t)LL_ENV_WITH_TAG;
+        e = (Env *)((uint8_t *)ll_env_arena_base + up);
     }
     Value current = e->values[slot];
-    int64_t tag = current.raw & ASNIX_TAG_MASK;
-    int fast_path_ok = current.raw != 0 && tag != ASNIX_TAG_CLOSURE && tag != ASNIX_TAG_PRIMOP;
-    Value result = fast_path_ok ? current : asnix_make_cell_value(&e->values[slot]);
+    int64_t tag = current.raw & LL_TAG_MASK;
+    int fast_path_ok = current.raw != 0 && tag != LL_TAG_CLOSURE && tag != LL_TAG_PRIMOP;
+    Value result = fast_path_ok ? current : ll_make_cell_value(&e->values[slot]);
     ll_check_valstack(vs);
     vs[0] = result;
     vs++;

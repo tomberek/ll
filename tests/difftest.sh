@@ -26,7 +26,18 @@ check() {
     got_asnix=$("$ASNIX_BIN" "$f" 2>&1)
     rm -f "$f"
 
-    if [ "$got_ll" = "$got_asnix" ]; then
+    # Strip each binary's own "ll: "/"asnix: " fatal-message prefix, and
+    # normalize the one message that also names itself mid-sentence
+    # ("...out of ll's/asnix's representable range..."), before comparing
+    # -- this project's standing convention (see the test-nix-conformance
+    # target's own comment) is matching an error's CLASS, not its exact
+    # wording, and these self-references differ by design (each binary
+    # legitimately names itself, not the other).
+    local norm_ll="${got_ll#ll: }" norm_asnix="${got_asnix#asnix: }"
+    norm_ll="${norm_ll//ll\'s/X\'s}"
+    norm_asnix="${norm_asnix//asnix\'s/X\'s}"
+
+    if [ "$norm_ll" = "$norm_asnix" ]; then
         echo "OK   $expr"
     else
         echo "FAIL $expr -- ll='$got_ll' asnix='$got_asnix'"
@@ -87,24 +98,24 @@ check 'let fib = n: if n < 2 then n else fib (n - 1) + fib (n - 2); in fib 10'
 # M5: real PrimOps, reachable via root_env.c's lightweight root Env
 # (builtins/map/import/etc. bound, WITHOUT the real `derivation`
 # builtin's self-bootstrap -- see root_env.c's header comment). Wrapped
-# in `if` since the CLI's printer is still int-only (asnix_int_value) --
+# in `if` since the CLI's printer is still int-only (ll_int_value) --
 # printing a bare boolean/PrimOp/attrset result isn't supported yet.
 check 'if isNull null then 1 else 0'
 check 'if isNull 5 then 1 else 0'
 check '(f: f 10) (a: a + 5)'
 
 # M6 (first slice): strings-as-opaque-constants (OP_PUSH_CONST), lists
-# (OP_MK_LIST/asnix_bshared_make_list), attrsets (OP_MK_ATTRS/
-# asnix_bshared_make_attrs), and OP_SELECT (asnix_bshared_attrs_probe +
-# force). Also fixed a real bug this surfaced: asnix_apply's PrimOp path
+# (OP_MK_LIST/ll_bshared_make_list), attrsets (OP_MK_ATTRS/
+# ll_bshared_make_attrs), and OP_SELECT (ll_bshared_attrs_probe +
+# force). Also fixed a real bug this surfaced: ll_apply's PrimOp path
 # wasn't forcing thunked arguments before calling the native fn (asm's
 # own M25 comment explains why that's the CALLER's job, not the primop's).
 #
 # Known gap, not yet fixed: arity>=2 vendored builtins (add, elemAt, ...)
-# are curried via asnix_bshared_make_curried_native, which builds a REAL
+# are curried via ll_bshared_make_curried_native, which builds a REAL
 # asnix Closure (storing an IrProgram*) -- colliding with this backend's
 # own LLClosure layout (storing a native fn pointer) at the same
-# ASNIX_TAG_CLOSURE tag. Arity-1 builtins (isNull, length) and
+# LL_TAG_CLOSURE tag. Arity-1 builtins (isNull, length) and
 # user-defined multi-param lambdas (which desugar to nested OP_LAMBDAs,
 # both ends using LLClosure) are unaffected -- only calling a curried
 # multi-arg vendored builtin crashes. Needs unifying the two closure

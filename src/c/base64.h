@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BASE64_H
-#define ASNIX_BASE64_H
+#ifndef LL_BASE64_H
+#define LL_BASE64_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -17,11 +17,11 @@
 
 /* Number of base64 characters (including '=' padding) needed to encode `n`
  * raw bytes. */
-size_t asnix_base64_encoded_length(size_t n);
+size_t ll_base64_encoded_length(size_t n);
 
-/* Writes exactly asnix_base64_encoded_length(len) characters to `out`
+/* Writes exactly ll_base64_encoded_length(len) characters to `out`
  * (NOT null-terminated), '='-padded to a multiple of 4. */
-void asnix_base64_encode(const uint8_t *data, size_t len, char *out);
+void ll_base64_encode(const uint8_t *data, size_t len, char *out);
 
 /* Decodes `len` base64 characters from `s` into `out` (caller-sized,
  * capacity `out_cap`), stopping at the first '=' padding character (or the
@@ -29,6 +29,6 @@ void asnix_base64_encode(const uint8_t *data, size_t len, char *out);
  * as real Nix's own decoder. Returns the number of raw bytes written, or
  * -1 if `s` contains a character outside the base64 alphabet (and not '='
  * or '\n') or the decoded output would exceed `out_cap`. */
-int64_t asnix_base64_decode(const char *s, size_t len, uint8_t *out, size_t out_cap);
+int64_t ll_base64_decode(const char *s, size_t len, uint8_t *out, size_t out_cap);
 
-#endif /* ASNIX_BASE64_H */
+#endif /* LL_BASE64_H */

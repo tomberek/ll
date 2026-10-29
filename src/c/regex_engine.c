@@ -70,12 +70,12 @@
  * "stop at first success" is what makes alternation/quantifier choice
  * ORDERED instead of exhaustive. The one place this file deliberately
  * does NOT stop at first success is top-level search mode (`anchored ==
- * 0`, used only for `asnix_regex_search`'s from-scratch length-finding
+ * 0`, used only for `ll_regex_search`'s from-scratch length-finding
  * pass): there, the terminal continuation always reports failure (to
  * force every reachable leaf to be visited) while recording the
  * longest position actually reached, which is how leftmost-longest
  * whole-match-finding is reproduced without glibc's help for the
- * handful of patterns that need that (see `asnix_regex_needs_custom_engine`).
+ * handful of patterns that need that (see `ll_regex_needs_custom_engine`).
  *
  * Builtins_regex.c decides, per call, whether any of this is needed at
  * all: a pattern with zero capture groups and none of the above
@@ -117,7 +117,7 @@ struct RNode {
     int rep_min, rep_max;  /* RN_REP: max == -1 means unbounded */
 };
 
-struct AsnixCustomRegex {
+struct LlCustomRegex {
     RNode *root;
     int64_t nsub;
 };
@@ -496,21 +496,21 @@ static RNode *parse_alt(Parser *ps) {
     return alt;
 }
 
-AsnixCustomRegex *asnix_regex_compile(const char *pattern, int64_t len, int64_t *nsub_out) {
+LlCustomRegex *ll_regex_compile(const char *pattern, int64_t len, int64_t *nsub_out) {
     Parser ps = { pattern, 0, len, 1, 0 };
     RNode *root = parse_alt(&ps);
     if (!root || ps.error || ps.pos != ps.len) {
         free_node(root);
         return NULL;
     }
-    AsnixCustomRegex *re = malloc(sizeof *re);
+    LlCustomRegex *re = malloc(sizeof *re);
     re->root = root;
     re->nsub = ps.next_group - 1;
     if (nsub_out) *nsub_out = re->nsub;
     return re;
 }
 
-void asnix_regex_free(AsnixCustomRegex *re) {
+void ll_regex_free(LlCustomRegex *re) {
     if (!re) return;
     free_node(re->root);
     free(re);
@@ -538,7 +538,7 @@ typedef struct {
     const char *subject;
     int64_t slen;
     int notbol;
-    AsnixRegexGroup *groups; /* NULL if the caller doesn't want captures tracked */
+    LlRegexGroup *groups; /* NULL if the caller doesn't want captures tracked */
     int64_t nsub;            /* number of entries in `groups` (0 if groups == NULL) */
     int anchored;            /* 1: match() mode, fixed required_end. 0: search mode (no fixed length). */
     int64_t required_end;    /* anchored mode only */
@@ -613,7 +613,7 @@ static int run_cont(const Cont *k, int64_t pos, MCtx *ctx) {
         case K_CLOSEGROUP: {
             if (!ctx->groups) return run_cont(k->next, pos, ctx);
             int idx = k->u.closegroup.idx;
-            AsnixRegexGroup save = ctx->groups[idx - 1];
+            LlRegexGroup save = ctx->groups[idx - 1];
             ctx->groups[idx - 1].so = k->u.closegroup.start;
             ctx->groups[idx - 1].eo = pos;
             int r = run_cont(k->next, pos, ctx);
@@ -699,7 +699,7 @@ static int m(const RNode *n, int64_t pos, const Cont *k, MCtx *ctx) {
              * (cheap -- bounded by this pattern's own alternation count,
              * not by input length). */
             {
-                AsnixRegexGroup *saved = NULL;
+                LlRegexGroup *saved = NULL;
                 if (ctx->groups && ctx->nsub > 0) {
                     saved = malloc((size_t)ctx->nsub * sizeof *saved);
                     memcpy(saved, ctx->groups, (size_t)ctx->nsub * sizeof *saved);
@@ -772,8 +772,8 @@ static int match_rep(const RNode *rep, int64_t pos, const Cont *k, MCtx *ctx, in
     return run_cont(k, pos, ctx);
 }
 
-int asnix_regex_match_anchored(const AsnixCustomRegex *re, const char *subject, int64_t slen,
-                                int64_t start, int64_t end, int notbol, AsnixRegexGroup *groups_out) {
+int ll_regex_match_anchored(const LlCustomRegex *re, const char *subject, int64_t slen,
+                                int64_t start, int64_t end, int notbol, LlRegexGroup *groups_out) {
     MCtx ctx;
     ctx.subject = subject;
     ctx.slen = slen;
@@ -793,11 +793,11 @@ int asnix_regex_match_anchored(const AsnixCustomRegex *re, const char *subject, 
  * all tiny -- while still bounding the genuinely-exponential case
  * (repeated ambiguous alternation over a long run) to a few hundred
  * thousand node visits total instead of letting it run unbounded. */
-#define ASNIX_REGEX_SEARCH_BUDGET 300000
+#define LL_REGEX_SEARCH_BUDGET 300000
 
-int asnix_regex_search(const AsnixCustomRegex *re, const char *subject, int64_t slen,
+int ll_regex_search(const LlCustomRegex *re, const char *subject, int64_t slen,
                         int64_t from_pos, int notbol, int64_t *out_start, int64_t *out_end,
-                        AsnixRegexGroup *groups_out) {
+                        LlRegexGroup *groups_out) {
     for (int64_t start = from_pos; start <= slen; start++) {
         MCtx ctx;
         ctx.subject = subject;
@@ -808,13 +808,13 @@ int asnix_regex_search(const AsnixCustomRegex *re, const char *subject, int64_t 
         ctx.anchored = 0;
         ctx.found = 0;
         ctx.best_end = -1;
-        int64_t budget = ASNIX_REGEX_SEARCH_BUDGET;
+        int64_t budget = LL_REGEX_SEARCH_BUDGET;
         ctx.budget = &budget;
         m(re->root, start, NULL, &ctx);
         if (ctx.found) {
             *out_start = start;
             *out_end = ctx.best_end;
-            if (groups_out && re->nsub > 0) asnix_regex_match_anchored(re, subject, slen, start, ctx.best_end, notbol, groups_out);
+            if (groups_out && re->nsub > 0) ll_regex_match_anchored(re, subject, slen, start, ctx.best_end, notbol, groups_out);
             return 1;
         }
     }
@@ -822,13 +822,13 @@ int asnix_regex_search(const AsnixCustomRegex *re, const char *subject, int64_t 
 }
 
 /* ---------------------------------------------------------------------
- * `asnix_regex_needs_custom_engine` -- see the header's doc comment.
+ * `ll_regex_needs_custom_engine` -- see the header's doc comment.
  * Bracket-expression-aware in the same style as
  * builtins_regex.c's pattern_rejected_by_real_nix (walks the pattern
  * tracking in_bracket/bracket_first state so a literal '[' that's just
  * an ordinary bracket member, e.g. "[[a]", doesn't misfire).
  * --------------------------------------------------------------------- */
-int asnix_regex_needs_custom_engine(const char *p, int64_t len) {
+int ll_regex_needs_custom_engine(const char *p, int64_t len) {
     static const char *std12[] = { "alpha", "digit", "alnum", "upper", "lower", "space",
                                     "blank", "cntrl", "punct", "print", "graph", "xdigit" };
     int in_bracket = 0, bracket_first = 0;

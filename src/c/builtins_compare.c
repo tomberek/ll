@@ -14,10 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/heap.h"
-#include "asnix/ir.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
 #include "builtins_shared.h"
-#include "nar.h" /* asnix_copy_path_to_store -- see json_encode's Path case below */
+#include "nar.h" /* ll_copy_path_to_store -- see json_encode's Path case below */
 #include "string_context.h" /* M80: replaceStrings' context propagation */
 #include "symtab.h"
 #include "value_util.h"
@@ -25,15 +25,15 @@
 /* ---------------------------------------------------------------------
  * lessThan e1 e2 -- verified: `builtins.lessThan "a" "b"` == true,
  * `builtins.lessThan 1 2` == true, `builtins.lessThan "b" "a"` == false.
- * See builtins_shared.h's asnix_bshared_value_lt for the documented
+ * See builtins_shared.h's ll_bshared_value_lt for the documented
  * int/string-only scope cut vs. real Nix's lessThan (which also orders
  * paths and lists).
  * --------------------------------------------------------------------- */
 static Value lessThan2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_bshared_value_lt(args[0], args[1], "lessThan") ? ASNIX_TRUE : ASNIX_FALSE;
+    return ll_bshared_value_lt(args[0], args[1], "lessThan") ? LL_TRUE : LL_FALSE;
 }
-static Value build_lessThan(void) { return asnix_bshared_make_curried_native((void *)lessThan2_impl, 2); }
+static Value build_lessThan(void) { return ll_bshared_make_curried_native((void *)lessThan2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * splitVersion / compareVersions -- ported directly from
@@ -157,7 +157,7 @@ static Value prim_splitVersion(const Value *args, int64_t argc) {
     (void)argc;
     int64_t slen;
     const char *sbytes;
-    asnix_bshared_string_bytes(args[0], &sbytes, &slen, "splitVersion");
+    ll_bshared_string_bytes(args[0], &sbytes, &slen, "splitVersion");
 
     Value *out = NULL;
     int64_t cap = 0, n = 0, pos = 0;
@@ -170,23 +170,23 @@ static Value prim_splitVersion(const Value *args, int64_t argc) {
             cap = cap ? cap * 2 : 8;
             out = realloc(out, (size_t)cap * sizeof(Value));
         }
-        out[n++] = asnix_make_string_value(cp, (size_t)cl);
+        out[n++] = ll_make_string_value(cp, (size_t)cl);
     }
-    Value result = asnix_bshared_make_list(out, n);
+    Value result = ll_bshared_make_list(out, n);
     free(out);
     return result;
 }
-static Value build_splitVersion(void) { return asnix_bshared_make_primop((void *)prim_splitVersion, 1); }
+static Value build_splitVersion(void) { return ll_bshared_make_primop((void *)prim_splitVersion, 1); }
 
 static Value compareVersions2_impl(const Value *args, int64_t argc) {
     (void)argc;
     int64_t l1, l2;
     const char *b1, *b2;
-    asnix_bshared_string_bytes(args[0], &b1, &l1, "compareVersions");
-    asnix_bshared_string_bytes(args[1], &b2, &l2, "compareVersions");
-    return asnix_make_int(compare_versions(b1, l1, b2, l2));
+    ll_bshared_string_bytes(args[0], &b1, &l1, "compareVersions");
+    ll_bshared_string_bytes(args[1], &b2, &l2, "compareVersions");
+    return ll_make_int(compare_versions(b1, l1, b2, l2));
 }
-static Value build_compareVersions(void) { return asnix_bshared_make_curried_native((void *)compareVersions2_impl, 2); }
+static Value build_compareVersions(void) { return ll_bshared_make_curried_native((void *)compareVersions2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * replaceStrings from to s -- ported directly from
@@ -212,13 +212,13 @@ static Value build_compareVersions(void) { return asnix_bshared_make_curried_nat
 static Value replaceStrings3_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value from_list = args[0], to_list = args[1], s_v = args[2];
-    ASNIX_REQUIRE_LIST(from_list, "replaceStrings");
-    ASNIX_REQUIRE_LIST(to_list, "replaceStrings");
-    int64_t nfrom = asnix_bshared_list_count(from_list);
-    int64_t nto = asnix_bshared_list_count(to_list);
-    if (nfrom != nto) asnix_bshared_fatal("replaceStrings", "'from' and 'to' lists have different lengths");
-    const Value *from_elems = asnix_bshared_list_elems(from_list);
-    const Value *to_elems = asnix_bshared_list_elems(to_list);
+    LL_REQUIRE_LIST(from_list, "replaceStrings");
+    LL_REQUIRE_LIST(to_list, "replaceStrings");
+    int64_t nfrom = ll_bshared_list_count(from_list);
+    int64_t nto = ll_bshared_list_count(to_list);
+    if (nfrom != nto) ll_bshared_fatal("replaceStrings", "'from' and 'to' lists have different lengths");
+    const Value *from_elems = ll_bshared_list_elems(from_list);
+    const Value *to_elems = ll_bshared_list_elems(to_list);
 
     const char **from_bytes = nfrom > 0 ? malloc((size_t)nfrom * sizeof(char *)) : NULL;
     int64_t *from_lens = nfrom > 0 ? malloc((size_t)nfrom * sizeof(int64_t)) : NULL;
@@ -229,7 +229,7 @@ static Value replaceStrings3_impl(const Value *args, int64_t argc) {
          * on read. Found via real nixpkgs: `replaceStrings [...] (map f
          * someList) s`-shaped calls crashed with "expected a string
          * argument" on an unforced Thunk. */
-        asnix_bshared_string_bytes(asnix_force_for_print(from_elems[i]), &from_bytes[i], &from_lens[i], "replaceStrings");
+        ll_bshared_string_bytes(ll_force_for_print(from_elems[i]), &from_bytes[i], &from_lens[i], "replaceStrings");
     }
     /* M53: `to_elems[i]` is deliberately NOT forced here, unlike
      * `from_elems[i]` just above -- every `from` entry must be read
@@ -246,15 +246,15 @@ static Value replaceStrings3_impl(const Value *args, int64_t argc) {
 
     int64_t slen;
     const char *sbytes;
-    asnix_bshared_string_bytes(s_v, &sbytes, &slen, "replaceStrings");
+    ll_bshared_string_bytes(s_v, &sbytes, &slen, "replaceStrings");
 
     /* M80: real Nix's own `prim_replaceStrings` unions `s`'s context with
      * the context of every DISTINCT `to[i]` actually spliced in at least
      * once (never an index that's never matched) -- ported verbatim,
      * see this function's own header comment's "replaceInto" case. */
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    asnix_ctx_union_into(&ctx, asnix_string_context_of(s_v));
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    ll_ctx_union_into(&ctx, ll_string_context_of(s_v));
 
     size_t cap = (size_t)slen + 16, outlen = 0;
     char *out = malloc(cap);
@@ -271,9 +271,9 @@ static Value replaceStrings3_impl(const Value *args, int64_t argc) {
         if (found >= 0) {
             const char *tb;
             int64_t tl;
-            Value to_forced = asnix_force_for_print(to_elems[found]);
-            asnix_bshared_string_bytes(to_forced, &tb, &tl, "replaceStrings");
-            asnix_ctx_union_into(&ctx, asnix_string_context_of(to_forced));
+            Value to_forced = ll_force_for_print(to_elems[found]);
+            ll_bshared_string_bytes(to_forced, &tb, &tl, "replaceStrings");
+            ll_ctx_union_into(&ctx, ll_string_context_of(to_forced));
             if (outlen + (size_t)tl + 1 > cap) {
                 cap = (outlen + (size_t)tl + 1) * 2;
                 out = realloc(out, cap);
@@ -294,14 +294,14 @@ static Value replaceStrings3_impl(const Value *args, int64_t argc) {
             p++;
         }
     }
-    Value result = asnix_make_string_value(out, outlen);
-    if (!asnix_ctx_is_empty(&ctx)) asnix_string_attach_context(result, &ctx);
+    Value result = ll_make_string_value(out, outlen);
+    if (!ll_ctx_is_empty(&ctx)) ll_string_attach_context(result, &ctx);
     free(out);
     free(from_bytes);
     free(from_lens);
     return result;
 }
-static Value build_replaceStrings(void) { return asnix_bshared_make_curried_native((void *)replaceStrings3_impl, 3); }
+static Value build_replaceStrings(void) { return ll_bshared_make_curried_native((void *)replaceStrings3_impl, 3); }
 
 /* ---------------------------------------------------------------------
  * stringToCharacters s -- not actually a core Nix builtin (confirmed:
@@ -316,14 +316,14 @@ static Value prim_stringToCharacters(const Value *args, int64_t argc) {
     (void)argc;
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(args[0], &bytes, &len, "stringToCharacters");
+    ll_bshared_string_bytes(args[0], &bytes, &len, "stringToCharacters");
     Value *out = len > 0 ? malloc((size_t)len * sizeof(Value)) : NULL;
-    for (int64_t i = 0; i < len; i++) out[i] = asnix_make_string_value(bytes + i, 1);
-    Value result = asnix_bshared_make_list(out, len);
+    for (int64_t i = 0; i < len; i++) out[i] = ll_make_string_value(bytes + i, 1);
+    Value result = ll_bshared_make_list(out, len);
     free(out);
     return result;
 }
-static Value build_stringToCharacters(void) { return asnix_bshared_make_primop((void *)prim_stringToCharacters, 1); }
+static Value build_stringToCharacters(void) { return ll_bshared_make_primop((void *)prim_stringToCharacters, 1); }
 
 /* ---------------------------------------------------------------------
  * toJSON v -- recursive, compact (no whitespace) JSON serialization,
@@ -349,15 +349,15 @@ static Value build_stringToCharacters(void) { return asnix_bshared_make_primop((
  * ./.` there produces a `"/nix/store/..."` string, not the literal
  * filesystem path) -- this was a known, documented gap when M8/M15 first
  * wrote this encoder (no `AddToStore` existed anywhere in the project
- * yet), but M75 later wired up exactly that (`asnix_copy_path_to_store`,
+ * yet), but M75 later wired up exactly that (`ll_copy_path_to_store`,
  * nar.c) for `coerce_to_string_for_interp`'s identical Path case and for
- * `asnix_coerce_to_string_for_derivation`; this encoder was missed at the
+ * `ll_coerce_to_string_for_derivation`; this encoder was missed at the
  * time. Found chasing `bash-interactive`'s `__structuredAttrs`-mode
  * derivation: its own `nativeBuildInputs`/`patches` lists each embed a
  * raw Path literal (`../../build-support/setup-hooks/
  * separate-debug-info.sh`, `./pgrp-pipe-5.patch`) straight into the
  * `__json` env var via this encoder, bypassing the string-coercion call
- * sites that already had the M75 fix -- `asnix_collect_input_refs`
+ * sites that already had the M75 fix -- `ll_collect_input_refs`
  * (derivation.c) independently walks the same raw attribute Values (not
  * this JSON text) and already added the correctly-copied store paths to
  * `inputSrcs`, so only the literal text *inside* `__json` was stale,
@@ -577,7 +577,7 @@ static int json_name_cmp(const char *an, size_t al, const char *bn, size_t bl) {
     return (al > bl) - (al < bl);
 }
 
-static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx);
+static void json_encode_ctx(Value v, JsonBuf *out, LlStringContext *ctx);
 static void json_encode(Value v, JsonBuf *out) { json_encode_ctx(v, out, NULL); }
 
 /* M154: (name,len,idx) for one attrset entry, collected ONCE per entry
@@ -591,7 +591,7 @@ typedef struct {
 } JsonAttrEntry;
 
 /* M154: previously, this function's insertion sort called
- * `asnix_sym_name(asnix_bshared_attrs_sym(v, order[j]), ...)` (a symtab
+ * `ll_sym_name(ll_bshared_attrs_sym(v, order[j]), ...)` (a symtab
  * lookup) TWICE per comparison, every comparison -- up to O(n^2) lookups
  * for an attrset whose entries aren't already sorted, instead of the
  * O(n) a sort fundamentally needs. Fixed by collecting each entry's
@@ -603,9 +603,9 @@ typedef struct {
 /* M171 perf: below this threshold, sort a plain JsonAttrEntry array
  * on the stack instead of malloc()ing the scratch array -- the same
  * small-N stack-array technique already applied to
- * asnix_bshared_make_attrs (builtins_shared.c's
- * ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX) and compiler.c's AST_ATTRSET
- * case (ASNIX_COMPILE_SCRATCH_MAX/ASNIX_ATTRSET_SORT_INSERTION_MAX),
+ * ll_bshared_make_attrs (builtins_shared.c's
+ * LL_MAKE_ATTRS_SORT_INSERTION_MAX) and compiler.c's AST_ATTRSET
+ * case (LL_COMPILE_SCRATCH_MAX/LL_ATTRSET_SORT_INSERTION_MAX),
  * just never ported to this call site. Reuses the same constant value
  * (32) those two already settled on, rather than inventing a new one;
  * not shared via a header since all three sorts operate on unrelated
@@ -619,15 +619,15 @@ typedef struct {
  * project's standard 32 threshold rather than a tighter one (e.g. 8)
  * catches that n in [29,32] tail too (78.39% cumulative) for a
  * negligible extra 768 bytes of stack. */
-#define ASNIX_JSON_ATTRS_SORT_STACK_MAX 32
+#define LL_JSON_ATTRS_SORT_STACK_MAX 32
 
-static void json_encode_attrs_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
-    int64_t n = asnix_bshared_attrs_count(v);
-    JsonAttrEntry entries_stack[ASNIX_JSON_ATTRS_SORT_STACK_MAX];
-    int on_stack = (n <= ASNIX_JSON_ATTRS_SORT_STACK_MAX);
+static void json_encode_attrs_ctx(Value v, JsonBuf *out, LlStringContext *ctx) {
+    int64_t n = ll_bshared_attrs_count(v);
+    JsonAttrEntry entries_stack[LL_JSON_ATTRS_SORT_STACK_MAX];
+    int on_stack = (n <= LL_JSON_ATTRS_SORT_STACK_MAX);
     JsonAttrEntry *entries = on_stack ? entries_stack : (n > 0 ? malloc((size_t)n * sizeof(JsonAttrEntry)) : NULL);
     for (int64_t i = 0; i < n; i++) {
-        entries[i].name = asnix_sym_name(asnix_bshared_attrs_sym(v, i), &entries[i].len);
+        entries[i].name = ll_sym_name(ll_bshared_attrs_sym(v, i), &entries[i].len);
         entries[i].idx = i;
     }
     for (int64_t i = 1; i < n; i++) {
@@ -644,7 +644,7 @@ static void json_encode_attrs_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx
         if (i > 0) jb_putc(out, ',');
         jb_escape_string(out, entries[i].name, (int64_t)entries[i].len);
         jb_putc(out, ':');
-        json_encode_ctx(asnix_force_for_print(asnix_bshared_attrs_value(v, entries[i].idx)), out, ctx);
+        json_encode_ctx(ll_force_for_print(ll_bshared_attrs_value(v, entries[i].idx)), out, ctx);
     }
     jb_putc(out, '}');
     if (!on_stack) free(entries);
@@ -659,43 +659,43 @@ static void json_encode_attrs_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx
  * `builtins.toJSON { inherit s; }` (prim_toJSON below) can attach the
  * combined context to its result string, matching real Nix's
  * `getContext (toJSON {...})`. */
-static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
-    v = asnix_force_for_print(v);
-    switch (asnix_tag_of(v)) {
-        case ASNIX_TAG_INT: {
+static void json_encode_ctx(Value v, JsonBuf *out, LlStringContext *ctx) {
+    v = ll_force_for_print(v);
+    switch (ll_tag_of(v)) {
+        case LL_TAG_INT: {
             char buf[32];
-            int n = snprintf(buf, sizeof buf, "%lld", (long long)asnix_int_value(v));
+            int n = snprintf(buf, sizeof buf, "%lld", (long long)ll_int_value(v));
             jb_puts(out, buf, (size_t)n);
             break;
         }
-        case ASNIX_TAG_IMM:
-            switch (asnix_imm_subtag(v)) {
-                case ASNIX_IMM_TRUE: jb_puts(out, "true", 4); break;
-                case ASNIX_IMM_FALSE: jb_puts(out, "false", 5); break;
-                case ASNIX_IMM_NULL: jb_puts(out, "null", 4); break;
-                default: asnix_bshared_fatal("toJSON", "cannot convert this value to JSON");
+        case LL_TAG_IMM:
+            switch (ll_imm_subtag(v)) {
+                case LL_IMM_TRUE: jb_puts(out, "true", 4); break;
+                case LL_IMM_FALSE: jb_puts(out, "false", 5); break;
+                case LL_IMM_NULL: jb_puts(out, "null", 4); break;
+                default: ll_bshared_fatal("toJSON", "cannot convert this value to JSON");
             }
             break;
-        case ASNIX_TAG_PTR: {
-            if (asnix_value_is_float(v)) {
+        case LL_TAG_PTR: {
+            if (ll_value_is_float(v)) {
                 char buf[64];
-                size_t n = format_json_float(asnix_float_value(v), buf, sizeof(buf));
+                size_t n = format_json_float(ll_float_value(v), buf, sizeof(buf));
                 jb_puts(out, buf, n);
                 break;
             }
-            if (asnix_value_is_path(v)) {
+            if (ll_value_is_path(v)) {
                 /* See this function's own header comment (toJSON's Path
                  * handling) -- copy to store (unless already a store
                  * path) instead of emitting the raw filesystem text. */
                 int64_t plen;
-                const char *pbytes = asnix_ptr_bytes(v, &plen);
+                const char *pbytes = ll_ptr_bytes(v, &plen);
                 char *path = malloc((size_t)plen + 1);
                 memcpy(path, pbytes, (size_t)plen);
                 path[plen] = '\0';
                 const char *final_path = path;
                 char store_path[300];
                 if (!(plen > 11 && memcmp(path, "/nix/store/", 11) == 0)) {
-                    asnix_copy_path_to_store(path, store_path, sizeof(store_path));
+                    ll_copy_path_to_store(path, store_path, sizeof(store_path));
                     final_path = store_path;
                 }
                 jb_escape_string(out, final_path, (int64_t)strlen(final_path));
@@ -703,17 +703,17 @@ static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
                 break;
             }
             int64_t len;
-            const char *bytes = asnix_ptr_bytes(v, &len); /* plain string, see header comment */
+            const char *bytes = ll_ptr_bytes(v, &len); /* plain string, see header comment */
             if (!utf8_is_valid(bytes, len)) {
-                asnix_bshared_fatal("toJSON", "string is not valid UTF-8");
+                ll_bshared_fatal("toJSON", "string is not valid UTF-8");
             }
-            if (ctx) asnix_ctx_union_into(ctx, asnix_string_context_of(v));
+            if (ctx) ll_ctx_union_into(ctx, ll_string_context_of(v));
             jb_escape_string(out, bytes, len);
             break;
         }
-        case ASNIX_TAG_LIST: {
-            int64_t n = asnix_bshared_list_count(v);
-            const Value *elems = asnix_bshared_list_elems(v);
+        case LL_TAG_LIST: {
+            int64_t n = ll_bshared_list_count(v);
+            const Value *elems = ll_bshared_list_elems(v);
             jb_putc(out, '[');
             for (int64_t i = 0; i < n; i++) {
                 if (i > 0) jb_putc(out, ',');
@@ -722,7 +722,7 @@ static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
             jb_putc(out, ']');
             break;
         }
-        case ASNIX_TAG_ATTRS: {
+        case LL_TAG_ATTRS: {
             /* An attrset with a `__toString`/`outPath` attribute encodes
              * as whatever THAT coerces to (a JSON string), not as a JSON
              * object -- matches real Nix's `printValueAsJSON`
@@ -731,20 +731,20 @@ static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
              * (confirmed directly: `builtins.toJSON { outPath.foo =
              * true; }` == `"{\"foo\":true}"` there, i.e. the WHOLE
              * attrset becomes the peeled value, not a `{"outPath":...}`
-             * object). Reuses asnix_coerce_to_string, which already
+             * object). Reuses ll_coerce_to_string, which already
              * implements this exact __toString/outPath lookup (M23) for
              * `toString`/`"${...}"`. */
-            uint32_t sym_tostring = asnix_intern("__toString", 10);
-            uint32_t sym_outpath = asnix_intern("outPath", 7);
-            if (asnix_bshared_attrs_find(v, sym_tostring) >= 0 || asnix_bshared_attrs_find(v, sym_outpath) >= 0) {
-                json_encode_ctx(asnix_coerce_to_string(v), out, ctx);
+            uint32_t sym_tostring = ll_intern("__toString", 10);
+            uint32_t sym_outpath = ll_intern("outPath", 7);
+            if (ll_bshared_attrs_find(v, sym_tostring) >= 0 || ll_bshared_attrs_find(v, sym_outpath) >= 0) {
+                json_encode_ctx(ll_coerce_to_string(v), out, ctx);
             } else {
                 json_encode_attrs_ctx(v, out, ctx);
             }
             break;
         }
         default:
-            asnix_bshared_fatal("toJSON", "cannot convert a function to JSON");
+            ll_bshared_fatal("toJSON", "cannot convert a function to JSON");
     }
 }
 
@@ -752,7 +752,7 @@ static void json_encode_ctx(Value v, JsonBuf *out, AsnixStringContext *ctx) {
  * recursive encoder, for callers outside this translation unit (see
  * builtins_compare.h's header comment) -- `prim_toJSON` below is just this
  * function plus the Value-wrapping step. */
-char *asnix_toJSON_cstr(Value v) {
+char *ll_toJSON_cstr(Value v) {
     JsonBuf jb;
     jb_init(&jb);
     json_encode(v, &jb);
@@ -764,25 +764,25 @@ static Value prim_toJSON(const Value *args, int64_t argc) {
     (void)argc;
     JsonBuf jb;
     jb_init(&jb);
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
     json_encode_ctx(args[0], &jb, &ctx);
     jb_putc(&jb, '\0');
-    Value result = asnix_make_string_value(jb.buf, strlen(jb.buf));
-    /* M80: unlike the public `asnix_toJSON_cstr` entry point (used for
+    Value result = ll_make_string_value(jb.buf, strlen(jb.buf));
+    /* M80: unlike the public `ll_toJSON_cstr` entry point (used for
      * `__json`-structured-attrs serialization, derivation.c -- that
      * caller already collects context from the RAW attrset directly,
-     * `asnix_collect_input_refs`, independent of this JSON text), the
+     * `ll_collect_input_refs`, independent of this JSON text), the
      * user-facing `builtins.toJSON` primop attaches the union of every
      * string leaf's own context to its result (see json_encode_ctx's
      * own header comment). */
-    if (!asnix_ctx_is_empty(&ctx)) asnix_string_attach_context(result, &ctx);
+    if (!ll_ctx_is_empty(&ctx)) ll_string_attach_context(result, &ctx);
     free(jb.buf);
     return result;
 }
-static Value build_toJSON(void) { return asnix_bshared_make_primop((void *)prim_toJSON, 1); }
+static Value build_toJSON(void) { return ll_bshared_make_primop((void *)prim_toJSON, 1); }
 
-const AsnixBuiltinMiscDef ASNIX_COMPARE_BUILTINS[] = {
+const LlBuiltinMiscDef LL_COMPARE_BUILTINS[] = {
     { "lessThan", build_lessThan },
     { "splitVersion", build_splitVersion },
     { "compareVersions", build_compareVersions },
@@ -791,4 +791,4 @@ const AsnixBuiltinMiscDef ASNIX_COMPARE_BUILTINS[] = {
     { "toJSON", build_toJSON },
 };
 
-const size_t ASNIX_COMPARE_BUILTINS_COUNT = sizeof(ASNIX_COMPARE_BUILTINS) / sizeof(ASNIX_COMPARE_BUILTINS[0]);
+const size_t LL_COMPARE_BUILTINS_COUNT = sizeof(LL_COMPARE_BUILTINS) / sizeof(LL_COMPARE_BUILTINS[0]);

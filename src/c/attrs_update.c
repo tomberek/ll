@@ -6,35 +6,35 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/stats.h" /* M112: visibility into this call site's real byte cost */
-#include "builtins_shared.h" /* asnix_bshared_type_name, see M50 */
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/stats.h" /* M112: visibility into this call site's real byte cost */
+#include "builtins_shared.h" /* ll_bshared_type_name, see M50 */
 #include "string_context.h" /* M80: dynamic attr-name context rejection */
 #include "symtab.h"
 #include "value_util.h"
 
-Value asnix_attrs_eager_merge(Value lhs, Value rhs) {
+Value ll_attrs_eager_merge(Value lhs, Value rhs) {
     const char *abase = (const char *)(lhs.raw & ~0x7ULL);
     const char *bbase = (const char *)(rhs.raw & ~0x7ULL);
-    int64_t acount = *(const int64_t *)(abase + ASNIX_ATTRS_OFF_COUNT);
-    int64_t bcount = *(const int64_t *)(bbase + ASNIX_ATTRS_OFF_COUNT);
-    const char *aentries = abase + ASNIX_ATTRS_OFF_ENTRIES;
-    const char *bentries = bbase + ASNIX_ATTRS_OFF_ENTRIES;
+    int64_t acount = *(const int64_t *)(abase + LL_ATTRS_OFF_COUNT);
+    int64_t bcount = *(const int64_t *)(bbase + LL_ATTRS_OFF_COUNT);
+    const char *aentries = abase + LL_ATTRS_OFF_ENTRIES;
+    const char *bentries = bbase + LL_ATTRS_OFF_ENTRIES;
 
     /* Upper bound on the merged count (shrinks below acount+bcount only if
      * there are duplicate keys) -- allocate once for the worst case and
      * just record however many entries actually land, same "don't bother
      * reclaiming the slack" tradeoff the never-free arena already makes
      * everywhere else. */
-    void *mem = asnix_arena_alloc(8 + (uint64_t)(acount + bcount) * ASNIX_ATTR_SIZE);
-    char *out_entries = (char *)mem + ASNIX_ATTRS_OFF_ENTRIES;
+    void *mem = ll_arena_alloc(8 + (uint64_t)(acount + bcount) * LL_ATTR_SIZE);
+    char *out_entries = (char *)mem + LL_ATTRS_OFF_ENTRIES;
 
     /* M143: walk with running byte pointers instead of `i`/`j`/`k` indices
-     * recomputed via `idx * ASNIX_ATTR_SIZE` every iteration. The index
+     * recomputed via `idx * LL_ATTR_SIZE` every iteration. The index
      * form looked equivalent to the compiler but wasn't: GCC couldn't
      * prove it could hoist the index->address multiply out of the loop
-     * (ASNIX_ATTR_SIZE=12 isn't a shift), so the main merge loop's -O2
+     * (LL_ATTR_SIZE=12 isn't a shift), so the main merge loop's -O2
      * codegen recomputed `base + idx*12` from scratch (two extra `lea`s
      * per side, confirmed via `objdump -d` before this change) on EVERY
      * iteration, while the tail loops below (which this file already
@@ -46,42 +46,42 @@ Value asnix_attrs_eager_merge(Value lhs, Value rhs) {
      * docs/architecture.md's M143) also has to run. */
     const char *pa = aentries;
     const char *pb = bentries;
-    const char *aend = aentries + acount * ASNIX_ATTR_SIZE;
-    const char *bend = bentries + bcount * ASNIX_ATTR_SIZE;
+    const char *aend = aentries + acount * LL_ATTR_SIZE;
+    const char *bend = bentries + bcount * LL_ATTR_SIZE;
     char *pout = out_entries;
     while (pa < aend && pb < bend) {
-        uint32_t asym = *(const uint32_t *)(pa + ASNIX_ATTR_OFF_SYM);
-        uint32_t bsym = *(const uint32_t *)(pb + ASNIX_ATTR_OFF_SYM);
+        uint32_t asym = *(const uint32_t *)(pa + LL_ATTR_OFF_SYM);
+        uint32_t bsym = *(const uint32_t *)(pb + LL_ATTR_OFF_SYM);
         if (asym < bsym) {
-            memcpy(pout, pa, ASNIX_ATTR_SIZE);
-            pa += ASNIX_ATTR_SIZE;
+            memcpy(pout, pa, LL_ATTR_SIZE);
+            pa += LL_ATTR_SIZE;
         } else if (bsym < asym) {
-            memcpy(pout, pb, ASNIX_ATTR_SIZE);
-            pb += ASNIX_ATTR_SIZE;
+            memcpy(pout, pb, LL_ATTR_SIZE);
+            pb += LL_ATTR_SIZE;
         } else {
             /* duplicate key: rhs (b) wins, matching `//`'s right-biased semantics */
-            memcpy(pout, pb, ASNIX_ATTR_SIZE);
-            pa += ASNIX_ATTR_SIZE;
-            pb += ASNIX_ATTR_SIZE;
+            memcpy(pout, pb, LL_ATTR_SIZE);
+            pa += LL_ATTR_SIZE;
+            pb += LL_ATTR_SIZE;
         }
-        pout += ASNIX_ATTR_SIZE;
+        pout += LL_ATTR_SIZE;
     }
     while (pa < aend) {
-        memcpy(pout, pa, ASNIX_ATTR_SIZE);
-        pa += ASNIX_ATTR_SIZE;
-        pout += ASNIX_ATTR_SIZE;
+        memcpy(pout, pa, LL_ATTR_SIZE);
+        pa += LL_ATTR_SIZE;
+        pout += LL_ATTR_SIZE;
     }
     while (pb < bend) {
-        memcpy(pout, pb, ASNIX_ATTR_SIZE);
-        pb += ASNIX_ATTR_SIZE;
-        pout += ASNIX_ATTR_SIZE;
+        memcpy(pout, pb, LL_ATTR_SIZE);
+        pb += LL_ATTR_SIZE;
+        pout += LL_ATTR_SIZE;
     }
 
-    int64_t k = (pout - out_entries) / ASNIX_ATTR_SIZE;
-    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = k;
-    asnix_stats_attrs++;
-    asnix_stats_attrs_entries += (uint64_t)k;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
+    int64_t k = (pout - out_entries) / LL_ATTR_SIZE;
+    *(int64_t *)((char *)mem + LL_ATTRS_OFF_COUNT) = k;
+    ll_stats_attrs++;
+    ll_stats_attrs_entries += (uint64_t)k;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_ATTRS };
 }
 
 /* `a // b`, matching iets's own `update_attrs`/`alloc_union` heuristic
@@ -122,37 +122,37 @@ Value asnix_attrs_eager_merge(Value lhs, Value rhs) {
  * order (lhs's leaves first, rhs's leaves last -- rhs wins ties). */
 static Value make_union_from_both(Value lhs, Value rhs) {
     const char *lbase = (const char *)(lhs.raw & ~0x7ULL);
-    int64_t lraw = *(const int64_t *)(lbase + ASNIX_ATTRS_OFF_COUNT);
+    int64_t lraw = *(const int64_t *)(lbase + LL_ATTRS_OFF_COUNT);
     int lhs_is_union = lraw < 0;
     int64_t n_lhs = lhs_is_union ? -lraw : 1;
-    const Value *lhs_leaves = lhs_is_union ? (const Value *)(lbase + ASNIX_ATTRS_UNION_OFF_LEAVES) : NULL;
+    const Value *lhs_leaves = lhs_is_union ? (const Value *)(lbase + LL_ATTRS_UNION_OFF_LEAVES) : NULL;
 
     const char *rbase = (const char *)(rhs.raw & ~0x7ULL);
-    int64_t rraw = *(const int64_t *)(rbase + ASNIX_ATTRS_OFF_COUNT);
+    int64_t rraw = *(const int64_t *)(rbase + LL_ATTRS_OFF_COUNT);
     int rhs_is_union = rraw < 0;
     int64_t n_rhs = rhs_is_union ? -rraw : 1;
-    const Value *rhs_leaves = rhs_is_union ? (const Value *)(rbase + ASNIX_ATTRS_UNION_OFF_LEAVES) : NULL;
+    const Value *rhs_leaves = rhs_is_union ? (const Value *)(rbase + LL_ATTRS_UNION_OFF_LEAVES) : NULL;
 
     int64_t nleaves = n_lhs + n_rhs;
-    uint64_t sz = ASNIX_ATTRS_UNION_OFF_LEAVES + (uint64_t)nleaves * sizeof(Value);
-    void *mem = asnix_arena_alloc(sz);
-    *(int64_t *)((char *)mem + ASNIX_ATTRS_UNION_OFF_NLEAVES) = -nleaves;
-    *(Value *)((char *)mem + ASNIX_ATTRS_UNION_OFF_FLATCACHE) = (Value){ .raw = 0 };
-    Value *out = (Value *)((char *)mem + ASNIX_ATTRS_UNION_OFF_LEAVES);
+    uint64_t sz = LL_ATTRS_UNION_OFF_LEAVES + (uint64_t)nleaves * sizeof(Value);
+    void *mem = ll_arena_alloc(sz);
+    *(int64_t *)((char *)mem + LL_ATTRS_UNION_OFF_NLEAVES) = -nleaves;
+    *(Value *)((char *)mem + LL_ATTRS_UNION_OFF_FLATCACHE) = (Value){ .raw = 0 };
+    Value *out = (Value *)((char *)mem + LL_ATTRS_UNION_OFF_LEAVES);
     if (lhs_is_union) { memcpy(out, lhs_leaves, (size_t)n_lhs * sizeof(Value)); out += n_lhs; }
     else { *out++ = lhs; }
     if (rhs_is_union) { memcpy(out, rhs_leaves, (size_t)n_rhs * sizeof(Value)); out += n_rhs; }
     else { *out++ = rhs; }
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_ATTRS };
 }
 
-Value asnix_attrs_update(Value lhs, Value rhs) {
+Value ll_attrs_update(Value lhs, Value rhs) {
     const char *lhs_base = (const char *)(lhs.raw & ~0x7ULL);
-    int64_t lhs_raw = *(const int64_t *)(lhs_base + ASNIX_ATTRS_OFF_COUNT);
+    int64_t lhs_raw = *(const int64_t *)(lhs_base + LL_ATTRS_OFF_COUNT);
     if (lhs_raw == 0) return rhs;
 
     const char *rhs_base = (const char *)(rhs.raw & ~0x7ULL);
-    int64_t rhs_raw = *(const int64_t *)(rhs_base + ASNIX_ATTRS_OFF_COUNT);
+    int64_t rhs_raw = *(const int64_t *)(rhs_base + LL_ATTRS_OFF_COUNT);
     if (rhs_raw == 0) return lhs;
 
     int lhs_is_union = lhs_raw < 0;
@@ -164,7 +164,7 @@ Value asnix_attrs_update(Value lhs, Value rhs) {
         int64_t rhs_leaves = rhs_is_union ? -rhs_raw : 1;
 
         if (lhs_leaves + rhs_leaves > LL_UNION_MAX_LEAVES) {
-            lhs = asnix_bshared_attrs_resolve(lhs);
+            lhs = ll_bshared_attrs_resolve(lhs);
             lhs_leaves = 1;
         }
         if (lhs_leaves + rhs_leaves <= LL_UNION_MAX_LEAVES) {
@@ -173,12 +173,12 @@ Value asnix_attrs_update(Value lhs, Value rhs) {
     }
 
     /* Fallback: both operands must be flat for the two-pointer merge. */
-    Value lhs_flat = asnix_bshared_attrs_resolve(lhs);
-    Value rhs_flat = asnix_bshared_attrs_resolve(rhs);
-    return asnix_attrs_eager_merge(lhs_flat, rhs_flat);
+    Value lhs_flat = ll_bshared_attrs_resolve(lhs);
+    Value rhs_flat = ll_bshared_attrs_resolve(rhs);
+    return ll_attrs_eager_merge(lhs_flat, rhs_flat);
 }
 
-Value asnix_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
+Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
     /* M88: `attrs` is always the direct output of a prior OP_MK_ATTRS or a
      * prior insert_dynamic call within the SAME `{...}`/`rec {...}`
      * literal (compiler.c's AST_ATTRS case) -- a `//` never runs in
@@ -186,7 +186,7 @@ Value asnix_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
      * Resolved anyway (a no-op sign-bit check when already flat) so this
      * holds even if that invariant ever changes, rather than relying on
      * an unchecked assumption. */
-    attrs = asnix_bshared_attrs_resolve(attrs);
+    attrs = ll_bshared_attrs_resolve(attrs);
     /* `${null} = value;` is silently omitted, not an error -- a real,
      * deliberate nixpkgs idiom for a conditionally-present key
      * (`${if cond then "key" else null} = value;`), confirmed against
@@ -195,12 +195,12 @@ Value asnix_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
      * (`~/nix/src/libexpr/eval.cc`'s attrset-construction loop: `if
      * (nameVal.type() == nNull) continue;`, checked *before* the
      * string-force/type-check below). Found via d.nix. */
-    if (asnix_tag_of(name_val) == ASNIX_TAG_IMM && asnix_imm_subtag(name_val) == ASNIX_IMM_NULL) {
+    if (ll_tag_of(name_val) == LL_TAG_IMM && ll_imm_subtag(name_val) == LL_IMM_NULL) {
         return attrs;
     }
-    if (asnix_tag_of(name_val) != ASNIX_TAG_PTR || asnix_value_is_path(name_val) || asnix_value_is_float(name_val)) {
-        fprintf(stderr, "asnix: a dynamic '${...}' attribute name must be a string (got %s)\n",
-                asnix_bshared_type_name(name_val));
+    if (ll_tag_of(name_val) != LL_TAG_PTR || ll_value_is_path(name_val) || ll_value_is_float(name_val)) {
+        fprintf(stderr, "ll: a dynamic '${...}' attribute name must be a string (got %s)\n",
+                ll_bshared_type_name(name_val));
         exit(1);
     }
     /* M80: a `${...}` attribute name cannot carry string context -- real
@@ -214,26 +214,26 @@ Value asnix_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
      * patched (not e.g. `listToAttrs`) -- see this project's own
      * standing scope-cut convention of fixing exactly the call site a
      * failing fixture needs, not every symbol-from-string site at once. */
-    const AsnixStringContext *name_ctx = asnix_string_context_of(name_val);
-    if (!asnix_ctx_is_empty(name_ctx)) {
-        fprintf(stderr, "asnix: the string used as a dynamic '${...}' attribute name is not allowed to refer to a "
+    const LlStringContext *name_ctx = ll_string_context_of(name_val);
+    if (!ll_ctx_is_empty(name_ctx)) {
+        fprintf(stderr, "ll: the string used as a dynamic '${...}' attribute name is not allowed to refer to a "
                         "store path\n");
         exit(1);
     }
     int64_t name_len;
-    const char *name_bytes = asnix_ptr_bytes(name_val, &name_len);
-    uint32_t sym = asnix_intern(name_bytes, (size_t)name_len);
+    const char *name_bytes = ll_ptr_bytes(name_val, &name_len);
+    uint32_t sym = ll_intern(name_bytes, (size_t)name_len);
 
     const char *abase = (const char *)(attrs.raw & ~0x7ULL);
-    int64_t acount = *(const int64_t *)(abase + ASNIX_ATTRS_OFF_COUNT);
-    const char *aentries = abase + ASNIX_ATTRS_OFF_ENTRIES;
+    int64_t acount = *(const int64_t *)(abase + LL_ATTRS_OFF_COUNT);
+    const char *aentries = abase + LL_ATTRS_OFF_ENTRIES;
 
     int64_t lo = 0, hi = acount;
     while (lo < hi) {
         int64_t mid = lo + (hi - lo) / 2;
-        uint32_t s = *(const uint32_t *)(aentries + mid * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_SYM);
+        uint32_t s = *(const uint32_t *)(aentries + mid * LL_ATTR_SIZE + LL_ATTR_OFF_SYM);
         if (s == sym) {
-            fprintf(stderr, "asnix: dynamic attribute '%.*s' already defined, aborting\n", (int)name_len,
+            fprintf(stderr, "ll: dynamic attribute '%.*s' already defined, aborting\n", (int)name_len,
                     name_bytes);
             exit(1);
         }
@@ -241,17 +241,17 @@ Value asnix_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
     }
     int64_t pos = lo; /* insertion point keeping sorted-by-sym order */
 
-    void *mem = asnix_arena_alloc(8 + (uint64_t)(acount + 1) * ASNIX_ATTR_SIZE);
-    char *out_entries = (char *)mem + ASNIX_ATTRS_OFF_ENTRIES;
-    if (pos > 0) memcpy(out_entries, aentries, (size_t)pos * ASNIX_ATTR_SIZE);
+    void *mem = ll_arena_alloc(8 + (uint64_t)(acount + 1) * LL_ATTR_SIZE);
+    char *out_entries = (char *)mem + LL_ATTRS_OFF_ENTRIES;
+    if (pos > 0) memcpy(out_entries, aentries, (size_t)pos * LL_ATTR_SIZE);
     /* M103: must be a 4-byte write -- entry's value bytes now start right after sym (no pad),
      * so an 8-byte write here would clobber them. */
-    *(uint32_t *)(out_entries + pos * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_SYM) = sym;
-    *(Value *)(out_entries + pos * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_VALUE) = value;
+    *(uint32_t *)(out_entries + pos * LL_ATTR_SIZE + LL_ATTR_OFF_SYM) = sym;
+    *(Value *)(out_entries + pos * LL_ATTR_SIZE + LL_ATTR_OFF_VALUE) = value;
     if (pos < acount) {
-        memcpy(out_entries + (pos + 1) * ASNIX_ATTR_SIZE, aentries + pos * ASNIX_ATTR_SIZE,
-               (size_t)(acount - pos) * ASNIX_ATTR_SIZE);
+        memcpy(out_entries + (pos + 1) * LL_ATTR_SIZE, aentries + pos * LL_ATTR_SIZE,
+               (size_t)(acount - pos) * LL_ATTR_SIZE);
     }
-    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = acount + 1;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
+    *(int64_t *)((char *)mem + LL_ATTRS_OFF_COUNT) = acount + 1;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_ATTRS };
 }

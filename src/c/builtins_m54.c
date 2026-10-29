@@ -11,11 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/art_sym.h"
-#include "asnix/heap.h"
-#include "asnix/ir.h"
-#include "asnix/irbuild.h"
+#include "ll/arena.h"
+#include "ll/art_sym.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
+#include "ll/irbuild.h"
 #include "base32.h"
 #include "base64.h"
 #include "builtins_shared.h"
@@ -26,7 +26,7 @@
 #include "value_util.h"
 
 static void fatal(const char *who, const char *msg) {
-    fprintf(stderr, "asnix: %s: %s\n", who, msg);
+    fprintf(stderr, "ll: %s: %s\n", who, msg);
     exit(1);
 }
 
@@ -34,14 +34,14 @@ static void fatal(const char *who, const char *msg) {
  * sort+dedupe path and the ART path -- see that function's own comment
  * for the measured crossover (~40-50) this threshold is set comfortably
  * past, and why an unconditional ART swap regressed real workloads. */
-#define ASNIX_ZIP_ART_THRESHOLD 64
+#define LL_ZIP_ART_THRESHOLD 64
 
 /* ---------------------------------------------------------------------
  * bitAnd / bitOr / bitXor (M54) -- `__bitAnd`/`__bitOr`/`__bitXor` in real
  * Nix (confirmed via cppnix source, ~/nix/src/libexpr/primops.cc: all
  * three `__`-prefixed, builtins-only). Plain arity-2 integer bitwise ops,
  * curried the same way every other true-arity-2 builtin in this codebase
- * is (asnix_bshared_make_curried_native -- see builtins_misc.c's
+ * is (ll_bshared_make_curried_native -- see builtins_misc.c's
  * make_curried_native for the full rationale). Verified against real
  * `nix-instantiate --eval`:
  *   bitAnd 6 3  == 2    (0b110 & 0b011 = 0b010)
@@ -51,25 +51,25 @@ static void fatal(const char *who, const char *msg) {
  * --------------------------------------------------------------------- */
 static Value bitAnd2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_INT(args[0], "bitAnd");
-    ASNIX_REQUIRE_INT(args[1], "bitAnd");
-    return asnix_make_int(asnix_int_value(args[0]) & asnix_int_value(args[1]));
+    LL_REQUIRE_INT(args[0], "bitAnd");
+    LL_REQUIRE_INT(args[1], "bitAnd");
+    return ll_make_int(ll_int_value(args[0]) & ll_int_value(args[1]));
 }
 static Value bitOr2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_INT(args[0], "bitOr");
-    ASNIX_REQUIRE_INT(args[1], "bitOr");
-    return asnix_make_int(asnix_int_value(args[0]) | asnix_int_value(args[1]));
+    LL_REQUIRE_INT(args[0], "bitOr");
+    LL_REQUIRE_INT(args[1], "bitOr");
+    return ll_make_int(ll_int_value(args[0]) | ll_int_value(args[1]));
 }
 static Value bitXor2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_INT(args[0], "bitXor");
-    ASNIX_REQUIRE_INT(args[1], "bitXor");
-    return asnix_make_int(asnix_int_value(args[0]) ^ asnix_int_value(args[1]));
+    LL_REQUIRE_INT(args[0], "bitXor");
+    LL_REQUIRE_INT(args[1], "bitXor");
+    return ll_make_int(ll_int_value(args[0]) ^ ll_int_value(args[1]));
 }
-static Value build_bitAnd(void) { return asnix_bshared_make_curried_native((void *)bitAnd2_impl, 2); }
-static Value build_bitOr(void) { return asnix_bshared_make_curried_native((void *)bitOr2_impl, 2); }
-static Value build_bitXor(void) { return asnix_bshared_make_curried_native((void *)bitXor2_impl, 2); }
+static Value build_bitAnd(void) { return ll_bshared_make_curried_native((void *)bitAnd2_impl, 2); }
+static Value build_bitOr(void) { return ll_bshared_make_curried_native((void *)bitOr2_impl, 2); }
+static Value build_bitXor(void) { return ll_bshared_make_curried_native((void *)bitXor2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * trace msg value (M54) -- `__trace` in real Nix (builtins-only).
@@ -125,28 +125,28 @@ static void trace_print_string(FILE *out, const char *bytes, int64_t len) {
 }
 
 static void trace_print_value(FILE *out, Value v) {
-    v = asnix_force_for_print(v);
-    switch (asnix_tag_of(v)) {
-        case ASNIX_TAG_INT:
-            fprintf(out, "%lld", (long long)asnix_int_value(v));
+    v = ll_force_for_print(v);
+    switch (ll_tag_of(v)) {
+        case LL_TAG_INT:
+            fprintf(out, "%lld", (long long)ll_int_value(v));
             return;
-        case ASNIX_TAG_IMM:
-            switch (asnix_imm_subtag(v)) {
-                case ASNIX_IMM_TRUE: fputs("true", out); return;
-                case ASNIX_IMM_FALSE: fputs("false", out); return;
-                case ASNIX_IMM_NULL: fputs("null", out); return;
+        case LL_TAG_IMM:
+            switch (ll_imm_subtag(v)) {
+                case LL_IMM_TRUE: fputs("true", out); return;
+                case LL_IMM_FALSE: fputs("false", out); return;
+                case LL_IMM_NULL: fputs("null", out); return;
                 default: fputs("<imm>", out); return;
             }
-        case ASNIX_TAG_PTR: {
+        case LL_TAG_PTR: {
             int64_t len;
-            const char *bytes = asnix_ptr_bytes(v, &len);
-            if (asnix_value_is_path(v)) fwrite(bytes, 1, (size_t)len, out);
+            const char *bytes = ll_ptr_bytes(v, &len);
+            if (ll_value_is_path(v)) fwrite(bytes, 1, (size_t)len, out);
             else trace_print_string(out, bytes, len);
             return;
         }
-        case ASNIX_TAG_LIST: {
-            int64_t n = asnix_bshared_list_count(v);
-            const Value *elems = asnix_bshared_list_elems(v);
+        case LL_TAG_LIST: {
+            int64_t n = ll_bshared_list_count(v);
+            const Value *elems = ll_bshared_list_elems(v);
             fputs("[ ", out);
             for (int64_t i = 0; i < n; i++) {
                 trace_print_value(out, elems[i]);
@@ -155,22 +155,22 @@ static void trace_print_value(FILE *out, Value v) {
             fputc(']', out);
             return;
         }
-        case ASNIX_TAG_ATTRS: {
-            int64_t n = asnix_bshared_attrs_count(v);
+        case LL_TAG_ATTRS: {
+            int64_t n = ll_bshared_attrs_count(v);
             fputs("{ ", out);
             for (int64_t i = 0; i < n; i++) {
                 size_t len;
-                const char *name = asnix_sym_name(asnix_bshared_attrs_sym(v, i), &len);
+                const char *name = ll_sym_name(ll_bshared_attrs_sym(v, i), &len);
                 fwrite(name, 1, len, out);
                 fputs(" = ", out);
-                trace_print_value(out, asnix_bshared_attrs_value(v, i));
+                trace_print_value(out, ll_bshared_attrs_value(v, i));
                 fputs("; ", out);
             }
             fputc('}', out);
             return;
         }
-        case ASNIX_TAG_CLOSURE:
-        case ASNIX_TAG_PRIMOP:
+        case LL_TAG_CLOSURE:
+        case LL_TAG_PRIMOP:
             fputs("<LAMBDA>", out);
             return;
         default:
@@ -181,10 +181,10 @@ static void trace_print_value(FILE *out, Value v) {
 
 static Value trace2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    Value msg = asnix_force_for_print(args[0]);
-    if (asnix_tag_of(msg) == ASNIX_TAG_PTR && !asnix_value_is_path(msg)) {
+    Value msg = ll_force_for_print(args[0]);
+    if (ll_tag_of(msg) == LL_TAG_PTR && !ll_value_is_path(msg)) {
         int64_t len;
-        const char *bytes = asnix_ptr_bytes(msg, &len);
+        const char *bytes = ll_ptr_bytes(msg, &len);
         fprintf(stderr, "trace: %.*s\n", (int)len, bytes);
     } else {
         fputs("trace: ", stderr);
@@ -194,17 +194,17 @@ static Value trace2_impl(const Value *args, int64_t argc) {
     return args[1];
 }
 
-/* Same curry-chain shape as asnix_bshared_make_curried_native
+/* Same curry-chain shape as ll_bshared_make_curried_native
  * (builtins_shared.c), but building the real native primop via
- * asnix_bshared_make_primop_noforce instead -- needed only by `trace`
+ * ll_bshared_make_primop_noforce instead -- needed only by `trace`
  * so far, hence not promoted into builtins_shared.c's own general
  * helper (which every OTHER curried-native builtin in this codebase
  * wants force-args-on, the ordinary default). */
 static Value make_curried_native_noforce(void *native_fn, int64_t arity) {
-    Value native_primop = asnix_bshared_make_primop_noforce(native_fn, arity);
+    Value native_primop = ll_bshared_make_primop_noforce(native_fn, arity);
     /* M80: shared canonical marker, not a fresh allocation -- see
-     * builtins_shared.h's asnix_bshared_native_formals_marker. */
-    Value empty_formals = asnix_bshared_native_formals_marker();
+     * builtins_shared.h's ll_bshared_native_formals_marker. */
+    Value empty_formals = ll_bshared_native_formals_marker();
 
     IrBuilder *b = ib_new();
     ib_push_const(b, (int64_t)native_primop.raw);
@@ -220,12 +220,12 @@ static Value make_curried_native_noforce(void *native_fn, int64_t arity) {
         prog = ib_finish(wrap_b);
     }
 
-    void *mem = asnix_arena_alloc(ASNIX_CLOSURE_SIZE);
-    *(void **)((char *)mem + ASNIX_CLOSURE_OFF_UP) = NULL;
-    *(IrProgram **)((char *)mem + ASNIX_CLOSURE_OFF_PROG) = prog; /* M100: one pointer, not {ops,pool} */
-    *(int64_t *)((char *)mem + ASNIX_CLOSURE_OFF_ARITY) = 1;
-    *(uint64_t *)((char *)mem + ASNIX_CLOSURE_OFF_FORMALS) = empty_formals.raw;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_CLOSURE };
+    void *mem = ll_arena_alloc(LL_CLOSURE_SIZE);
+    *(void **)((char *)mem + LL_CLOSURE_OFF_UP) = NULL;
+    *(IrProgram **)((char *)mem + LL_CLOSURE_OFF_PROG) = prog; /* M100: one pointer, not {ops,pool} */
+    *(int64_t *)((char *)mem + LL_CLOSURE_OFF_ARITY) = 1;
+    *(uint64_t *)((char *)mem + LL_CLOSURE_OFF_FORMALS) = empty_formals.raw;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_CLOSURE };
 }
 
 static Value build_trace(void) { return make_curried_native_noforce((void *)trace2_impl, 2); }
@@ -242,9 +242,9 @@ static Value build_trace(void) { return make_curried_native_noforce((void *)trac
  *     == { a = [ 1 3 ]; b = [ 2 ]; c = [ 4 ]; }
  *   zipAttrsWith (n: v: v) [] == {}
  * Each output value is a genuine lazy call (M118: a ThunkMap,
- * asnix_thunkmap_make_desc/_pack -- value_util.c -- one shared descriptor
+ * ll_thunkmap_make_desc/_pack -- value_util.c -- one shared descriptor
  * for the whole call rather than a separate heap object per key; see
- * heap.h's ASNIX_THUNKMAP_MARKER comment, same M23 laziness fix every
+ * heap.h's LL_THUNKMAP_MARKER comment, same M23 laziness fix every
  * other map-shaped builtin in this codebase already uses for its
  * callback), not an eagerly-invoked one -- `f` must not run just from
  * zipAttrsWith being called, only once a given key's result is actually
@@ -256,23 +256,23 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0];
     Value list = args[1];
-    ASNIX_REQUIRE_LIST(list, "zipAttrsWith");
-    int64_t n = asnix_bshared_list_count(list);
-    const Value *elems = asnix_bshared_list_elems(list);
+    LL_REQUIRE_LIST(list, "zipAttrsWith");
+    int64_t n = ll_bshared_list_count(list);
+    const Value *elems = ll_bshared_list_elems(list);
 
-    Value *sets = n > 0 ? asnix_arena_alloc((uint64_t)n * sizeof(Value)) : NULL;
+    Value *sets = n > 0 ? ll_arena_alloc((uint64_t)n * sizeof(Value)) : NULL;
     int64_t total_attrs = 0;
     for (int64_t i = 0; i < n; i++) {
-        Value set = asnix_force_for_print(elems[i]);
-        ASNIX_REQUIRE_ATTRS(set, "zipAttrsWith");
+        Value set = ll_force_for_print(elems[i]);
+        LL_REQUIRE_ATTRS(set, "zipAttrsWith");
         sets[i] = set;
-        total_attrs += asnix_bshared_attrs_count(set);
+        total_attrs += ll_bshared_attrs_count(set);
     }
 
     /* Collect every (sym) appearing in any input attrset, then dedupe and
      * sort. M195: size-gated hybrid. A specialized ART (uint32_t-symbol-
      * id-keyed, mutable/non-persistent, variable-size-per-kind nodes --
-     * see asnix/art_sym.h for the full design rationale) measures as a
+     * see ll/art_sym.h for the full design rationale) measures as a
      * real win over the plain bulk-collect+sort+dedupe below -- but ONLY
      * once total_attrs is large (roughly even at total_attrs~=40-50,
      * clearly ahead by total_attrs=200, up to ~2.6x by total_attrs=
@@ -294,12 +294,12 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
      * actually wins. */
     uint32_t *distinct;
     int64_t distinct_n;
-    if (total_attrs <= ASNIX_ZIP_ART_THRESHOLD) {
-        uint32_t *all_syms = total_attrs > 0 ? asnix_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t)) : NULL;
+    if (total_attrs <= LL_ZIP_ART_THRESHOLD) {
+        uint32_t *all_syms = total_attrs > 0 ? ll_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t)) : NULL;
         int64_t total_n = 0;
         for (int64_t i = 0; i < n; i++) {
-            int64_t cnt = asnix_bshared_attrs_count(sets[i]);
-            for (int64_t j = 0; j < cnt; j++) all_syms[total_n++] = asnix_bshared_attrs_sym(sets[i], j);
+            int64_t cnt = ll_bshared_attrs_count(sets[i]);
+            for (int64_t j = 0; j < cnt; j++) all_syms[total_n++] = ll_bshared_attrs_sym(sets[i], j);
         }
         for (int64_t i = 1; i < total_n; i++) {
             int64_t j = i;
@@ -310,7 +310,7 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
             }
             all_syms[j] = s;
         }
-        distinct = total_n > 0 ? asnix_arena_alloc((uint64_t)total_n * sizeof(uint32_t)) : NULL;
+        distinct = total_n > 0 ? ll_arena_alloc((uint64_t)total_n * sizeof(uint32_t)) : NULL;
         distinct_n = 0;
         for (int64_t i = 0; i < total_n; i++) {
             if (distinct_n == 0 || distinct[distinct_n - 1] != all_syms[i]) distinct[distinct_n++] = all_syms[i];
@@ -320,64 +320,64 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
          * not a payload -- pass a dummy zero Value and NULL for
          * out_vals (art_sym_collect_sorted skips writing values entirely
          * when out_vals is NULL, zero extra cost). */
-        AsnixArtSymSet sym_set;
-        asnix_art_sym_init(&sym_set);
+        LlArtSymSet sym_set;
+        ll_art_sym_init(&sym_set);
         for (int64_t i = 0; i < n; i++) {
-            int64_t cnt = asnix_bshared_attrs_count(sets[i]);
-            for (int64_t j = 0; j < cnt; j++) asnix_art_sym_insert(&sym_set, asnix_bshared_attrs_sym(sets[i], j), (Value){0});
+            int64_t cnt = ll_bshared_attrs_count(sets[i]);
+            for (int64_t j = 0; j < cnt; j++) ll_art_sym_insert(&sym_set, ll_bshared_attrs_sym(sets[i], j), (Value){0});
         }
-        distinct = asnix_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t));
-        distinct_n = asnix_art_sym_collect_sorted(&sym_set, distinct, NULL);
+        distinct = ll_arena_alloc((uint64_t)total_attrs * sizeof(uint32_t));
+        distinct_n = ll_art_sym_collect_sorted(&sym_set, distinct, NULL);
     }
 
-    Value *out_vals = distinct_n > 0 ? asnix_arena_alloc((uint64_t)distinct_n * sizeof(Value)) : NULL;
-    Value *value_lists = distinct_n > 0 ? asnix_arena_alloc((uint64_t)distinct_n * sizeof(Value)) : NULL;
+    Value *out_vals = distinct_n > 0 ? ll_arena_alloc((uint64_t)distinct_n * sizeof(Value)) : NULL;
+    Value *value_lists = distinct_n > 0 ? ll_arena_alloc((uint64_t)distinct_n * sizeof(Value)) : NULL;
     for (int64_t k = 0; k < distinct_n; k++) {
         uint32_t sym = distinct[k];
-        Value *per_key = n > 0 ? asnix_arena_alloc((uint64_t)n * sizeof(Value)) : NULL;
+        Value *per_key = n > 0 ? ll_arena_alloc((uint64_t)n * sizeof(Value)) : NULL;
         int64_t cnt = 0;
         for (int64_t i = 0; i < n; i++) {
-            int64_t idx = asnix_bshared_attrs_find(sets[i], sym);
-            if (idx >= 0) per_key[cnt++] = asnix_bshared_attrs_value(sets[i], idx);
+            int64_t idx = ll_bshared_attrs_find(sets[i], sym);
+            if (idx >= 0) per_key[cnt++] = ll_bshared_attrs_value(sets[i], idx);
         }
-        value_lists[k] = asnix_bshared_make_list(per_key, cnt);
+        value_lists[k] = ll_bshared_make_list(per_key, cnt);
     }
 
-    if (distinct_n > 0 && distinct_n <= ASNIX_THUNKMAP_MAX_IDX + 1) {
+    if (distinct_n > 0 && distinct_n <= LL_THUNKMAP_MAX_IDX + 1) {
         /* M118: pack each key's {sym, already-collected value list} into a
          * small `Attr`-shaped `src_entries` buffer (heap.h's packed
          * {uint32_t sym; Value value;}, no header word needed -- `idx` is
          * always < distinct_n) and share ONE ThunkMapDesc across every
          * key, instead of M117's one 32-byte LazyApp PER key -- see
-         * heap.h's ASNIX_THUNKMAP_MARKER comment. */
-        char *src_entries = asnix_arena_alloc((uint64_t)distinct_n * ASNIX_ATTR_SIZE);
+         * heap.h's LL_THUNKMAP_MARKER comment. */
+        char *src_entries = ll_arena_alloc((uint64_t)distinct_n * LL_ATTR_SIZE);
         for (int64_t k = 0; k < distinct_n; k++) {
-            char *entry = src_entries + k * ASNIX_ATTR_SIZE;
-            *(uint32_t *)(entry + ASNIX_ATTR_OFF_SYM) = distinct[k];
-            *(Value *)(entry + ASNIX_ATTR_OFF_VALUE) = value_lists[k];
+            char *entry = src_entries + k * LL_ATTR_SIZE;
+            *(uint32_t *)(entry + LL_ATTR_OFF_SYM) = distinct[k];
+            *(Value *)(entry + LL_ATTR_OFF_VALUE) = value_lists[k];
         }
-        void *desc = asnix_thunkmap_make_desc(f, src_entries);
-        for (int64_t k = 0; k < distinct_n; k++) out_vals[k] = asnix_thunkmap_pack(desc, k);
-        Value out = asnix_bshared_make_attrs(distinct, out_vals, distinct_n);
-        asnix_thunkmap_set_out(desc, out);
+        void *desc = ll_thunkmap_make_desc(f, src_entries);
+        for (int64_t k = 0; k < distinct_n; k++) out_vals[k] = ll_thunkmap_pack(desc, k);
+        Value out = ll_bshared_make_attrs(distinct, out_vals, distinct_n);
+        ll_thunkmap_set_out(desc, out);
         return out;
     }
 
-    /* Pathological (distinct_n > ASNIX_THUNKMAP_MAX_IDX + 1) or empty:
+    /* Pathological (distinct_n > LL_THUNKMAP_MAX_IDX + 1) or empty:
      * fall back to the old per-element LazyApp path rather than silently
-     * truncating a packed index -- see heap.h's ASNIX_THUNKMAP_MARKER
+     * truncating a packed index -- see heap.h's LL_THUNKMAP_MARKER
      * comment. distinct_n == 0 also lands here but the loop below is then
      * simply a no-op, matching this function's pre-M118 behavior exactly. */
     for (int64_t k = 0; k < distinct_n; k++) {
         size_t namelen;
-        const char *name = asnix_sym_name(distinct[k], &namelen);
-        Value name_val = asnix_make_string_value(name, namelen);
-        out_vals[k] = asnix_make_lazyapp2(f, name_val, value_lists[k]);
+        const char *name = ll_sym_name(distinct[k], &namelen);
+        Value name_val = ll_make_string_value(name, namelen);
+        out_vals[k] = ll_make_lazyapp2(f, name_val, value_lists[k]);
     }
-    return asnix_bshared_make_attrs(distinct, out_vals, distinct_n);
+    return ll_bshared_make_attrs(distinct, out_vals, distinct_n);
 }
 
-static Value build_zipAttrsWith(void) { return asnix_bshared_make_curried_native((void *)zipAttrsWith2_impl, 2); }
+static Value build_zipAttrsWith(void) { return ll_bshared_make_curried_native((void *)zipAttrsWith2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * toXML v (M54) -- `__toXML` in real Nix (builtins-only). Serializes
@@ -463,8 +463,8 @@ static void xml_attrs_sorted_order(Value attrs, int64_t n, int64_t *order) {
         int64_t j = i;
         while (j > 0) {
             size_t al, bl;
-            const char *an = asnix_sym_name(asnix_bshared_attrs_sym(attrs, order[j - 1]), &al);
-            const char *bn = asnix_sym_name(asnix_bshared_attrs_sym(attrs, order[j]), &bl);
+            const char *an = ll_sym_name(ll_bshared_attrs_sym(attrs, order[j - 1]), &al);
+            const char *bn = ll_sym_name(ll_bshared_attrs_sym(attrs, order[j]), &bl);
             size_t minlen = al < bl ? al : bl;
             int cmp = minlen > 0 ? memcmp(an, bn, minlen) : 0;
             if (cmp == 0) cmp = (int)al - (int)bl;
@@ -478,57 +478,57 @@ static void xml_attrs_sorted_order(Value attrs, int64_t n, int64_t *order) {
 }
 
 static void xml_print_value(XmlCtx *ctx, Value v) {
-    v = asnix_force_for_print(v);
-    switch (asnix_tag_of(v)) {
-        case ASNIX_TAG_INT: {
+    v = ll_force_for_print(v);
+    switch (ll_tag_of(v)) {
+        case LL_TAG_INT: {
             char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%lld", (long long)asnix_int_value(v));
+            int len = snprintf(buf, sizeof(buf), "%lld", (long long)ll_int_value(v));
             xml_empty_attr(ctx, "int", "value", buf, len);
             return;
         }
-        case ASNIX_TAG_IMM:
-            switch (asnix_imm_subtag(v)) {
-                case ASNIX_IMM_TRUE: xml_empty_attr(ctx, "bool", "value", "true", 4); return;
-                case ASNIX_IMM_FALSE: xml_empty_attr(ctx, "bool", "value", "false", 5); return;
-                case ASNIX_IMM_NULL: xml_empty(ctx, "null"); return;
+        case LL_TAG_IMM:
+            switch (ll_imm_subtag(v)) {
+                case LL_IMM_TRUE: xml_empty_attr(ctx, "bool", "value", "true", 4); return;
+                case LL_IMM_FALSE: xml_empty_attr(ctx, "bool", "value", "false", 5); return;
+                case LL_IMM_NULL: xml_empty(ctx, "null"); return;
                 default: xml_empty(ctx, "unevaluated"); return;
             }
-        case ASNIX_TAG_PTR: {
+        case LL_TAG_PTR: {
             int64_t len;
-            const char *bytes = asnix_ptr_bytes(v, &len);
-            if (asnix_value_is_path(v)) xml_empty_attr(ctx, "path", "value", bytes, len);
+            const char *bytes = ll_ptr_bytes(v, &len);
+            if (ll_value_is_path(v)) xml_empty_attr(ctx, "path", "value", bytes, len);
             else xml_empty_attr(ctx, "string", "value", bytes, len);
             return;
         }
-        case ASNIX_TAG_LIST: {
-            int64_t n = asnix_bshared_list_count(v);
-            const Value *elems = asnix_bshared_list_elems(v);
+        case LL_TAG_LIST: {
+            int64_t n = ll_bshared_list_count(v);
+            const Value *elems = ll_bshared_list_elems(v);
             xml_open(ctx, "list");
             for (int64_t i = 0; i < n; i++) xml_print_value(ctx, elems[i]);
             xml_close(ctx, "list");
             return;
         }
-        case ASNIX_TAG_ATTRS: {
-            int64_t n = asnix_bshared_attrs_count(v);
-            int64_t *order = n > 0 ? asnix_arena_alloc((uint64_t)n * sizeof(int64_t)) : NULL;
+        case LL_TAG_ATTRS: {
+            int64_t n = ll_bshared_attrs_count(v);
+            int64_t *order = n > 0 ? ll_arena_alloc((uint64_t)n * sizeof(int64_t)) : NULL;
             xml_attrs_sorted_order(v, n, order);
             xml_open(ctx, "attrs");
             for (int64_t i = 0; i < n; i++) {
                 size_t namelen;
-                const char *name = asnix_sym_name(asnix_bshared_attrs_sym(v, order[i]), &namelen);
+                const char *name = ll_sym_name(ll_bshared_attrs_sym(v, order[i]), &namelen);
                 xml_open_attr(ctx, "attr", "name", name, (int64_t)namelen);
-                xml_print_value(ctx, asnix_bshared_attrs_value(v, order[i]));
+                xml_print_value(ctx, ll_bshared_attrs_value(v, order[i]));
                 xml_close(ctx, "attr");
             }
             xml_close(ctx, "attrs");
             return;
         }
-        case ASNIX_TAG_CLOSURE:
+        case LL_TAG_CLOSURE:
             xml_open(ctx, "function");
             xml_empty_attr(ctx, "varpat", "name", "", 0);
             xml_close(ctx, "function");
             return;
-        case ASNIX_TAG_PRIMOP:
+        case LL_TAG_PRIMOP:
         default:
             xml_empty(ctx, "unevaluated");
             return;
@@ -546,11 +546,11 @@ static Value prim_toXML(const Value *args, int64_t argc) {
     xml_print_value(&ctx, args[0]);
     xml_close(&ctx, "expr");
     fclose(out);
-    Value result = asnix_make_string_value(buf, sz);
+    Value result = ll_make_string_value(buf, sz);
     free(buf);
     return result;
 }
-static Value build_toXML(void) { return asnix_bshared_make_primop((void *)prim_toXML, 1); }
+static Value build_toXML(void) { return ll_bshared_make_primop((void *)prim_toXML, 1); }
 
 /* ---------------------------------------------------------------------
  * convertHash { hash, hashAlgo?, toHashFormat } (M54) -- `__convertHash`
@@ -570,10 +570,10 @@ static Value build_toXML(void) { return asnix_bshared_make_primop((void *)prim_t
  * exercises all 4 algorithms x all 5 formats x bare/colon-prefixed input,
  * before trusting this. */
 static int64_t algo_name_to_size(const char *name, int64_t len) {
-    if (len == 3 && memcmp(name, "md5", 3) == 0) return ASNIX_HASH_MD5_LEN;
-    if (len == 4 && memcmp(name, "sha1", 4) == 0) return ASNIX_HASH_SHA1_LEN;
-    if (len == 6 && memcmp(name, "sha256", 6) == 0) return ASNIX_HASH_SHA256_LEN;
-    if (len == 6 && memcmp(name, "sha512", 6) == 0) return ASNIX_HASH_SHA512_LEN;
+    if (len == 3 && memcmp(name, "md5", 3) == 0) return LL_HASH_MD5_LEN;
+    if (len == 4 && memcmp(name, "sha1", 4) == 0) return LL_HASH_SHA1_LEN;
+    if (len == 6 && memcmp(name, "sha256", 6) == 0) return LL_HASH_SHA256_LEN;
+    if (len == 6 && memcmp(name, "sha512", 6) == 0) return LL_HASH_SHA512_LEN;
     return -1;
 }
 
@@ -649,12 +649,12 @@ static void parse_any_hash(const char *s, int64_t slen, const char *given_algo, 
     }
 
     if (is_sri) {
-        int64_t decoded = asnix_base64_decode(rest, (size_t)rest_len, out_raw, 64);
+        int64_t decoded = ll_base64_decode(rest, (size_t)rest_len, out_raw, 64);
         if (decoded != size) fatal("convertHash", "invalid SRI hash length");
     } else {
         int64_t hexlen = size * 2;
-        int64_t b32len = (int64_t)asnix_base32_encoded_length((size_t)size);
-        int64_t b64len = (int64_t)asnix_base64_encoded_length((size_t)size);
+        int64_t b32len = (int64_t)ll_base32_encoded_length((size_t)size);
+        int64_t b64len = (int64_t)ll_base64_encoded_length((size_t)size);
         if (rest_len == hexlen) {
             for (int64_t i = 0; i < size; i++) {
                 int hi = hex_digit_value(rest[2 * i]);
@@ -663,10 +663,10 @@ static void parse_any_hash(const char *s, int64_t slen, const char *given_algo, 
                 out_raw[i] = (unsigned char)((hi << 4) | lo);
             }
         } else if (rest_len == b32len) {
-            if (asnix_base32_decode(rest, (size_t)rest_len, out_raw, (size_t)size) != 0)
+            if (ll_base32_decode(rest, (size_t)rest_len, out_raw, (size_t)size) != 0)
                 fatal("convertHash", "invalid nix32 hash");
         } else if (rest_len == b64len) {
-            if (asnix_base64_decode(rest, (size_t)rest_len, out_raw, 64) != size)
+            if (ll_base64_decode(rest, (size_t)rest_len, out_raw, 64) != size)
                 fatal("convertHash", "invalid base64 hash");
         } else {
             fatal("convertHash", "hash has the wrong length for its hash algorithm");
@@ -681,30 +681,30 @@ static void parse_any_hash(const char *s, int64_t slen, const char *given_algo, 
 static Value prim_convertHash(const Value *args, int64_t argc) {
     (void)argc;
     Value in = args[0];
-    ASNIX_REQUIRE_ATTRS(in, "convertHash");
+    LL_REQUIRE_ATTRS(in, "convertHash");
 
-    int64_t idx_hash = asnix_bshared_attrs_find(in, asnix_intern("hash", 4));
+    int64_t idx_hash = ll_bshared_attrs_find(in, ll_intern("hash", 4));
     if (idx_hash < 0) fatal("convertHash", "missing attribute 'hash'");
-    Value hash_v = asnix_force_for_print(asnix_bshared_attrs_value(in, idx_hash));
-    ASNIX_REQUIRE_STRING(hash_v, "convertHash");
+    Value hash_v = ll_force_for_print(ll_bshared_attrs_value(in, idx_hash));
+    LL_REQUIRE_STRING(hash_v, "convertHash");
     int64_t hlen;
-    const char *hbytes = asnix_ptr_bytes(hash_v, &hlen);
+    const char *hbytes = ll_ptr_bytes(hash_v, &hlen);
 
     const char *algo_bytes = NULL;
     int64_t algo_len = 0;
-    int64_t idx_algo = asnix_bshared_attrs_find(in, asnix_intern("hashAlgo", 8));
+    int64_t idx_algo = ll_bshared_attrs_find(in, ll_intern("hashAlgo", 8));
     if (idx_algo >= 0) {
-        Value algo_v = asnix_force_for_print(asnix_bshared_attrs_value(in, idx_algo));
-        ASNIX_REQUIRE_STRING(algo_v, "convertHash");
-        algo_bytes = asnix_ptr_bytes(algo_v, &algo_len);
+        Value algo_v = ll_force_for_print(ll_bshared_attrs_value(in, idx_algo));
+        LL_REQUIRE_STRING(algo_v, "convertHash");
+        algo_bytes = ll_ptr_bytes(algo_v, &algo_len);
     }
 
-    int64_t idx_fmt = asnix_bshared_attrs_find(in, asnix_intern("toHashFormat", 12));
+    int64_t idx_fmt = ll_bshared_attrs_find(in, ll_intern("toHashFormat", 12));
     if (idx_fmt < 0) fatal("convertHash", "missing attribute 'toHashFormat'");
-    Value fmt_v = asnix_force_for_print(asnix_bshared_attrs_value(in, idx_fmt));
-    ASNIX_REQUIRE_STRING(fmt_v, "convertHash");
+    Value fmt_v = ll_force_for_print(ll_bshared_attrs_value(in, idx_fmt));
+    LL_REQUIRE_STRING(fmt_v, "convertHash");
     int64_t flen;
-    const char *fbytes = asnix_ptr_bytes(fmt_v, &flen);
+    const char *fbytes = ll_ptr_bytes(fmt_v, &flen);
 
     unsigned char raw[64];
     int64_t size, name_len;
@@ -713,33 +713,33 @@ static Value prim_convertHash(const Value *args, int64_t argc) {
 
     if (str_eq_lit(fbytes, flen, "base16")) {
         char hex[128];
-        asnix_hash_to_hex(raw, (size_t)size, hex);
-        return asnix_make_string_value(hex, (size_t)(2 * size));
+        ll_hash_to_hex(raw, (size_t)size, hex);
+        return ll_make_string_value(hex, (size_t)(2 * size));
     }
     if (str_eq_lit(fbytes, flen, "nix32") || str_eq_lit(fbytes, flen, "base32")) {
-        size_t enc_len = asnix_base32_encoded_length((size_t)size);
-        char *enc = asnix_arena_alloc(enc_len);
-        asnix_base32_encode(raw, (size_t)size, enc);
-        return asnix_make_string_value(enc, enc_len);
+        size_t enc_len = ll_base32_encoded_length((size_t)size);
+        char *enc = ll_arena_alloc(enc_len);
+        ll_base32_encode(raw, (size_t)size, enc);
+        return ll_make_string_value(enc, enc_len);
     }
     if (str_eq_lit(fbytes, flen, "base64")) {
-        size_t enc_len = asnix_base64_encoded_length((size_t)size);
-        char *enc = asnix_arena_alloc(enc_len);
-        asnix_base64_encode(raw, (size_t)size, enc);
-        return asnix_make_string_value(enc, enc_len);
+        size_t enc_len = ll_base64_encoded_length((size_t)size);
+        char *enc = ll_arena_alloc(enc_len);
+        ll_base64_encode(raw, (size_t)size, enc);
+        return ll_make_string_value(enc, enc_len);
     }
     if (str_eq_lit(fbytes, flen, "sri")) {
-        size_t enc_len = asnix_base64_encoded_length((size_t)size);
-        char *enc = asnix_arena_alloc((size_t)name_len + 1 + enc_len);
+        size_t enc_len = ll_base64_encoded_length((size_t)size);
+        char *enc = ll_arena_alloc((size_t)name_len + 1 + enc_len);
         memcpy(enc, name, (size_t)name_len);
         enc[name_len] = '-';
-        asnix_base64_encode(raw, (size_t)size, enc + name_len + 1);
-        return asnix_make_string_value(enc, (size_t)name_len + 1 + enc_len);
+        ll_base64_encode(raw, (size_t)size, enc + name_len + 1);
+        return ll_make_string_value(enc, (size_t)name_len + 1 + enc_len);
     }
     fatal("convertHash", "unknown toHashFormat (expected base16/nix32/base32/base64/sri)");
-    return ASNIX_NULL; /* unreachable */
+    return LL_NULL; /* unreachable */
 }
-static Value build_convertHash(void) { return asnix_bshared_make_primop((void *)prim_convertHash, 1); }
+static Value build_convertHash(void) { return ll_bshared_make_primop((void *)prim_convertHash, 1); }
 
 /* ---------------------------------------------------------------------
  * getContext / hasContext / appendContext / unsafeDiscardOutputDependency /
@@ -757,12 +757,12 @@ static Value build_convertHash(void) { return asnix_bshared_make_primop((void *)
  * true;}`), Built (a specific named output of a derivation, `{outputs=
  * [...];}`), and DrvDeep (the WHOLE closure of a derivation, `{
  * allOutputs=true;}` -- attached to a derivation's own `.drvPath`
- * string, derivation.c's asnix_prim_derivation). */
+ * string, derivation.c's ll_prim_derivation). */
 static Value prim_getContext(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "getContext");
-    const AsnixStringContext *ctx = asnix_string_context_of(args[0]);
-    if (asnix_ctx_is_empty(ctx)) return asnix_bshared_make_attrs(NULL, NULL, 0);
+    LL_REQUIRE_STRING(args[0], "getContext");
+    const LlStringContext *ctx = ll_string_context_of(args[0]);
+    if (ll_ctx_is_empty(ctx)) return ll_bshared_make_attrs(NULL, NULL, 0);
 
     /* One aggregated record per distinct drv_path, matching real Nix's
      * own `std::map<StorePath, ContextInfo>` (context.cc's
@@ -816,9 +816,9 @@ static Value prim_getContext(const Value *args, int64_t argc) {
     }
 #undef GETCTX_FIND_OR_CREATE
 
-    uint32_t sym_path = asnix_intern("path", 4);
-    uint32_t sym_alloutputs = asnix_intern("allOutputs", 10);
-    uint32_t sym_outputs = asnix_intern("outputs", 7);
+    uint32_t sym_path = ll_intern("path", 4);
+    uint32_t sym_alloutputs = ll_intern("allOutputs", 10);
+    uint32_t sym_outputs = ll_intern("outputs", 7);
     uint32_t *top_syms = malloc(nentries * sizeof(uint32_t));
     Value *top_vals = malloc(nentries * sizeof(Value));
     for (size_t i = 0; i < nentries; i++) {
@@ -828,12 +828,12 @@ static Value prim_getContext(const Value *args, int64_t argc) {
         size_t nk = 0;
         if (e->is_path) {
             nsyms[nk] = sym_path;
-            nvals[nk] = asnix_make_imm(ASNIX_IMM_TRUE);
+            nvals[nk] = ll_make_imm(LL_IMM_TRUE);
             nk++;
         }
         if (e->all_outputs) {
             nsyms[nk] = sym_alloutputs;
-            nvals[nk] = asnix_make_imm(ASNIX_IMM_TRUE);
+            nvals[nk] = ll_make_imm(LL_IMM_TRUE);
             nk++;
         }
         if (e->noutputs > 0) {
@@ -860,34 +860,34 @@ static Value prim_getContext(const Value *args, int64_t argc) {
                 }
             }
             Value *olist = malloc(e->noutputs * sizeof(Value));
-            for (size_t j = 0; j < e->noutputs; j++) olist[j] = asnix_make_string_value(e->outputs[j], strlen(e->outputs[j]));
+            for (size_t j = 0; j < e->noutputs; j++) olist[j] = ll_make_string_value(e->outputs[j], strlen(e->outputs[j]));
             nsyms[nk] = sym_outputs;
-            nvals[nk] = asnix_bshared_make_list(olist, (int64_t)e->noutputs);
+            nvals[nk] = ll_bshared_make_list(olist, (int64_t)e->noutputs);
             free(olist);
             nk++;
         }
-        top_syms[i] = asnix_intern(e->path, strlen(e->path));
-        top_vals[i] = asnix_bshared_make_attrs(nsyms, nvals, (int64_t)nk);
+        top_syms[i] = ll_intern(e->path, strlen(e->path));
+        top_vals[i] = ll_bshared_make_attrs(nsyms, nvals, (int64_t)nk);
         free(e->outputs);
     }
     free(entries);
-    Value result = asnix_bshared_make_attrs(top_syms, top_vals, (int64_t)nentries);
+    Value result = ll_bshared_make_attrs(top_syms, top_vals, (int64_t)nentries);
     free(top_syms);
     free(top_vals);
     return result;
 }
-static Value build_getContext(void) { return asnix_bshared_make_primop((void *)prim_getContext, 1); }
+static Value build_getContext(void) { return ll_bshared_make_primop((void *)prim_getContext, 1); }
 
 /* `builtins.hasContext` -- not in the original M54 batch (real Nix has
- * it, `__hasContext`, context.cc) but trivial once `asnix_string_context_of`
+ * it, `__hasContext`, context.cc) but trivial once `ll_string_context_of`
  * exists: `!context.empty()`, verbatim. */
 static Value prim_hasContext(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "hasContext");
-    const AsnixStringContext *ctx = asnix_string_context_of(args[0]);
-    return asnix_make_imm(asnix_ctx_is_empty(ctx) ? ASNIX_IMM_FALSE : ASNIX_IMM_TRUE);
+    LL_REQUIRE_STRING(args[0], "hasContext");
+    const LlStringContext *ctx = ll_string_context_of(args[0]);
+    return ll_make_imm(ll_ctx_is_empty(ctx) ? LL_IMM_FALSE : LL_IMM_TRUE);
 }
-static Value build_hasContext(void) { return asnix_bshared_make_primop((void *)prim_hasContext, 1); }
+static Value build_hasContext(void) { return ll_bshared_make_primop((void *)prim_hasContext, 1); }
 
 /* `builtins.appendContext orig ctxAttrs` -- ported from context.cc's
  * `prim_appendContext`: starts from `orig`'s OWN existing context (a
@@ -904,86 +904,86 @@ static int ends_with_dot_drv(const char *s, size_t len) {
 }
 static Value appendContext2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "appendContext");
-    ASNIX_REQUIRE_ATTRS(args[1], "appendContext");
+    LL_REQUIRE_STRING(args[0], "appendContext");
+    LL_REQUIRE_ATTRS(args[1], "appendContext");
 
     int64_t orig_len;
     const char *orig_bytes;
-    asnix_bshared_string_bytes(args[0], &orig_bytes, &orig_len, "appendContext");
+    ll_bshared_string_bytes(args[0], &orig_bytes, &orig_len, "appendContext");
 
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    asnix_ctx_union_into(&ctx, asnix_string_context_of(args[0]));
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    ll_ctx_union_into(&ctx, ll_string_context_of(args[0]));
 
-    uint32_t sym_path = asnix_intern("path", 4);
-    uint32_t sym_alloutputs = asnix_intern("allOutputs", 10);
-    uint32_t sym_outputs = asnix_intern("outputs", 7);
+    uint32_t sym_path = ll_intern("path", 4);
+    uint32_t sym_alloutputs = ll_intern("allOutputs", 10);
+    uint32_t sym_outputs = ll_intern("outputs", 7);
 
-    int64_t nattrs = asnix_bshared_attrs_count(args[1]);
+    int64_t nattrs = ll_bshared_attrs_count(args[1]);
     for (int64_t i = 0; i < nattrs; i++) {
-        uint32_t key_sym = asnix_bshared_attrs_sym(args[1], i);
+        uint32_t key_sym = ll_bshared_attrs_sym(args[1], i);
         size_t key_len;
-        const char *key_name = asnix_sym_name(key_sym, &key_len);
+        const char *key_name = ll_sym_name(key_sym, &key_len);
         if (!(key_len > 11 && memcmp(key_name, "/nix/store/", 11) == 0)) {
-            fprintf(stderr, "asnix: appendContext: context key '%.*s' is not a store path\n", (int)key_len,
+            fprintf(stderr, "ll: appendContext: context key '%.*s' is not a store path\n", (int)key_len,
                     key_name);
             exit(1);
         }
         char *path = strndup(key_name, key_len);
-        Value entry = asnix_force_for_print(asnix_bshared_attrs_value(args[1], i));
-        ASNIX_REQUIRE_ATTRS(entry, "appendContext");
+        Value entry = ll_force_for_print(ll_bshared_attrs_value(args[1], i));
+        LL_REQUIRE_ATTRS(entry, "appendContext");
 
-        int64_t idx = asnix_bshared_attrs_find(entry, sym_path);
+        int64_t idx = ll_bshared_attrs_find(entry, sym_path);
         if (idx >= 0) {
-            Value b = asnix_force_for_print(asnix_bshared_attrs_value(entry, idx));
-            if (asnix_tag_of(b) == ASNIX_TAG_IMM && asnix_imm_subtag(b) == ASNIX_IMM_TRUE) asnix_ctx_add_opaque(&ctx, path);
+            Value b = ll_force_for_print(ll_bshared_attrs_value(entry, idx));
+            if (ll_tag_of(b) == LL_TAG_IMM && ll_imm_subtag(b) == LL_IMM_TRUE) ll_ctx_add_opaque(&ctx, path);
         }
-        idx = asnix_bshared_attrs_find(entry, sym_alloutputs);
+        idx = ll_bshared_attrs_find(entry, sym_alloutputs);
         if (idx >= 0) {
-            Value b = asnix_force_for_print(asnix_bshared_attrs_value(entry, idx));
-            if (asnix_tag_of(b) == ASNIX_TAG_IMM && asnix_imm_subtag(b) == ASNIX_IMM_TRUE) {
+            Value b = ll_force_for_print(ll_bshared_attrs_value(entry, idx));
+            if (ll_tag_of(b) == LL_TAG_IMM && ll_imm_subtag(b) == LL_IMM_TRUE) {
                 if (!ends_with_dot_drv(path, key_len)) {
                     fprintf(stderr,
-                            "asnix: appendContext: tried to add all-outputs context of %s, which is not a "
+                            "ll: appendContext: tried to add all-outputs context of %s, which is not a "
                             "derivation, to a string\n",
                             path);
                     exit(1);
                 }
-                asnix_ctx_add_deep(&ctx, path);
+                ll_ctx_add_deep(&ctx, path);
             }
         }
-        idx = asnix_bshared_attrs_find(entry, sym_outputs);
+        idx = ll_bshared_attrs_find(entry, sym_outputs);
         if (idx >= 0) {
-            Value lst = asnix_force_for_print(asnix_bshared_attrs_value(entry, idx));
-            ASNIX_REQUIRE_LIST(lst, "appendContext");
-            int64_t ocount = asnix_bshared_list_count(lst);
-            const Value *oelems = asnix_bshared_list_elems(lst);
+            Value lst = ll_force_for_print(ll_bshared_attrs_value(entry, idx));
+            LL_REQUIRE_LIST(lst, "appendContext");
+            int64_t ocount = ll_bshared_list_count(lst);
+            const Value *oelems = ll_bshared_list_elems(lst);
             if (ocount > 0 && !ends_with_dot_drv(path, key_len)) {
                 fprintf(stderr,
-                        "asnix: appendContext: tried to add derivation output context of %s, which is not a "
+                        "ll: appendContext: tried to add derivation output context of %s, which is not a "
                         "derivation, to a string\n",
                         path);
                 exit(1);
             }
             for (int64_t j = 0; j < ocount; j++) {
-                Value onm = asnix_force_for_print(oelems[j]);
-                ASNIX_REQUIRE_STRING(onm, "appendContext");
+                Value onm = ll_force_for_print(oelems[j]);
+                LL_REQUIRE_STRING(onm, "appendContext");
                 int64_t onlen;
                 const char *onbytes;
-                asnix_bshared_string_bytes(onm, &onbytes, &onlen, "appendContext");
+                ll_bshared_string_bytes(onm, &onbytes, &onlen, "appendContext");
                 char *oname = strndup(onbytes, (size_t)onlen);
-                asnix_ctx_add_built(&ctx, path, oname);
+                ll_ctx_add_built(&ctx, path, oname);
                 free(oname);
             }
         }
         free(path);
     }
 
-    Value out = asnix_make_string_value(orig_bytes, (size_t)orig_len);
-    asnix_string_attach_context(out, &ctx);
+    Value out = ll_make_string_value(orig_bytes, (size_t)orig_len);
+    ll_string_attach_context(out, &ctx);
     return out;
 }
-static Value build_appendContext(void) { return asnix_bshared_make_curried_native((void *)appendContext2_impl, 2); }
+static Value build_appendContext(void) { return ll_bshared_make_curried_native((void *)appendContext2_impl, 2); }
 
 /* `builtins.unsafeDiscardOutputDependency s` -- ported from context.cc's
  * `prim_unsafeDiscardOutputDependency`: every DrvDeep element in `s`'s
@@ -992,23 +992,23 @@ static Value build_appendContext(void) { return asnix_bshared_make_curried_nativ
  * restriction on the context, unlike `addDrvOutputDependencies` below. */
 static Value prim_unsafeDiscardOutputDependency(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "unsafeDiscardOutputDependency");
+    LL_REQUIRE_STRING(args[0], "unsafeDiscardOutputDependency");
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(args[0], &bytes, &len, "unsafeDiscardOutputDependency");
-    const AsnixStringContext *src = asnix_string_context_of(args[0]);
-    if (asnix_ctx_is_empty(src)) return args[0];
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    for (size_t i = 0; i < src->ndrvs; i++) asnix_ctx_add_built(&ctx, src->drvs[i].drv_path, src->drvs[i].output_name);
-    for (size_t i = 0; i < src->nsrcs; i++) asnix_ctx_add_opaque(&ctx, src->srcs[i]);
-    for (size_t i = 0; i < src->ndeep; i++) asnix_ctx_add_opaque(&ctx, src->deep[i]);
-    Value out = asnix_make_string_value(bytes, (size_t)len);
-    asnix_string_attach_context(out, &ctx);
+    ll_bshared_string_bytes(args[0], &bytes, &len, "unsafeDiscardOutputDependency");
+    const LlStringContext *src = ll_string_context_of(args[0]);
+    if (ll_ctx_is_empty(src)) return args[0];
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    for (size_t i = 0; i < src->ndrvs; i++) ll_ctx_add_built(&ctx, src->drvs[i].drv_path, src->drvs[i].output_name);
+    for (size_t i = 0; i < src->nsrcs; i++) ll_ctx_add_opaque(&ctx, src->srcs[i]);
+    for (size_t i = 0; i < src->ndeep; i++) ll_ctx_add_opaque(&ctx, src->deep[i]);
+    Value out = ll_make_string_value(bytes, (size_t)len);
+    ll_string_attach_context(out, &ctx);
     return out;
 }
 static Value build_unsafeDiscardOutputDependency(void) {
-    return asnix_bshared_make_primop((void *)prim_unsafeDiscardOutputDependency, 1);
+    return ll_bshared_make_primop((void *)prim_unsafeDiscardOutputDependency, 1);
 }
 
 /* `builtins.addDrvOutputDependencies s` -- ported from context.cc's
@@ -1021,40 +1021,40 @@ static Value build_unsafeDiscardOutputDependency(void) {
  * error -- "can only act on derivations, not on a derivation output". */
 static Value prim_addDrvOutputDependencies(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "addDrvOutputDependencies");
+    LL_REQUIRE_STRING(args[0], "addDrvOutputDependencies");
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(args[0], &bytes, &len, "addDrvOutputDependencies");
-    const AsnixStringContext *src = asnix_string_context_of(args[0]);
+    ll_bshared_string_bytes(args[0], &bytes, &len, "addDrvOutputDependencies");
+    const LlStringContext *src = ll_string_context_of(args[0]);
     size_t total = src ? src->ndrvs + src->nsrcs + src->ndeep : 0;
     if (total != 1) {
-        fprintf(stderr, "asnix: addDrvOutputDependencies: context must have exactly one element, but has %zu\n",
+        fprintf(stderr, "ll: addDrvOutputDependencies: context must have exactly one element, but has %zu\n",
                 total);
         exit(1);
     }
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
     if (src->ndeep == 1) {
-        asnix_ctx_add_deep(&ctx, src->deep[0]);
+        ll_ctx_add_deep(&ctx, src->deep[0]);
     } else if (src->nsrcs == 1) {
         if (!ends_with_dot_drv(src->srcs[0], strlen(src->srcs[0]))) {
-            fprintf(stderr, "asnix: addDrvOutputDependencies: path '%s' is not a derivation\n", src->srcs[0]);
+            fprintf(stderr, "ll: addDrvOutputDependencies: path '%s' is not a derivation\n", src->srcs[0]);
             exit(1);
         }
-        asnix_ctx_add_deep(&ctx, src->srcs[0]);
+        ll_ctx_add_deep(&ctx, src->srcs[0]);
     } else {
         fprintf(stderr,
-                "asnix: addDrvOutputDependencies: can only act on derivations, not on a derivation output "
+                "ll: addDrvOutputDependencies: can only act on derivations, not on a derivation output "
                 "such as '%s'\n",
                 src->drvs[0].output_name);
         exit(1);
     }
-    Value out = asnix_make_string_value(bytes, (size_t)len);
-    asnix_string_attach_context(out, &ctx);
+    Value out = ll_make_string_value(bytes, (size_t)len);
+    ll_string_attach_context(out, &ctx);
     return out;
 }
 static Value build_addDrvOutputDependencies(void) {
-    return asnix_bshared_make_primop((void *)prim_addDrvOutputDependencies, 1);
+    return ll_bshared_make_primop((void *)prim_addDrvOutputDependencies, 1);
 }
 
 /* unsafeDiscardStringContext s (M58-adjacent, found via d.nix right
@@ -1069,19 +1069,19 @@ static Value build_addDrvOutputDependencies(void) {
  * still-attached context (confirmed needed directly against real
  * `nix-instantiate --eval`'s `eval-okay-context-builtins.nix`: `discard
  * = ctx (builtins.unsafeDiscardStringContext s);` must be `{}`, not
- * `s`'s own non-empty context). A fresh `asnix_make_string_value` with
+ * `s`'s own non-empty context). A fresh `ll_make_string_value` with
  * the same bytes, under a NEW arena pointer, with nothing ever attached
  * to it, is exactly that. */
 static Value prim_unsafeDiscardStringContext(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "unsafeDiscardStringContext");
+    LL_REQUIRE_STRING(args[0], "unsafeDiscardStringContext");
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(args[0], &bytes, &len, "unsafeDiscardStringContext");
-    return asnix_make_string_value(bytes, (size_t)len);
+    ll_bshared_string_bytes(args[0], &bytes, &len, "unsafeDiscardStringContext");
+    return ll_make_string_value(bytes, (size_t)len);
 }
 static Value build_unsafeDiscardStringContext(void) {
-    return asnix_bshared_make_primop((void *)prim_unsafeDiscardStringContext, 1);
+    return ll_bshared_make_primop((void *)prim_unsafeDiscardStringContext, 1);
 }
 
 /* ---------------------------------------------------------------------
@@ -1091,7 +1091,7 @@ static Value build_unsafeDiscardStringContext(void) {
  * notes). `scope`'s attribute names become extra bare identifiers,
  * resolvable (and shadowing any bare global/builtins.X of the same
  * name) inside `path`'s own lexical scope -- see compiler.c's
- * asnix_compile_scoped/eval_file.c's asnix_eval_file_scoped for the
+ * ll_compile_scoped/eval_file.c's ll_eval_file_scoped for the
  * actual mechanism (a real compile-time ScopeFrame + runtime Env hop,
  * exactly mirroring cppnix's own StaticEnv-splicing implementation, NOT
  * a `with`-style runtime fallback -- `with` would give scope's names the
@@ -1107,34 +1107,34 @@ static Value scopedImport2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value scope = args[0];
     Value target = args[1];
-    ASNIX_REQUIRE_ATTRS(scope, "scopedImport");
+    LL_REQUIRE_ATTRS(scope, "scopedImport");
 
     int64_t len;
     const char *bytes;
-    if (asnix_value_is_path(target)) {
-        bytes = asnix_ptr_bytes(target, &len);
-    } else if (asnix_tag_of(target) == ASNIX_TAG_PTR) {
-        bytes = asnix_ptr_bytes(target, &len);
+    if (ll_value_is_path(target)) {
+        bytes = ll_ptr_bytes(target, &len);
+    } else if (ll_tag_of(target) == LL_TAG_PTR) {
+        bytes = ll_ptr_bytes(target, &len);
         if (len == 0 || bytes[0] != '/') fatal("scopedImport", "path string doesn't represent an absolute path");
     } else {
         fatal("scopedImport", "second argument must be a path or an absolute-path string");
-        return ASNIX_NULL; /* unreachable */
+        return LL_NULL; /* unreachable */
     }
-    char *path = asnix_arena_alloc((size_t)len + 1);
+    char *path = ll_arena_alloc((size_t)len + 1);
     memcpy(path, bytes, (size_t)len);
     path[len] = '\0';
-    return asnix_eval_file_scoped(path, scope);
+    return ll_eval_file_scoped(path, scope);
 }
-static Value build_scopedImport(void) { return asnix_bshared_make_curried_native((void *)scopedImport2_impl, 2); }
+static Value build_scopedImport(void) { return ll_bshared_make_curried_native((void *)scopedImport2_impl, 2); }
 
-Value asnix_make_scopedImport_primop(void) { return build_scopedImport(); }
+Value ll_make_scopedImport_primop(void) { return build_scopedImport(); }
 
 /* ---------------------------------------------------------------------
  * unsafeGetAttrPos name attrset (M59) -- `builtins`-only in real Nix
  * (confirmed: `nix-instantiate --eval --strict -E 'builtins.isFunction
  * unsafeGetAttrPos'` errors "undefined variable 'unsafeGetAttrPos'",
  * unlike `scopedImport` above -- so this is wired into
- * ASNIX_M54_BUILTINS only, with no asnix_make_*_primop/root-Env-slot
+ * LL_M54_BUILTINS only, with no ll_make_*_primop/root-Env-slot
  * counterpart the way scopedImport has one).
  *
  * Real Nix returns `{ file; line; column; }` describing where
@@ -1145,10 +1145,10 @@ Value asnix_make_scopedImport_primop(void) { return build_scopedImport(); }
  *
  * asnix has no source-position information available at this call site
  * at all, by construction: `attrset` here is a bare runtime Attrs heap
- * value (ASNIX_TAG_ATTRS) with no back-pointer to whatever AST node (or
+ * value (LL_TAG_ATTRS) with no back-pointer to whatever AST node (or
  * which of possibly several files, if the attrset was merged/imported)
- * originally built it, and growing the Attr record (ASNIX_ATTR_SIZE/
- * ASNIX_ATTR_OFF_SYM/ASNIX_ATTR_OFF_VALUE, heap.h) to add one is
+ * originally built it, and growing the Attr record (LL_ATTR_SIZE/
+ * LL_ATTR_OFF_SYM/LL_ATTR_OFF_VALUE, heap.h) to add one is
  * EXPLICITLY out of scope for this milestone (see docs/architecture.md's
  * M59 scope notes -- this is a deliberately narrow, approximate
  * implementation requested in place of the full position-tracking
@@ -1156,18 +1156,18 @@ Value asnix_make_scopedImport_primop(void) { return build_scopedImport(); }
  * cross-cutting change). What this function actually does:
  *
  *   - The null-vs-not-null distinction IS exact in two different ways,
- *     now (M80, see docs/architecture.md): returns real `ASNIX_NULL` if
- *     `name` isn't one of `attrset`'s attributes at all (asnix_bshared_
+ *     now (M80, see docs/architecture.md): returns real `LL_NULL` if
+ *     `name` isn't one of `attrset`'s attributes at all (ll_bshared_
  *     attrs_find, unchanged since M59) -- same membership test
  *     `hasAttr`/`getAttr` already use -- AND ALSO if it is, but its
- *     (forced) value is `ASNIX_TAG_PRIMOP`: a native builtin genuinely
+ *     (forced) value is `LL_TAG_PRIMOP`: a native builtin genuinely
  *     has no source position in real Nix either (confirmed:
  *     `unsafeGetAttrPos "abort" builtins` => `null`, even though
  *     `abort` is unquestionably an attribute of `builtins`) -- found via
  *     numtide/nix-conformance's eval-okay-getattrpos-undefined.nix.
  *     `{file;line;column;}` otherwise.
  *   - `file` is APPROXIMATE: the resolved absolute path of the
- *     OUTERMOST file asnix was originally invoked on (asnix_eval_
+ *     OUTERMOST file asnix was originally invoked on (ll_eval_
  *     top_level_file, eval_file.c/.h), reported uniformly for every
  *     attribute that exists -- regardless of which actual file/import
  *     wrote the specific binding being asked about. "" if no file is
@@ -1182,16 +1182,16 @@ Value asnix_make_scopedImport_primop(void) { return build_scopedImport(); }
  *     than implying false precision. */
 static Value unsafeGetAttrPos2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "unsafeGetAttrPos");
-    ASNIX_REQUIRE_ATTRS(args[1], "unsafeGetAttrPos");
+    LL_REQUIRE_STRING(args[0], "unsafeGetAttrPos");
+    LL_REQUIRE_ATTRS(args[1], "unsafeGetAttrPos");
 
     const char *name_bytes;
     int64_t name_len;
-    asnix_bshared_string_bytes(args[0], &name_bytes, &name_len, "unsafeGetAttrPos");
-    uint32_t name_sym = asnix_intern(name_bytes, (size_t)name_len);
+    ll_bshared_string_bytes(args[0], &name_bytes, &name_len, "unsafeGetAttrPos");
+    uint32_t name_sym = ll_intern(name_bytes, (size_t)name_len);
 
-    int64_t idx = asnix_bshared_attrs_find(args[1], name_sym);
-    if (idx < 0) return ASNIX_NULL;
+    int64_t idx = ll_bshared_attrs_find(args[1], name_sym);
+    if (idx < 0) return LL_NULL;
 
     /* M80 (see docs/architecture.md): a NATIVE builtin has no source
      * position at all in real Nix (confirmed directly against
@@ -1199,44 +1199,44 @@ static Value unsafeGetAttrPos2_impl(const Value *args, int64_t argc) {
      * `null`, even though `abort` genuinely IS an attribute of
      * `builtins` -- eval.cc's own `Value::determinePos` returns
      * `noPos`/`std::nullopt` for a `tPrimOp`/`tPrimOpApp`, never a
-     * placeholder). `ASNIX_TAG_PRIMOP` is UNAMBIGUOUSLY a from-C native
+     * placeholder). `LL_TAG_PRIMOP` is UNAMBIGUOUSLY a from-C native
      * builtin with no Nix-source binding to point at -- unlike
-     * `ASNIX_TAG_CLOSURE` (main.c's printer has its own comment on why
+     * `LL_TAG_CLOSURE` (main.c's printer has its own comment on why
      * THAT tag can't be trusted the same way: a partially-applied
      * multi-arg native builtin is indistinguishable, at this tag alone,
      * from a genuine user lambda) -- so this check is exact for the
-     * `ASNIX_TAG_PRIMOP` case, not another approximation layered on top
+     * `LL_TAG_PRIMOP` case, not another approximation layered on top
      * of the existing one: a curried-but-not-yet-fully-applied native
-     * (still `ASNIX_TAG_CLOSURE`) isn't caught here and keeps the
+     * (still `LL_TAG_CLOSURE`) isn't caught here and keeps the
      * pre-existing placeholder position, same documented gap as
      * before. */
-    /* M88: `idx` came from asnix_bshared_attrs_find above, which already
+    /* M88: `idx` came from ll_bshared_attrs_find above, which already
      * resolves a lazy union header (heap.h) to its flat form internally
      * -- re-resolving args[1] here (idempotent, returns the same cached
      * flat Value) keeps this raw re-index consistent with the index
      * `find` actually computed, instead of indexing into args[1]'s own
      * possibly-union raw bytes. */
-    Value attrs_flat = asnix_bshared_attrs_resolve(args[1]);
-    const char *entry = (const char *)(attrs_flat.raw & ~0x7ULL) + ASNIX_ATTRS_OFF_ENTRIES + idx * ASNIX_ATTR_SIZE;
-    Value attr_val = asnix_force_for_print(*(const Value *)(entry + ASNIX_ATTR_OFF_VALUE));
-    if (asnix_tag_of(attr_val) == ASNIX_TAG_PRIMOP) return ASNIX_NULL;
+    Value attrs_flat = ll_bshared_attrs_resolve(args[1]);
+    const char *entry = (const char *)(attrs_flat.raw & ~0x7ULL) + LL_ATTRS_OFF_ENTRIES + idx * LL_ATTR_SIZE;
+    Value attr_val = ll_force_for_print(*(const Value *)(entry + LL_ATTR_OFF_VALUE));
+    if (ll_tag_of(attr_val) == LL_TAG_PRIMOP) return LL_NULL;
 
-    const char *file = asnix_eval_top_level_file();
+    const char *file = ll_eval_top_level_file();
     if (!file) file = "";
 
     uint32_t syms[3];
     Value vals[3];
-    syms[0] = asnix_intern("file", 4);
-    vals[0] = asnix_make_string_value(file, strlen(file));
-    syms[1] = asnix_intern("line", 4);
-    vals[1] = asnix_make_int(1);
-    syms[2] = asnix_intern("column", 6);
-    vals[2] = asnix_make_int(1);
-    return asnix_bshared_make_attrs(syms, vals, 3);
+    syms[0] = ll_intern("file", 4);
+    vals[0] = ll_make_string_value(file, strlen(file));
+    syms[1] = ll_intern("line", 4);
+    vals[1] = ll_make_int(1);
+    syms[2] = ll_intern("column", 6);
+    vals[2] = ll_make_int(1);
+    return ll_bshared_make_attrs(syms, vals, 3);
 }
-static Value build_unsafeGetAttrPos(void) { return asnix_bshared_make_curried_native((void *)unsafeGetAttrPos2_impl, 2); }
+static Value build_unsafeGetAttrPos(void) { return ll_bshared_make_curried_native((void *)unsafeGetAttrPos2_impl, 2); }
 
-const AsnixBuiltinM54Def ASNIX_M54_BUILTINS[] = {
+const LlBuiltinM54Def LL_M54_BUILTINS[] = {
     { "bitAnd", build_bitAnd },
     { "bitOr", build_bitOr },
     { "bitXor", build_bitXor },
@@ -1254,4 +1254,4 @@ const AsnixBuiltinM54Def ASNIX_M54_BUILTINS[] = {
     { "unsafeGetAttrPos", build_unsafeGetAttrPos },
 };
 
-const size_t ASNIX_M54_BUILTINS_COUNT = sizeof(ASNIX_M54_BUILTINS) / sizeof(ASNIX_M54_BUILTINS[0]);
+const size_t LL_M54_BUILTINS_COUNT = sizeof(LL_M54_BUILTINS) / sizeof(LL_M54_BUILTINS[0]);

@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_TRYEVAL_H
-#define ASNIX_TRYEVAL_H
+#ifndef LL_TRYEVAL_H
+#define LL_TRYEVAL_H
 
 #include <setjmp.h>
 #include <stddef.h>
@@ -18,7 +18,7 @@
  * recursion, NOT missing attributes, and explicitly NOT `abort` (verified
  * directly against `nix-instantiate --eval`: `tryEval (abort "x")` still
  * aborts the whole process unconditionally). Every other fatal path in
- * this codebase (`asnix_fatal`, used for all of those) is completely
+ * this codebase (`ll_fatal`, used for all of those) is completely
  * unaffected by this file -- only `prim_throw` (builtins.c) and
  * `OP_ASSERT_FAIL`'s handler (op_assert.S) route through here instead.
  *
@@ -46,12 +46,12 @@
  * eval-okay-tryeval-failed-thunk-reeval.nix: "Since Nix 2.34, errors are
  * memoized" -- real Nix re-raises the SAME cached failure on a second
  * force, rather than either re-running the thunk's body or treating it
- * as a genuine cycle). Fixed via `asnix_inprogress_head`
+ * as a genuine cycle). Fixed via `ll_inprogress_head`
  * (stacklimits.S): every op_*.S/force.S site that marks a thunk
  * IN_PROGRESS also pushes it onto this intrusive stack (linked through
- * the thunk's own, now-unused `env` field -- see ir.h's ASNIX_THUNK_OFF_
- * ENV comment), and `asnix_tryeval_save_inprogress_head`/
- * `asnix_tryeval_unwind_inprogress` below let `prim_tryEval`
+ * the thunk's own, now-unused `env` field -- see ir.h's LL_THUNK_OFF_
+ * ENV comment), and `ll_tryeval_save_inprogress_head`/
+ * `ll_tryeval_unwind_inprogress` below let `prim_tryEval`
  * (builtins_tryeval.c) walk exactly the range of thunks that became
  * IN_PROGRESS during ITS OWN dynamic extent (not any OUTER, still-
  * legitimately-in-progress force further up the call chain) and mark
@@ -60,9 +60,9 @@
  * each op_*.S/force.S's own `.L*_reraise` label.
  */
 
-#define ASNIX_TRYEVAL_MAX_DEPTH 256
+#define LL_TRYEVAL_MAX_DEPTH 256
 
-/* Pushes `buf` as the target for the next asnix_tryeval_raise_or_fatal
+/* Pushes `buf` as the target for the next ll_tryeval_raise_or_fatal
  * call (supports nested `tryEval`s: a LIFO stack of buffer pointers).
  * `buf` must be `setjmp`'d by the caller itself, immediately after this
  * call returns -- `setjmp` can't be meaningfully wrapped in a helper
@@ -70,36 +70,36 @@
  * frame. Exits cleanly (not a tryEval-catchable condition itself) if
  * nested too deeply -- matching this project's existing fixed-size-
  * stack-array convention elsewhere (e.g. AST_VAR's with-chain limit). */
-void asnix_tryeval_push(jmp_buf *buf);
+void ll_tryeval_push(jmp_buf *buf);
 
-/* Pops the stack pushed by asnix_tryeval_push -- call once tryEval's own
+/* Pops the stack pushed by ll_tryeval_push -- call once tryEval's own
  * try/catch region is done, on EITHER path (the forced value came back
  * normally, or the catch branch ran after a longjmp here). */
-void asnix_tryeval_pop(void);
+void ll_tryeval_pop(void);
 
 /* `throw`/a failed `assert` reaches here. If a `tryEval` is currently
  * active (the stack above is non-empty), longjmps to its buffer --
- * never returns. Otherwise falls back to exactly asnix_fatal's own
+ * never returns. Otherwise falls back to exactly ll_fatal's own
  * behavior (write `msg` to stderr, exit 1) -- never returns either way. */
-_Noreturn void asnix_tryeval_raise_or_fatal(const char *msg, size_t len);
+_Noreturn void ll_tryeval_raise_or_fatal(const char *msg, size_t len);
 
-/* M82: snapshot of `asnix_inprogress_head` (stacklimits.S) -- call BEFORE
+/* M82: snapshot of `ll_inprogress_head` (stacklimits.S) -- call BEFORE
  * forcing the expression `tryEval` was asked to evaluate (alongside the
  * existing VALSTACK/RETSP-limit saves, builtins_tryeval.c), so a later
- * `asnix_tryeval_unwind_inprogress` call knows exactly which thunks
+ * `ll_tryeval_unwind_inprogress` call knows exactly which thunks
  * became IN_PROGRESS strictly within this `tryEval`'s own dynamic
  * extent. */
-int64_t asnix_tryeval_save_inprogress_head(void);
+int64_t ll_tryeval_save_inprogress_head(void);
 
-/* M82: walks `asnix_inprogress_head`'s intrusive stack from its CURRENT
+/* M82: walks `ll_inprogress_head`'s intrusive stack from its CURRENT
  * value down to `saved_head` (as returned by
- * asnix_tryeval_save_inprogress_head before the force that just got
- * caught), marking every thunk in that range ASNIX_THUNK_STATE_FAILED
+ * ll_tryeval_save_inprogress_head before the force that just got
+ * caught), marking every thunk in that range LL_THUNK_STATE_FAILED
  * (instead of leaving it stuck IN_PROGRESS) and restoring
- * `asnix_inprogress_head` to `saved_head`. Call ONLY from the caught
+ * `ll_inprogress_head` to `saved_head`. Call ONLY from the caught
  * (longjmp'd-to) branch -- on the normal-return path every thunk already
  * popped itself via its own successful OP_RET, so the head is already
  * back to `saved_head` with nothing to unwind. */
-void asnix_tryeval_unwind_inprogress(int64_t saved_head);
+void ll_tryeval_unwind_inprogress(int64_t saved_head);
 
-#endif /* ASNIX_TRYEVAL_H */
+#endif /* LL_TRYEVAL_H */

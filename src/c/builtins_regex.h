@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_REGEX_H
-#define ASNIX_BUILTINS_REGEX_H
+#ifndef LL_BUILTINS_REGEX_H
+#define LL_BUILTINS_REGEX_H
 
 #include <stddef.h>
 
-#include "builtins_misc.h" /* shared AsnixBuiltinMiscDef/-Builder {name, build()} shape */
+#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
 
 /*
  * `builtins.match`/`builtins.split` -- POSIX Extended Regular Expression
@@ -24,16 +24,16 @@
  * logic themselves.
  */
 
-extern const AsnixBuiltinMiscDef ASNIX_REGEX_BUILTINS[];
-extern const size_t ASNIX_REGEX_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_REGEX_BUILTINS[];
+extern const size_t LL_REGEX_BUILTINS_COUNT;
 
-#include "asnix/value.h" /* Value */
+#include "ll/value.h" /* Value */
 #include <stdint.h>       /* int64_t */
 
 /* M110: exported so compiler.c's try_fused_native_call2 can fuse a
  * statically-recognized, fully-saturated `builtins.match a b` call site
  * into one direct native call -- see compiler.c's own comment. Ordinary
  * force-by-default native, no special handling needed. */
-Value asnix_prim_match2_impl(const Value *args, int64_t argc);
+Value ll_prim_match2_impl(const Value *args, int64_t argc);
 
-#endif /* ASNIX_BUILTINS_REGEX_H */
+#endif /* LL_BUILTINS_REGEX_H */

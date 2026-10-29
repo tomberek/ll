@@ -1,13 +1,13 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_DERIVATION_H
-#define ASNIX_DERIVATION_H
+#ifndef LL_DERIVATION_H
+#define LL_DERIVATION_H
 
 #include <stddef.h>
 
-#include "asnix/value.h"
-#include "builtins_misc.h" /* AsnixBuiltinMiscDef -- reused for ASNIX_DERIVATION_BUILTINS below,
+#include "ll/value.h"
+#include "builtins_misc.h" /* LlBuiltinMiscDef -- reused for LL_DERIVATION_BUILTINS below,
                              * same shared-shape precedent builtins_attrs.h already set for
-                             * builtins_list.h's AsnixBuiltinDef. */
+                             * builtins_list.h's LlBuiltinDef. */
 
 /*
  * `derivationStrict { ... }` (M8's minimal slice, see
@@ -17,7 +17,7 @@
  * `args` (list of strings), `outputs` (list of strings, default
  * `["out"]`, same default the Nix-level `derivation` wrapper below
  * assumes). Every other attr becomes an environment variable (coerced
- * to a string via `asnix_coerce_to_string`, i.e. the same rules as
+ * to a string via `ll_coerce_to_string`, i.e. the same rules as
  * `builtins.toString`) -- including `outputs` itself, which is ALSO
  * parsed into the actual set of declared output names (matching real
  * Nix: a multi-output `.drv`'s env genuinely has an `outputs = "out
@@ -27,11 +27,11 @@
  * `__structuredAttrs = true;` (M67) switches the "every other attr
  * becomes an env var" rule above off: instead, every attr (except
  * `args`) is JSON-serialized (the exact `builtins.toJSON` encoder,
- * `asnix_toJSON_cstr` in builtins_compare.c) into one `__json` env var,
+ * `ll_toJSON_cstr` in builtins_compare.c) into one `__json` env var,
  * which is what lets an attribute whose value isn't coercible to a
  * plain string (e.g. `env = { foo = "bar"; };`, a nested attrset) flow
- * through instead of hitting `asnix_coerce_to_string`'s fatal path --
- * see derivation.c's `asnix_prim_derivation` and docs/architecture.md's
+ * through instead of hitting `ll_coerce_to_string`'s fatal path --
+ * see derivation.c's `ll_prim_derivation` and docs/architecture.md's
  * M67 scope notes for the full algorithm (ported directly from
  * `~/nix/src/libexpr/primops.cc`'s `derivationStrictInternal`). The
  * masked/real two-pass output-path hashing below is unaffected either
@@ -56,7 +56,7 @@
  * -- that's exactly what real Nix's OWN `derivation` does on top of
  * this primop, via a Nix-level wrapper (`~/nix/src/libexpr/primops/
  * derivation.nix`) that this project ports verbatim (M58, see
- * asnix_make_derivation_wrapper_value below) rather than reimplementing
+ * ll_make_derivation_wrapper_value below) rather than reimplementing
  * in C. Does not track string context (so a derivation's outPath can't
  * yet be used as another derivation's input -- that needs the recursive
  * `hashDerivationModulo` masking real Nix does for input derivations,
@@ -67,10 +67,10 @@
  * `validate_output_hash_fields` for the pre-existing fixed-output scope
  * cut this builds on).
  */
-Value asnix_prim_derivation(const Value *args, int64_t argc);
+Value ll_prim_derivation(const Value *args, int64_t argc);
 
 /* M80: real Nix's `makeFixedOutputPath` formula (M73's
- * `asnix_compute_fixed_output_path`, ~/nix/src/libstore/
+ * `ll_compute_fixed_output_path`, ~/nix/src/libstore/
  * store-dir-config.cc) -- exposed publicly so `builtins.path`'s
  * `recursive=false`/pinned-`sha256` modes (builtins_path.c) can reuse
  * it exactly rather than re-deriving the same formula a second time.
@@ -80,7 +80,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc);
  * project's own callers only ever pass `"sha256"`); `raw`/`raw_len` is
  * that algorithm's raw digest bytes (a NAR hash for `"recursive"`, a
  * flat content hash otherwise). */
-void asnix_compute_fixed_output_path(const char *output_hash_mode, const uint8_t raw[64], size_t raw_len,
+void ll_compute_fixed_output_path(const char *output_hash_mode, const uint8_t raw[64], size_t raw_len,
                                       const char *algo, size_t algo_len, const char *name, char *out,
                                       size_t out_cap);
 
@@ -88,7 +88,7 @@ void asnix_compute_fixed_output_path(const char *output_hash_mode, const uint8_t
  * `derivationStrict` (and `builtins.derivationStrict`), exactly matching
  * real Nix's own split between the low-level primop and the `derivation`
  * wrapper below that's actually built on top of it. */
-Value asnix_make_derivation_strict_primop(void);
+Value ll_make_derivation_strict_primop(void);
 
 /* M58: real Nix's `derivation` is NOT a primop -- it's a short Nix-level
  * function (ported verbatim below from cppnix's own
@@ -113,13 +113,13 @@ Value asnix_make_derivation_strict_primop(void);
  * no caller-specific state, so reusing one across every root Env's
  * `derivation` binding is behaviorally identical to rebuilding it fresh
  * each time, just without paying the lex/parse/compile cost repeatedly. */
-Value asnix_make_derivation_wrapper_value(void);
+Value ll_make_derivation_wrapper_value(void);
 
 /* `builtins.derivation`/`builtins.derivationStrict` -- same two Values
- * as the bare globals above, wired into asnix_make_builtins_attrs
+ * as the bare globals above, wired into ll_make_builtins_attrs
  * (builtins.c) via the same {name,build()} integration step every other
  * builtins-expansion module uses. */
-extern const AsnixBuiltinMiscDef ASNIX_DERIVATION_BUILTINS[];
-extern const size_t ASNIX_DERIVATION_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_DERIVATION_BUILTINS[];
+extern const size_t LL_DERIVATION_BUILTINS_COUNT;
 
-#endif /* ASNIX_DERIVATION_H */
+#endif /* LL_DERIVATION_H */

@@ -6,10 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/ir.h"
-#include "asnix/irbuild.h"
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
+#include "ll/irbuild.h"
 #include "base32.h"
 #include "builtins_shared.h"
 #include "hash_shim.h"
@@ -25,14 +25,14 @@
  * --------------------------------------------------------------------- */
 
 static Value make_primop_value(void *fn, int64_t arity) {
-    void *mem = asnix_arena_alloc(ASNIX_PRIMOP_SIZE);
-    *(void **)((char *)mem + ASNIX_PRIMOP_OFF_FN) = fn;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_ARITY) = arity;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PRIMOP };
+    void *mem = ll_arena_alloc(LL_PRIMOP_SIZE);
+    *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_ARITY) = arity;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PRIMOP };
 }
 
 static void fatal(const char *msg) {
-    fprintf(stderr, "asnix: %s\n", msg);
+    fprintf(stderr, "ll: %s\n", msg);
     exit(1);
 }
 
@@ -40,13 +40,13 @@ static void fatal(const char *msg) {
  * strict style as builtins.c's prim_length (require the exact tag,
  * fatal otherwise), not real Nix's more permissive coerceToString. */
 static void as_string(Value v, const char **bytes_out, int64_t *len_out, const char *who) {
-    if (asnix_tag_of(v) != ASNIX_TAG_PTR) {
-        fprintf(stderr, "asnix: %s: expected a string argument\n", who);
+    if (ll_tag_of(v) != LL_TAG_PTR) {
+        fprintf(stderr, "ll: %s: expected a string argument\n", who);
         exit(1);
     }
     const char *s = (const char *)(v.raw & ~0x7ULL);
-    *len_out = *(const int64_t *)(s + ASNIX_STRING_OFF_LEN);
-    *bytes_out = s + ASNIX_STRING_OFF_BYTES;
+    *len_out = *(const int64_t *)(s + LL_STRING_OFF_LEN);
+    *bytes_out = s + LL_STRING_OFF_BYTES;
 }
 
 /*
@@ -98,8 +98,8 @@ static Value make_curried_native(void *native_fn, int64_t arity) {
     /* Never a lambda-pattern -- `builtins.functionArgs` on any of these
      * closures is `{}`, same as real Nix's `functionArgs builtins.add`
      * (M37). M80: the shared canonical marker, not a fresh allocation --
-     * see builtins_shared.h's asnix_bshared_native_formals_marker. */
-    Value empty_formals = asnix_bshared_native_formals_marker();
+     * see builtins_shared.h's ll_bshared_native_formals_marker. */
+    Value empty_formals = ll_bshared_native_formals_marker();
 
     /* Innermost program: runs once the *last* curried argument has been
      * supplied, in the Env chain built up by `arity` nested single-slot
@@ -127,12 +127,12 @@ static Value make_curried_native(void *native_fn, int64_t arity) {
 
     /* The outermost closure itself -- captures no Env (up = NULL, same
      * as any other root-scope value) since nothing has been bound yet. */
-    void *mem = asnix_arena_alloc(ASNIX_CLOSURE_SIZE);
-    *(void **)((char *)mem + ASNIX_CLOSURE_OFF_UP) = NULL;
-    *(IrProgram **)((char *)mem + ASNIX_CLOSURE_OFF_PROG) = prog; /* M100: one pointer, not {ops,pool} */
-    *(int64_t *)((char *)mem + ASNIX_CLOSURE_OFF_ARITY) = 1;
-    *(uint64_t *)((char *)mem + ASNIX_CLOSURE_OFF_FORMALS) = empty_formals.raw;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_CLOSURE };
+    void *mem = ll_arena_alloc(LL_CLOSURE_SIZE);
+    *(void **)((char *)mem + LL_CLOSURE_OFF_UP) = NULL;
+    *(IrProgram **)((char *)mem + LL_CLOSURE_OFF_PROG) = prog; /* M100: one pointer, not {ops,pool} */
+    *(int64_t *)((char *)mem + LL_CLOSURE_OFF_ARITY) = 1;
+    *(uint64_t *)((char *)mem + LL_CLOSURE_OFF_FORMALS) = empty_formals.raw;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_CLOSURE };
 }
 
 /* ---------------------------------------------------------------------
@@ -149,10 +149,10 @@ static Value make_curried_native(void *native_fn, int64_t arity) {
 static Value substring3_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value start_v = args[0], len_v = args[1], str_v = args[2];
-    if (asnix_tag_of(start_v) != ASNIX_TAG_INT || asnix_tag_of(len_v) != ASNIX_TAG_INT)
+    if (ll_tag_of(start_v) != LL_TAG_INT || ll_tag_of(len_v) != LL_TAG_INT)
         fatal("substring: start and len must be integers");
-    int64_t start = asnix_int_value(start_v);
-    int64_t len = asnix_int_value(len_v);
+    int64_t start = ll_int_value(start_v);
+    int64_t len = ll_int_value(len_v);
     if (start < 0) fatal("negative start position in 'substring'");
 
     const char *bytes;
@@ -161,14 +161,14 @@ static Value substring3_impl(const Value *args, int64_t argc) {
 
     int64_t start_n = start > slen ? slen : start;
     int64_t actual_len = len < 0 ? slen - start_n : (start_n + len > slen ? slen - start_n : len);
-    Value out = asnix_make_string_value(bytes + start_n, (size_t)actual_len);
+    Value out = ll_make_string_value(bytes + start_n, (size_t)actual_len);
     /* M80: real Nix's own `prim_substring` copies the WHOLE original
      * string's context onto the slice verbatim, regardless of which
      * bytes the slice actually keeps (confirmed directly: `getContext
      * (substring 0 0 "${d}")` is non-empty on real Nix, same as the
      * full string's -- substring never trims context). */
-    const AsnixStringContext *ctx = asnix_string_context_of(str_v);
-    if (!asnix_ctx_is_empty(ctx)) asnix_string_attach_context(out, ctx);
+    const LlStringContext *ctx = ll_string_context_of(str_v);
+    if (!ll_ctx_is_empty(ctx)) ll_string_attach_context(out, ctx);
     return out;
 }
 
@@ -185,7 +185,7 @@ static Value prim_stringLength(const Value *args, int64_t argc) {
     const char *bytes;
     int64_t len;
     as_string(args[0], &bytes, &len, "stringLength");
-    return asnix_make_int(len);
+    return ll_make_int(len);
 }
 
 static Value build_stringLength(void) {
@@ -209,17 +209,17 @@ static Value concatStringsSep2_impl(const Value *args, int64_t argc) {
     as_string(args[0], &sep_bytes, &sep_len, "concatStringsSep");
 
     Value list_v = args[1];
-    if (asnix_tag_of(list_v) != ASNIX_TAG_LIST) fatal("concatStringsSep: second argument must be a list");
+    if (ll_tag_of(list_v) != LL_TAG_LIST) fatal("concatStringsSep: second argument must be a list");
     const char *list_base = (const char *)(list_v.raw & ~0x7ULL);
-    int64_t count = *(const int64_t *)(list_base + ASNIX_LIST_OFF_COUNT);
-    const Value *elems = (const Value *)(list_base + ASNIX_LIST_OFF_ELEMS);
+    int64_t count = *(const int64_t *)(list_base + LL_LIST_OFF_COUNT);
+    const Value *elems = (const Value *)(list_base + LL_LIST_OFF_ELEMS);
 
     int64_t total = 0;
     /* M76/M77 follow-up, merged from two independent fixes found chasing
      * the d.nix/nixpkgs-hash-parity bug-chase:
      *  - each element is coerced the same way a genuine `"${...}"` string
      *    interpolation would (strings/paths/attrsets with `__toString`/
-     *    `outPath` -- see asnix_coerce_to_string_for_concat_sep's own
+     *    `outPath` -- see ll_coerce_to_string_for_concat_sep's own
      *    comment in value_util.c), NOT required to already be a bare
      *    string -- matches real Nix's `prim_concatStringsSep`, which
      *    calls `coerceToString` with its default (non-`coerceMore`)
@@ -230,8 +230,8 @@ static Value concatStringsSep2_impl(const Value *args, int64_t argc) {
      *    NEW context the coercion above just attached, e.g. a bare
      *    already-in-store Path element) is unioned into the joined
      *    result's context, same pattern as value_util.c's
-     *    `concat_strings_impl` and the ASNIX_TAG_LIST branch of
-     *    `asnix_coerce_to_string`. Without this, `lib.makeBinPath`/
+     *    `concat_strings_impl` and the LL_TAG_LIST branch of
+     *    `ll_coerce_to_string`. Without this, `lib.makeBinPath`/
      *    `lib.makeSearchPath` (nixpkgs-level, `concatStringsSep ":"
      *    (map (p: "${p}/bin") pkgs)`) silently drop every referenced
      *    derivation's context, so a `derivation {...}` attribute built
@@ -243,20 +243,20 @@ static Value concatStringsSep2_impl(const Value *args, int64_t argc) {
      * Coerced once per element up front into a scratch array so the two
      * passes below (length-sum, then copy) don't re-run any
      * `__toString` call twice. */
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
     Value *forced = malloc((size_t)(count > 0 ? count : 1) * sizeof(Value));
     for (int64_t i = 0; i < count; i++) {
         const char *b;
         int64_t l;
-        forced[i] = asnix_coerce_to_string_for_concat_sep(asnix_force_for_print(elems[i]));
+        forced[i] = ll_coerce_to_string_for_concat_sep(ll_force_for_print(elems[i]));
         as_string(forced[i], &b, &l, "concatStringsSep");
-        asnix_ctx_union_into(&ctx, asnix_string_context_of(forced[i]));
+        ll_ctx_union_into(&ctx, ll_string_context_of(forced[i]));
         total += l;
         if (i + 1 < count) total += sep_len;
     }
 
-    char *out = asnix_arena_alloc((uint64_t)total);
+    char *out = ll_arena_alloc((uint64_t)total);
     char *cur = out;
     for (int64_t i = 0; i < count; i++) {
         const char *b;
@@ -270,8 +270,8 @@ static Value concatStringsSep2_impl(const Value *args, int64_t argc) {
         }
     }
     free(forced);
-    Value result = asnix_make_string_value(out, (size_t)total);
-    asnix_string_attach_context(result, &ctx);
+    Value result = ll_make_string_value(out, (size_t)total);
+    ll_string_attach_context(result, &ctx);
     return result;
 }
 
@@ -315,32 +315,32 @@ static Value build_addErrorContext(void) {
  * PrimOp (including a partially-applied curried one, e.g.
  * `isFunction (builtins.substring 1)` == true on real Nix), matching
  * this file's own build_substring/build_concatStringsSep returning
- * ASNIX_TAG_CLOSURE values -- typeOf already treats CLOSURE and PRIMOP
+ * LL_TAG_CLOSURE values -- typeOf already treats CLOSURE and PRIMOP
  * identically ("lambda") in builtins.c, so this is consistent.
  * --------------------------------------------------------------------- */
 static Value prim_isNull(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_IMM && asnix_imm_subtag(args[0]) == ASNIX_IMM_NULL
-                               ? ASNIX_IMM_TRUE
-                               : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_IMM && ll_imm_subtag(args[0]) == LL_IMM_NULL
+                               ? LL_IMM_TRUE
+                               : LL_IMM_FALSE);
 }
 static Value prim_isString(const Value *args, int64_t argc) {
     (void)argc;
-    /* Paths and strings share ASNIX_TAG_PTR (see heap.h) -- isString must
+    /* Paths and strings share LL_TAG_PTR (see heap.h) -- isString must
      * exclude paths (found via d.nix: `builtins.isString ./.` wrongly
      * returned true here; real Nix returns false). M51: a Float is a
      * THIRD such kind -- excluded the same way (verified against
      * `nix-instantiate --eval`: `isString 1.5` is false). */
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_PTR && !asnix_value_is_path(args[0]) &&
-                                   !asnix_value_is_float(args[0])
-                               ? ASNIX_IMM_TRUE
-                               : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_PTR && !ll_value_is_path(args[0]) &&
+                                   !ll_value_is_float(args[0])
+                               ? LL_IMM_TRUE
+                               : LL_IMM_FALSE);
 }
 static Value prim_isPath(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_PTR && asnix_value_is_path(args[0])
-                               ? ASNIX_IMM_TRUE
-                               : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_PTR && ll_value_is_path(args[0])
+                               ? LL_IMM_TRUE
+                               : LL_IMM_FALSE);
 }
 /* `builtins.isFloat` (M51) -- verified against `nix-instantiate --eval`:
  * `isFloat 1.2` is true, `isFloat (1 + 1.0)` is true (the `+` operator's
@@ -348,25 +348,25 @@ static Value prim_isPath(const Value *args, int64_t argc) {
  * false. */
 static Value prim_isFloat(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_value_is_float(args[0]) ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_value_is_float(args[0]) ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 static Value prim_isList(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_LIST ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_LIST ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 static Value prim_isAttrs(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_ATTRS ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_ATTRS ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 static Value prim_isFunction(const Value *args, int64_t argc) {
     (void)argc;
-    int tag = asnix_tag_of(args[0]);
-    return asnix_make_imm(tag == ASNIX_TAG_CLOSURE || tag == ASNIX_TAG_PRIMOP ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    int tag = ll_tag_of(args[0]);
+    return ll_make_imm(tag == LL_TAG_CLOSURE || tag == LL_TAG_PRIMOP ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 
 /* `builtins.functionArgs` (M37, `__functionArgs` in real Nix -- builtins-
  * only, confirmed in ~/nix/src/libexpr/primops.cc): every Closure already
- * carries its pre-built result as ASNIX_CLOSURE_OFF_FORMALS (set once at
+ * carries its pre-built result as LL_CLOSURE_OFF_FORMALS (set once at
  * compile time, compiler.c's AST_LAMBDA case -- see ir.h's comment on
  * that field for why it's precomputed rather than derived here). A
  * PrimOp (or anything else -- real Nix's own version just requires a
@@ -375,19 +375,19 @@ static Value prim_isFunction(const Value *args, int64_t argc) {
  * Nix's `functionArgs builtins.add` == `{}`. */
 static Value prim_functionArgs(const Value *args, int64_t argc) {
     (void)argc;
-    if (asnix_tag_of(args[0]) != ASNIX_TAG_CLOSURE) return asnix_bshared_make_attrs(NULL, NULL, 0);
+    if (ll_tag_of(args[0]) != LL_TAG_CLOSURE) return ll_bshared_make_attrs(NULL, NULL, 0);
     const char *base = (const char *)(args[0].raw & ~0x7ULL);
-    return *(const Value *)(base + ASNIX_CLOSURE_OFF_FORMALS);
+    return *(const Value *)(base + LL_CLOSURE_OFF_FORMALS);
 }
 static Value prim_isInt(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_make_imm(asnix_tag_of(args[0]) == ASNIX_TAG_INT ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    return ll_make_imm(ll_tag_of(args[0]) == LL_TAG_INT ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 static Value prim_isBool(const Value *args, int64_t argc) {
     (void)argc;
-    if (asnix_tag_of(args[0]) != ASNIX_TAG_IMM) return asnix_make_imm(ASNIX_IMM_FALSE);
-    int sub = asnix_imm_subtag(args[0]);
-    return asnix_make_imm(sub == ASNIX_IMM_TRUE || sub == ASNIX_IMM_FALSE ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    if (ll_tag_of(args[0]) != LL_TAG_IMM) return ll_make_imm(LL_IMM_FALSE);
+    int sub = ll_imm_subtag(args[0]);
+    return ll_make_imm(sub == LL_IMM_TRUE || sub == LL_IMM_FALSE ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 
 /* `builtins.floor`/`builtins.ceil` (M51). Real Nix (~/nix's primops.cc
@@ -412,26 +412,26 @@ static Value prim_isBool(const Value *args, int64_t argc) {
 static Value prim_floor(const Value *args, int64_t argc) {
     (void)argc;
     Value v = args[0];
-    if (asnix_tag_of(v) == ASNIX_TAG_INT) return v;
-    if (!asnix_value_is_float(v)) fatal("floor: argument is not a number");
-    double d = asnix_float_value(v);
+    if (ll_tag_of(v) == LL_TAG_INT) return v;
+    if (!ll_value_is_float(v)) fatal("floor: argument is not a number");
+    double d = ll_float_value(v);
     int64_t t = (int64_t)d; /* truncates toward zero */
     if (d < 0 && (double)t != d) t -= 1;
-    return asnix_make_int(t);
+    return ll_make_int(t);
 }
 static Value prim_ceil(const Value *args, int64_t argc) {
     (void)argc;
     Value v = args[0];
-    if (asnix_tag_of(v) == ASNIX_TAG_INT) return v;
-    if (!asnix_value_is_float(v)) fatal("ceil: argument is not a number");
-    double d = asnix_float_value(v);
+    if (ll_tag_of(v) == LL_TAG_INT) return v;
+    if (!ll_value_is_float(v)) fatal("ceil: argument is not a number");
+    double d = ll_float_value(v);
     int64_t t = (int64_t)d; /* truncates toward zero */
     if (d > 0 && (double)t != d) t += 1;
-    return asnix_make_int(t);
+    return ll_make_int(t);
 }
 
 /* `baseNameOf`/`dirOf` (M23) -- two of real Nix's bare root-scope globals
- * (see builtins.h's asnix_make_import_primop comment for the full
+ * (see builtins.h's ll_make_import_primop comment for the full
  * curated list), found needed by numtide/nix-conformance's
  * eval-okay-baseNameOf.nix/eval-okay-builtins-dirOf.nix/eval-okay-path.nix
  * and others, all of which call these bare, not `builtins.X`. Ported
@@ -453,7 +453,7 @@ static Value prim_ceil(const Value *args, int64_t argc) {
 static Value prim_baseNameOf(const Value *args, int64_t argc) {
     (void)argc;
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(args[0], &len);
+    const char *bytes = ll_ptr_bytes(args[0], &len);
     if (len > 0 && bytes[len - 1] == '/') len--; /* AT MOST ONE trailing slash stripped (an
                                                     * `if`, not a `while`) -- matching real
                                                     * Nix's legacyBaseNameOf exactly (NOT GNU
@@ -468,15 +468,15 @@ static Value prim_baseNameOf(const Value *args, int64_t argc) {
                                                     * eval-okay-baseNameOf.nix. */
     int64_t start = len;
     while (start > 0 && bytes[start - 1] != '/') start--;
-    Value out = asnix_make_string_value(bytes + start, (size_t)(len - start));
+    Value out = ll_make_string_value(bytes + start, (size_t)(len - start));
     /* M80: real Nix's own `prim_baseNameOf` copies `args[0]`'s context onto
      * the result verbatim (`v.mkString(getName(str), context)`,
      * ~/nix/src/libexpr/primops.cc) -- confirmed needed directly:
      * `getContext (baseNameOf "${d}")` keeps `d`'s own context on real
-     * Nix. `asnix_string_context_of` on a Path is always NULL (Paths
+     * Nix. `ll_string_context_of` on a Path is always NULL (Paths
      * never get an entry), so this is a no-op for the Path-argument case. */
-    const AsnixStringContext *ctx = asnix_string_context_of(args[0]);
-    if (!asnix_ctx_is_empty(ctx)) asnix_string_attach_context(out, ctx);
+    const LlStringContext *ctx = ll_string_context_of(args[0]);
+    if (!ll_ctx_is_empty(ctx)) ll_string_attach_context(out, ctx);
     return out;
 }
 
@@ -484,19 +484,19 @@ static Value prim_dirOf(const Value *args, int64_t argc) {
     (void)argc;
     Value v = args[0];
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(v, &len);
-    int is_path = asnix_value_is_path(v);
+    const char *bytes = ll_ptr_bytes(v, &len);
+    int is_path = ll_value_is_path(v);
     /* asnix Paths are always already-resolved absolute paths with no
      * trailing slash (see compiler.c's AST_PATH/resolve_path_literal),
      * so "/" is the only case needing the real-Nix "isRoot, keep as-is"
      * special case -- everything else always contains a '/' to split on. */
     if (is_path) {
-        if (len == 1 && bytes[0] == '/') return asnix_make_path_value("/", 1);
+        if (len == 1 && bytes[0] == '/') return ll_make_path_value("/", 1);
         int64_t pos = len;
         while (pos > 0 && bytes[pos - 1] != '/') pos--;
         pos--; /* back up onto the '/' itself */
-        if (pos <= 0) return asnix_make_path_value("/", 1);
-        return asnix_make_path_value(bytes, (size_t)pos);
+        if (pos <= 0) return ll_make_path_value("/", 1);
+        return ll_make_path_value(bytes, (size_t)pos);
     }
     int64_t pos = len;
     while (pos > 0 && bytes[pos - 1] != '/') pos--;
@@ -504,27 +504,27 @@ static Value prim_dirOf(const Value *args, int64_t argc) {
      * propagate `v`'s own context onto the result -- a Path value never
      * carries string context at all in real Nix (context only applies
      * to strings-with-context), so only this branch needs it. */
-    const AsnixStringContext *ctx = asnix_string_context_of(v);
+    const LlStringContext *ctx = ll_string_context_of(v);
     if (pos == 0) {
-        Value out = asnix_make_string_value(".", 1);
-        if (!asnix_ctx_is_empty(ctx)) asnix_string_attach_context(out, ctx);
+        Value out = ll_make_string_value(".", 1);
+        if (!ll_ctx_is_empty(ctx)) ll_string_attach_context(out, ctx);
         return out;
     }
     pos--; /* back up onto the '/' itself */
     if (pos == 0) {
-        Value out = asnix_make_string_value("/", 1);
-        if (!asnix_ctx_is_empty(ctx)) asnix_string_attach_context(out, ctx);
+        Value out = ll_make_string_value("/", 1);
+        if (!ll_ctx_is_empty(ctx)) ll_string_attach_context(out, ctx);
         return out;
     }
-    Value out = asnix_make_string_value(bytes, (size_t)pos);
-    if (!asnix_ctx_is_empty(ctx)) asnix_string_attach_context(out, ctx);
+    Value out = ll_make_string_value(bytes, (size_t)pos);
+    if (!ll_ctx_is_empty(ctx)) ll_string_attach_context(out, ctx);
     return out;
 }
 
 static Value build_baseNameOf(void) { return make_primop_value((void *)prim_baseNameOf, 1); }
 static Value build_dirOf(void) { return make_primop_value((void *)prim_dirOf, 1); }
-Value asnix_make_baseNameOf_primop(void) { return make_primop_value((void *)prim_baseNameOf, 1); }
-Value asnix_make_dirOf_primop(void) { return make_primop_value((void *)prim_dirOf, 1); }
+Value ll_make_baseNameOf_primop(void) { return make_primop_value((void *)prim_baseNameOf, 1); }
+Value ll_make_dirOf_primop(void) { return make_primop_value((void *)prim_dirOf, 1); }
 
 /* `builtins.placeholder` (M44) -- one of real Nix's bare root-scope
  * globals (confirmed in `~/nix/src/libexpr/primops.cc`: `.name =
@@ -533,42 +533,42 @@ Value asnix_make_dirOf_primop(void) { return make_primop_value((void *)prim_dirO
  * `~/nix/src/libstore/derivations.cc`'s `hashPlaceholder`: `"/" +
  * base32(sha256("nix-output:" + outputName))` (Nix's own base32
  * variant, no hash-type prefix) -- reuses this project's existing
- * `asnix_hash_sha256`/`asnix_base32_encode` (already relied on for
+ * `ll_hash_sha256`/`ll_base32_encode` (already relied on for
  * store-path hashing, M8) rather than adding any new hashing
  * machinery. Verified against real `nix-instantiate --eval`:
  * `builtins.placeholder "out"` ==
  * "/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9". */
 static Value prim_placeholder(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "placeholder");
+    LL_REQUIRE_STRING(args[0], "placeholder");
     int64_t name_len;
     const char *name_bytes;
-    asnix_bshared_string_bytes(args[0], &name_bytes, &name_len, "placeholder");
+    ll_bshared_string_bytes(args[0], &name_bytes, &name_len, "placeholder");
 
     size_t preimage_len = 11 + (size_t)name_len; /* "nix-output:" */
     char *preimage = malloc(preimage_len);
     memcpy(preimage, "nix-output:", 11);
     memcpy(preimage + 11, name_bytes, (size_t)name_len);
 
-    uint8_t digest[ASNIX_HASH_SHA256_LEN];
-    int64_t rc = asnix_hash_sha256(preimage, preimage_len, digest);
+    uint8_t digest[LL_HASH_SHA256_LEN];
+    int64_t rc = ll_hash_sha256(preimage, preimage_len, digest);
     free(preimage);
     if (rc != 0) {
-        fprintf(stderr, "asnix: placeholder: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
+        fprintf(stderr, "ll: placeholder: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
                 (long long)rc);
         exit(1);
     }
 
-    size_t b32_len = asnix_base32_encoded_length(ASNIX_HASH_SHA256_LEN);
+    size_t b32_len = ll_base32_encoded_length(LL_HASH_SHA256_LEN);
     char *out = malloc(1 + b32_len);
     out[0] = '/';
-    asnix_base32_encode(digest, ASNIX_HASH_SHA256_LEN, out + 1);
-    Value result = asnix_make_string_value(out, 1 + b32_len);
+    ll_base32_encode(digest, LL_HASH_SHA256_LEN, out + 1);
+    Value result = ll_make_string_value(out, 1 + b32_len);
     free(out);
     return result;
 }
 static Value build_placeholder(void) { return make_primop_value((void *)prim_placeholder, 1); }
-Value asnix_make_placeholder_primop(void) { return make_primop_value((void *)prim_placeholder, 1); }
+Value ll_make_placeholder_primop(void) { return make_primop_value((void *)prim_placeholder, 1); }
 
 /* `builtins.toFile` (M45, `__toFile` in real Nix -- builtins-only,
  * confirmed in `~/nix/src/libexpr/primops.cc`). Computes the store
@@ -597,15 +597,15 @@ Value asnix_make_placeholder_primop(void) { return make_primop_value((void *)pri
  * "/nix/store/5f20vz4zb4xixz2yrbyr7q8m8xcz0jzf-hello.txt". */
 static Value prim_toFile(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "toFile");
-    ASNIX_REQUIRE_STRING(args[1], "toFile");
+    LL_REQUIRE_STRING(args[0], "toFile");
+    LL_REQUIRE_STRING(args[1], "toFile");
 
-    char *name = asnix_string_value_to_cstr(args[0]);
-    asnix_check_store_path_name(name);
+    char *name = ll_string_value_to_cstr(args[0]);
+    ll_check_store_path_name(name);
 
     int64_t contents_len;
     const char *contents_bytes;
-    asnix_bshared_string_bytes(args[1], &contents_bytes, &contents_len, "toFile");
+    ll_bshared_string_bytes(args[1], &contents_bytes, &contents_len, "toFile");
 
     /* M80: `contents`' own context becomes this file's STORE REFERENCES
      * -- ported from `~/nix/src/libexpr/primops.cc`'s `prim_toFile`:
@@ -625,10 +625,10 @@ static Value prim_toFile(const Value *args, int64_t argc) {
      * ${text}";` must hash to the exact same path real Nix computes,
      * which depends on `text`'s own store path being folded into this
      * preimage, not just `contents`' raw bytes. */
-    const AsnixStringContext *contents_ctx = asnix_string_context_of(args[1]);
+    const LlStringContext *contents_ctx = ll_string_context_of(args[1]);
     if (contents_ctx && (contents_ctx->ndrvs > 0 || contents_ctx->ndeep > 0)) {
         fprintf(stderr,
-                "asnix: toFile: files created by builtins.toFile may not reference derivations, but '%s' does\n",
+                "ll: toFile: files created by builtins.toFile may not reference derivations, but '%s' does\n",
                 name);
         exit(1);
     }
@@ -651,10 +651,10 @@ static Value prim_toFile(const Value *args, int64_t argc) {
         }
     }
 
-    uint8_t inner_digest[ASNIX_HASH_SHA256_LEN];
-    int64_t rc = asnix_hash_sha256(contents_bytes, (size_t)contents_len, inner_digest);
+    uint8_t inner_digest[LL_HASH_SHA256_LEN];
+    int64_t rc = ll_hash_sha256(contents_bytes, (size_t)contents_len, inner_digest);
     if (rc != 0) {
-        fprintf(stderr, "asnix: toFile: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
+        fprintf(stderr, "ll: toFile: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
                 (long long)rc);
         exit(1);
     }
@@ -662,7 +662,7 @@ static Value prim_toFile(const Value *args, int64_t argc) {
     static const char hexdigits[] = "0123456789abcdef";
     char hashstr[7 + 64 + 1];
     memcpy(hashstr, "sha256:", 7);
-    for (int i = 0; i < ASNIX_HASH_SHA256_LEN; i++) {
+    for (int i = 0; i < LL_HASH_SHA256_LEN; i++) {
         hashstr[7 + 2 * i] = hexdigits[inner_digest[i] >> 4];
         hashstr[7 + 2 * i + 1] = hexdigits[inner_digest[i] & 0xf];
     }
@@ -680,28 +680,28 @@ static Value prim_toFile(const Value *args, int64_t argc) {
     type_str[type_len] = '\0';
 
     char preimage[4096];
-    size_t n = asnix_store_path_preimage(type_str, hashstr, name, preimage, sizeof(preimage));
+    size_t n = ll_store_path_preimage(type_str, hashstr, name, preimage, sizeof(preimage));
     free(type_str);
     free(refs);
     if (n == 0) {
-        fprintf(stderr, "asnix: toFile: preimage too long\n");
+        fprintf(stderr, "ll: toFile: preimage too long\n");
         exit(1);
     }
 
-    uint8_t outer_digest[ASNIX_HASH_SHA256_LEN];
-    rc = asnix_hash_sha256(preimage, n, outer_digest);
+    uint8_t outer_digest[LL_HASH_SHA256_LEN];
+    rc = ll_hash_sha256(preimage, n, outer_digest);
     if (rc != 0) {
-        fprintf(stderr, "asnix: toFile: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
+        fprintf(stderr, "ll: toFile: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
                 (long long)rc);
         exit(1);
     }
 
     char out_path[300];
-    if (asnix_make_store_path_from_digest(outer_digest, name, out_path, sizeof(out_path)) == 0) {
-        fprintf(stderr, "asnix: toFile: computed store path too long\n");
+    if (ll_make_store_path_from_digest(outer_digest, name, out_path, sizeof(out_path)) == 0) {
+        fprintf(stderr, "ll: toFile: computed store path too long\n");
         exit(1);
     }
-    Value out = asnix_make_string_value(out_path, strlen(out_path));
+    Value out = ll_make_string_value(out_path, strlen(out_path));
     /* M76: real Nix's own `toFile` (`mkStorePathString`,
      * `~/nix/src/libexpr/eval.cc`) attaches `Opaque(storePath)` --
      * ITS OWN output path -- as the result string's context, NOT any
@@ -714,10 +714,10 @@ static Value prim_toFile(const Value *args, int64_t argc) {
      * path reaches `derivation {...}` as a plain opaque string with no
      * trace of being a store reference at all, so it never made it
      * into `inputSrcs`. */
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    asnix_ctx_add_opaque(&ctx, out_path);
-    asnix_string_attach_context(out, &ctx);
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    ll_ctx_add_opaque(&ctx, out_path);
+    ll_string_attach_context(out, &ctx);
     return out;
 }
 static Value build_toFile(void) { return make_curried_native((void *)prim_toFile, 2); }
@@ -728,7 +728,7 @@ static Value build_isNull(void) { return make_primop_value((void *)prim_isNull, 
  * `nix-instantiate --eval`, same research as M18's import/map/abort/
  * toString -- see docs/architecture.md). Wraps the exact same `prim_isNull`
  * `builtins.isNull` itself uses. */
-Value asnix_make_isNull_primop(void) { return make_primop_value((void *)prim_isNull, 1); }
+Value ll_make_isNull_primop(void) { return make_primop_value((void *)prim_isNull, 1); }
 static Value build_isString(void) { return make_primop_value((void *)prim_isString, 1); }
 static Value build_isPath(void) { return make_primop_value((void *)prim_isPath, 1); }
 static Value build_functionArgs(void) { return make_primop_value((void *)prim_functionArgs, 1); }
@@ -749,7 +749,7 @@ static Value build_ceil(void) { return make_primop_value((void *)prim_ceil, 1); 
  * Reports the real Nix compat version installed on this dev machine
  * (`nix-instantiate --version`), comfortably above any `>= "2.18"`-style
  * nixpkgs/lib version gate. */
-static Value build_nixVersion(void) { return asnix_make_string_value("2.35.2", 6); }
+static Value build_nixVersion(void) { return ll_make_string_value("2.35.2", 6); }
 
 /* `builtins.currentSystem` -- same "plain constant, no PrimOp needed"
  * shape as nixVersion above. Real Nix registers this internally as
@@ -762,7 +762,7 @@ static Value build_nixVersion(void) { return asnix_make_string_value("2.35.2", 6
  * there's nothing else this process could ever be running on. Found
  * needed evaluating real nixpkgs (`d.nix`'s default.nix chain selects
  * `.currentSystem` while resolving the default platform). */
-static Value build_currentSystem(void) { return asnix_make_string_value("x86_64-linux", 12); }
+static Value build_currentSystem(void) { return ll_make_string_value("x86_64-linux", 12); }
 
 /* `builtins.storeDir` (M71) -- same "plain constant, no PrimOp needed"
  * shape as nixVersion/currentSystem above. Real Nix's is the configured
@@ -773,7 +773,7 @@ static Value build_currentSystem(void) { return asnix_make_string_value("x86_64-
  * rule nixVersion/currentSystem already follow). Found via `d.nix`:
  * several nixpkgs packages (under `pkgs/by-name`) reference
  * `builtins.storeDir` directly, expecting a path-prefix-shaped string. */
-static Value build_storeDir(void) { return asnix_make_string_value("/nix/store", 10); }
+static Value build_storeDir(void) { return ll_make_string_value("/nix/store", 10); }
 
 /* `builtins.langVersion` -- same "plain constant, no PrimOp needed" shape
  * as nixVersion/currentSystem/storeDir above. Real Nix's is the evaluator
@@ -781,9 +781,9 @@ static Value build_storeDir(void) { return asnix_make_string_value("/nix/store",
  * `nix-instantiate --eval -E 'builtins.langVersion'`), bumped on language-
  * level changes, not every release. Found evaluating a full NixOS system
  * config (`nixos/lib/eval-config.nix`'s own closure references it). */
-static Value build_langVersion(void) { return asnix_make_int(6); }
+static Value build_langVersion(void) { return ll_make_int(6); }
 
-const AsnixBuiltinMiscDef ASNIX_BUILTINS_MISC[] = {
+const LlBuiltinMiscDef LL_BUILTINS_MISC[] = {
     { "substring", build_substring },
     { "stringLength", build_stringLength },
     { "concatStringsSep", build_concatStringsSep },
@@ -810,4 +810,4 @@ const AsnixBuiltinMiscDef ASNIX_BUILTINS_MISC[] = {
     { "toFile", build_toFile },
 };
 
-const size_t ASNIX_BUILTINS_MISC_COUNT = sizeof(ASNIX_BUILTINS_MISC) / sizeof(ASNIX_BUILTINS_MISC[0]);
+const size_t LL_BUILTINS_MISC_COUNT = sizeof(LL_BUILTINS_MISC) / sizeof(LL_BUILTINS_MISC[0]);

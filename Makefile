@@ -32,7 +32,7 @@ FRONTEND_CC ?= cc
 OPT    ?= -O3
 # -fomit-frame-pointer: every op handler ends in a musttail tail call
 # (zero overhead already), but a handler with an internal fallback
-# `call` (asnix_fatal/asnix_valstack_overflow on the cold path) still
+# `call` (ll_fatal/ll_valstack_overflow on the cold path) still
 # got a full `push %rbp; mov %rsp,%rbp`/`pop %rbp` frame-pointer
 # convention around it by default -- pure overhead on the hot path,
 # since nothing needs to walk frames through a tail-call chain that
@@ -59,14 +59,14 @@ LDFLAGS :=
 # "no source change needed" proof (mimalloc's static archive already
 # exports standard-named malloc/free/calloc/realloc symbols) asnix's
 # own Makefile already uses in production. This project's own
-# flake.nix already exports `ASNIX_MIMALLOC_LIB` for exactly this
+# flake.nix already exports `LL_MIMALLOC_LIB` for exactly this
 # (shellHook sets it, matching asnix's own devShell convention) --
 # this Makefile just never consumed it. Falls back to a portable
 # system-mimalloc link probe outside the flake's devShell, then to
 # plain glibc malloc if neither is available -- never a hard build
 # failure either way.
-ifdef ASNIX_MIMALLOC_LIB
-MIMALLOC_LDLIBS := $(ASNIX_MIMALLOC_LIB) -lpthread
+ifdef LL_MIMALLOC_LIB
+MIMALLOC_LDLIBS := $(LL_MIMALLOC_LIB) -lpthread
 else
 MIMALLOC_PROBE := $(shell printf 'int main(void){return 0;}' | $(CC) -xc - -lmimalloc -o /dev/null 2>/dev/null && echo yes)
 ifeq ($(MIMALLOC_PROBE),yes)

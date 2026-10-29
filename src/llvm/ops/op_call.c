@@ -1,7 +1,7 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445's src/asm/ops/op_call.S -- see ~/.claude/plans/soft-wishing-engelbart.md
  *
  * The closure branch is inlined here (RetFrame push + musttail into
- * the callee's own body) rather than routed through asnix_apply,
+ * the callee's own body) rather than routed through ll_apply,
  * specifically so native-stack depth never tracks ordinary Nix-level
  * call depth -- see the M10 plan's own "alternative rejected" note.
  * The __functor branch (an attrset with a __functor attribute is
@@ -18,15 +18,15 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
     int64_t argc = ip->a;
     Value *callee_slot = vs - argc - 1;
     Value callee = *callee_slot;
-    uint64_t tag = callee.raw & ASNIX_TAG_MASK;
+    uint64_t tag = callee.raw & LL_TAG_MASK;
 
-    if (tag == ASNIX_TAG_CLOSURE) {
+    if (tag == LL_TAG_CLOSURE) {
         Closure *c = (Closure *)ll_untag(callee);
         if (c->arity != argc) {
-            static const char msg[] = "asnix: call argument count does not match arity, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+            static const char msg[] = "ll: call argument count does not match arity, aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        Env *new_env = ll_env_alloc(c->up, argc);
+        Env *new_env = ll_env_alloc_fast(c->up, argc);
         for (int64_t i = 0; i < argc; i++) new_env->values[i] = callee_slot[1 + i];
 
         vs = callee_slot; /* pop callee+args in one shot */
@@ -45,11 +45,11 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
         [[clang::musttail]] return ((LLOpFn)ip->handler)(ip, env, vs, pool, rs);
     }
 
-    if (tag == ASNIX_TAG_PRIMOP) {
+    if (tag == LL_TAG_PRIMOP) {
         PrimOp *p = (PrimOp *)ll_untag(callee);
         if (p->arity != argc) {
-            static const char msg[] = "asnix: call argument count does not match arity, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+            static const char msg[] = "ll: call argument count does not match arity, aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
         Value *args = callee_slot + 1;
         /* M25: force each argument before handing it to the native C
@@ -58,14 +58,14 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
          * (tryEval's own convention; not otherwise used in this
          * backend's scope). */
         if (!p->noforce) {
-            for (int64_t i = 0; i < argc; i++) args[i] = asnix_force_for_print(args[i]);
+            for (int64_t i = 0; i < argc; i++) args[i] = ll_force_for_print(args[i]);
         }
         Value (*fn)(const Value *, int64_t) = (Value(*)(const Value *, int64_t))p->fn;
         Value result = fn(args, argc);
         /* M23: force the primop's raw return value too (a lazy-
          * passthrough primop like getAttr deliberately returns an
          * unforced entry). */
-        result = asnix_force_for_print(result);
+        result = ll_force_for_print(result);
 
         vs = callee_slot;
         ll_check_valstack(vs);
@@ -74,8 +74,8 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
         LL_NEXT(ip, env, vs, pool, rs);
     }
 
-    if (tag == ASNIX_TAG_ATTRS && argc == 1) {
-        Value result = asnix_bshared_call_functor(callee, callee_slot[1]);
+    if (tag == LL_TAG_ATTRS && argc == 1) {
+        Value result = ll_bshared_call_functor(callee, callee_slot[1]);
         vs = callee_slot;
         ll_check_valstack(vs);
         vs[0] = result;
@@ -84,8 +84,8 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
     }
 
     {
-        static const char msg[] = "asnix: attempt to call something which is not a function, aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+        static const char msg[] = "ll: attempt to call something which is not a function, aborting\n";
+        ll_fatal(msg, sizeof(msg) - 1);
     }
 }
 
@@ -97,7 +97,7 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
  * checking whether `callee` is the head of a plain one-slot-per-level
  * curry chain at least n-1 levels deep. Every such link (an ordinary
  * non-pattern lambda's own curry stage, AND every curried-native-
- * builtin stage asnix_bshared_make_curried_native builds, both use the
+ * builtin stage ll_bshared_make_curried_native builds, both use the
  * exact same `ib_lambda(..., 1, ...); ib_ret(...)` shape) compiles to
  * exactly two ops: OP_LAMBDA(arity=1, pidx) then OP_RET, with nothing
  * else -- `level_prog->pool[pidx]` is the next level's own IrProgram*,
@@ -109,9 +109,9 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
  *
  * If the walk reaches n-1 links deep, phase 2 builds all n of this
  * call's 1-slot Env frames in ONE bump allocation (same per-frame size
- * ll_env_alloc computes for nslots=1, just n of them back to back,
+ * ll_env_alloc_fast computes for nslots=1, just n of them back to back,
  * each one's `up` pointing at the previous -- bit-for-bit the same
- * frame CHAIN n separate ll_env_alloc(.., 1) calls would have produced,
+ * frame CHAIN n separate ll_env_alloc_fast(.., 1) calls would have produced,
  * just one arena bump instead of n), then runs the n-th level's own
  * body (`level_prog` after the walk) with env = the last frame built --
  * identical in every observable way to what n chained ordinary calls
@@ -125,9 +125,9 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
  * some level, a level's body isn't that exact two-op shape, or the
  * fused allocation wouldn't fit in the fast env arena) this falls back
  * to n ordinary, sequential single-argument applications via
- * asnix_apply -- byte-identical in behavior to the n separate OP_CALL
+ * ll_apply -- byte-identical in behavior to the n separate OP_CALL
  * ops this call site would have compiled to before this op existed
- * (asnix_apply's own Closure/PrimOp/__functor dispatch is exactly
+ * (ll_apply's own Closure/PrimOp/__functor dispatch is exactly
  * ll_op_call's, just reached by a real C call instead of a tail-jump).
  * Re-entering synchronously here grows the native stack by at most
  * n-1 frames, which is safe: n is bounded by this call site's own
@@ -141,7 +141,7 @@ LL_OP_ATTR Value ll_op_call_chain(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
     Value *callee_slot = vs - n - 1;
     Value callee = *callee_slot;
 
-    if ((callee.raw & ASNIX_TAG_MASK) == ASNIX_TAG_CLOSURE) {
+    if ((callee.raw & LL_TAG_MASK) == LL_TAG_CLOSURE) {
         Closure *c0 = (Closure *)ll_untag(callee);
         if (c0->arity == 1) {
             IrProgram *level_prog = c0->prog;
@@ -154,21 +154,21 @@ LL_OP_ATTR Value ll_op_call_chain(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
                 level_prog = (IrProgram *)(uintptr_t)level_prog->pool[lops[0].b];
             }
             if (depth == n - 1) {
-                uint64_t one_size = (uint64_t)ASNIX_ENV_OFF_VALUES + 8;
+                uint64_t one_size = (uint64_t)LL_ENV_OFF_VALUES + 8;
                 uint64_t one_n4 = (one_size + 3) & ~(uint64_t)3;
                 uint64_t total = one_n4 * (uint64_t)n;
-                uint8_t *cur = asnix_env_arena_cur;
+                uint8_t *cur = ll_env_arena_cur;
                 uint8_t *new_cur = cur + total;
-                if (cur != NULL && new_cur <= asnix_env_arena_end) {
-                    asnix_env_arena_cur = new_cur;
-                    asnix_stats_env += (uint64_t)n;
-                    asnix_stats_env_elements += (uint64_t)n;
+                if (cur != NULL && new_cur <= ll_env_arena_end) {
+                    ll_env_arena_cur = new_cur;
+                    ll_stats_env += (uint64_t)n;
+                    ll_stats_env_elements += (uint64_t)n;
 
                     Env *prev = c0->up;
                     uint8_t *frame_mem = cur;
                     for (int64_t i = 0; i < n; i++) {
                         Env *frame = (Env *)frame_mem;
-                        frame->up = prev ? (uint32_t)((uintptr_t)prev - (uintptr_t)asnix_env_arena_base) : 0;
+                        frame->up = prev ? (uint32_t)((uintptr_t)prev - (uintptr_t)ll_env_arena_base) : 0;
                         frame->values[0] = callee_slot[1 + i];
                         prev = frame;
                         frame_mem += one_n4;
@@ -199,7 +199,7 @@ LL_OP_ATTR Value ll_op_call_chain(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
          * self_captures(args), which assumes `args[-1]` is the PrimOp
          * Value itself -- an invariant ll_op_call's own direct dispatch
          * gives for free (callee always sits immediately before its
-         * args on VALSTACK there), but asnix_apply's generic (fn, args,
+         * args on VALSTACK there), but ll_apply's generic (fn, args,
          * argc) signature does NOT guarantee for an arbitrary caller
          * (it only copies into a safe scratch buffer when the PrimOp
          * forces its args -- see ll_apply_primop_slow). `callee_slot[1+i]`
@@ -212,7 +212,7 @@ LL_OP_ATTR Value ll_op_call_chain(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
         Value step[2];
         step[0] = result;
         step[1] = callee_slot[1 + i];
-        result = asnix_apply(step[0], &step[1], 1);
+        result = ll_apply(step[0], &step[1], 1);
     }
     vs = callee_slot;
     ll_check_valstack(vs);
@@ -231,14 +231,14 @@ LL_OP_ATTR Value ll_op_ret(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
         /* This frame was pushed to force a thunk (OP_VAR_REF), not an
          * ordinary call -- memoize the body's result (already on top
          * of VALSTACK) into the thunk cell before resuming. M82: this
-         * thunk is always the current head of asnix_inprogress_head
+         * thunk is always the current head of ll_inprogress_head
          * (forcing is strictly LIFO) -- pop it (read its "prev" link,
          * stashed in `env` while IN_PROGRESS) before overwriting `env`
          * with the cached result. */
         Thunk *t = (Thunk *)f.force_target;
-        asnix_inprogress_head = (void *)(uintptr_t)t->env;
+        ll_inprogress_head = (void *)(uintptr_t)t->env;
         t->env = vs[-1].raw;
-        t->state = ASNIX_THUNK_STATE_FORCED;
+        t->state = LL_THUNK_STATE_FORCED;
     }
     ip = f.ip;
     env = f.env;

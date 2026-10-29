@@ -12,14 +12,14 @@ static char *dup_cstr(const char *s) {
     return out;
 }
 
-void asnix_ctx_init(AsnixStringContext *ctx) {
+void ll_ctx_init(LlStringContext *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
 /* perf: dedup indexes for add_built/add_opaque/add_deep below. Before this
  * fix, each of the three did an unconditional linear strcmp scan over the
  * growing ctx->drvs/srcs/deep array with NO size threshold and no index at
- * all -- and asnix_ctx_union_into (further below) calls these once PER
+ * all -- and ll_ctx_union_into (further below) calls these once PER
  * SOURCE ENTRY on every context union, so repeated string concatenation
  * that accumulates many distinct store-path references (e.g. a wrapper
  * script interpolating dozens of runtime deps, one `+`/`"${a}${b}..."` at
@@ -62,7 +62,7 @@ static uint64_t dcc_hash_str(const char *s, size_t len) {
  * table costs strictly more than the 1-3 strcmp comparisons it replaces.
  * Gated the same way this session's OTHER sort-based fixes gate their
  * "small N" fast path (see builtins_shared.c's
- * ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX): below this many entries, add_*
+ * LL_MAKE_ATTRS_SORT_INSERTION_MAX): below this many entries, add_*
  * does the exact original linear scan (zero index overhead, byte-for-
  * byte the old cost); the index is built lazily, covering all existing
  * entries at once, the first time a given array's count reaches this
@@ -74,7 +74,7 @@ static uint64_t dcc_hash_str(const char *s, size_t len) {
  * contexts never do. */
 #define SC_INDEX_THRESHOLD 16
 
-static void ctx_drvs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+static void ctx_drvs_index_rehash(LlStringContext *ctx, size_t new_cap) {
     size_t *new_table = malloc(new_cap * sizeof(size_t));
     for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
     for (size_t i = 0; i < ctx->ndrvs; i++) {
@@ -89,7 +89,7 @@ static void ctx_drvs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
     ctx->drvs_index_cap = new_cap;
 }
 
-void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const char *output_name) {
+void ll_ctx_add_built(LlStringContext *ctx, const char *drv_path, const char *output_name) {
     size_t slot = 0;
     int have_slot = 0;
     if (ctx->ndrvs < SC_INDEX_THRESHOLD) {
@@ -121,7 +121,7 @@ void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const ch
     ctx->ndrvs++;
 }
 
-static void ctx_srcs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+static void ctx_srcs_index_rehash(LlStringContext *ctx, size_t new_cap) {
     size_t *new_table = malloc(new_cap * sizeof(size_t));
     for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
     for (size_t i = 0; i < ctx->nsrcs; i++) {
@@ -134,7 +134,7 @@ static void ctx_srcs_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
     ctx->srcs_index_cap = new_cap;
 }
 
-void asnix_ctx_add_opaque(AsnixStringContext *ctx, const char *path) {
+void ll_ctx_add_opaque(LlStringContext *ctx, const char *path) {
     size_t slot = 0;
     int have_slot = 0;
     if (ctx->nsrcs < SC_INDEX_THRESHOLD) {
@@ -163,7 +163,7 @@ void asnix_ctx_add_opaque(AsnixStringContext *ctx, const char *path) {
     ctx->nsrcs++;
 }
 
-static void ctx_deep_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
+static void ctx_deep_index_rehash(LlStringContext *ctx, size_t new_cap) {
     size_t *new_table = malloc(new_cap * sizeof(size_t));
     for (size_t i = 0; i < new_cap; i++) new_table[i] = DCC_EMPTY_SLOT;
     for (size_t i = 0; i < ctx->ndeep; i++) {
@@ -177,7 +177,7 @@ static void ctx_deep_index_rehash(AsnixStringContext *ctx, size_t new_cap) {
 }
 
 /* M80: see string_context.h's own `deep` field comment. */
-void asnix_ctx_add_deep(AsnixStringContext *ctx, const char *drv_path) {
+void ll_ctx_add_deep(LlStringContext *ctx, const char *drv_path) {
     size_t slot = 0;
     int have_slot = 0;
     if (ctx->ndeep < SC_INDEX_THRESHOLD) {
@@ -206,24 +206,24 @@ void asnix_ctx_add_deep(AsnixStringContext *ctx, const char *drv_path) {
     ctx->ndeep++;
 }
 
-int asnix_ctx_is_empty(const AsnixStringContext *ctx) {
+int ll_ctx_is_empty(const LlStringContext *ctx) {
     return !ctx || (ctx->ndrvs == 0 && ctx->nsrcs == 0 && ctx->ndeep == 0);
 }
 
-void asnix_ctx_union_into(AsnixStringContext *dst, const AsnixStringContext *src) {
-    if (asnix_ctx_is_empty(src)) return;
-    for (size_t i = 0; i < src->ndrvs; i++) asnix_ctx_add_built(dst, src->drvs[i].drv_path, src->drvs[i].output_name);
-    for (size_t i = 0; i < src->nsrcs; i++) asnix_ctx_add_opaque(dst, src->srcs[i]);
-    for (size_t i = 0; i < src->ndeep; i++) asnix_ctx_add_deep(dst, src->deep[i]);
+void ll_ctx_union_into(LlStringContext *dst, const LlStringContext *src) {
+    if (ll_ctx_is_empty(src)) return;
+    for (size_t i = 0; i < src->ndrvs; i++) ll_ctx_add_built(dst, src->drvs[i].drv_path, src->drvs[i].output_name);
+    for (size_t i = 0; i < src->nsrcs; i++) ll_ctx_add_opaque(dst, src->srcs[i]);
+    for (size_t i = 0; i < src->ndeep; i++) ll_ctx_add_deep(dst, src->deep[i]);
 }
 
 /* Perf note (post-M76 profiling pass): this table is NOT "small N" like
  * eval_file.c's import cache / derivation.c's masked-hash cache / nar.c's
  * copy cache -- on a real nixpkgs eval (`d.nix`,
  * `(import nixpkgs {}).hello.outPath`) it grows to ~4,500 entries, and
- * `asnix_string_context_of` is called ~34,000 times from hot string-
- * construction call sites (concat_strings_impl, asnix_coerce_to_string,
- * asnix_coerce_to_string_for_derivation). A plain linear scan here is
+ * `ll_string_context_of` is called ~34,000 times from hot string-
+ * construction call sites (concat_strings_impl, ll_coerce_to_string,
+ * ll_coerce_to_string_for_derivation). A plain linear scan here is
  * O(entries) per lookup against a table that itself grows across the
  * run, i.e. effectively O(n^2) overall -- measured at 62 MILLION scan
  * steps for that one run, ~11% of total self-time in `perf record`
@@ -238,7 +238,7 @@ void asnix_ctx_union_into(AsnixStringContext *dst, const AsnixStringContext *src
  * sentinel in `calloc`'d tables. */
 typedef struct {
     const void *ptr;
-    AsnixStringContext ctx;
+    LlStringContext ctx;
 } ContextTableEntry;
 static ContextTableEntry *g_table = NULL;
 static size_t g_count = 0, g_cap = 0;
@@ -286,8 +286,8 @@ static void ctx_table_grow(void) {
     g_cap = new_cap;
 }
 
-void asnix_string_attach_context(Value v, const AsnixStringContext *ctx) {
-    if (asnix_ctx_is_empty(ctx)) return;
+void ll_string_attach_context(Value v, const LlStringContext *ctx) {
+    if (ll_ctx_is_empty(ctx)) return;
     /* Grow at a 75% load factor (not 100%, the old array's trigger) --
      * open addressing needs headroom or probe chains degrade toward a
      * linear scan again. */
@@ -300,13 +300,13 @@ void asnix_string_attach_context(Value v, const AsnixStringContext *ctx) {
      * exact parity on the off chance the same Value gets re-attached. */
     if (entry->ptr == NULL) {
         entry->ptr = ptr;
-        asnix_ctx_init(&entry->ctx);
-        asnix_ctx_union_into(&entry->ctx, ctx);
+        ll_ctx_init(&entry->ctx);
+        ll_ctx_union_into(&entry->ctx, ctx);
         g_count++;
     }
 }
 
-const AsnixStringContext *asnix_string_context_of(Value v) {
+const LlStringContext *ll_string_context_of(Value v) {
     if (g_cap == 0) return NULL;
     const void *ptr = (const void *)(v.raw & ~0x7ULL);
     ContextTableEntry *entry = ctx_table_find_slot(g_table, g_cap, ptr);

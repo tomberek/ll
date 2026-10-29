@@ -5,7 +5,7 @@
  * symbol id -- see bytecode.h's own header comment), so the only
  * change needed for `ll` is handler_to_op_id's reverse lookup table
  * below -- ll's own ir_link() (src/llvm/dispatch_table.c) resolves op-
- * ids against `ll_handler_table`, not asnix's `asnix_handler_table`
+ * ids against `ll_handler_table`, not asnix's `ll_handler_table`
  * (both tables are populated identically -- OP_COUNT-sized, indexed by
  * op-id -- this is a naming difference only, not a layout one). */
 #include "bytecode.h"
@@ -13,11 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
+#include "ll/arena.h"
+#include "ll/heap.h"
 #include "builtins_shared.h"
-#include "compiler.h" /* marker-reparse addition: asnix_lazy_thunk_descriptor_*/
-                      /* asnix_lazy_scope_push_frame/asnix_make_cached_lazy_thunk_descriptor --
+#include "compiler.h" /* marker-reparse addition: ll_lazy_thunk_descriptor_*/
+                      /* ll_lazy_scope_push_frame/ll_make_cached_lazy_thunk_descriptor --
                        * see PTAG_OP_LAZY_MARKER's own comment below */
 #include "op_dispatch.h" /* ll_handler_table -- see this file's own header comment */
 #include "ops/ops.h"      /* ll_op_push_int_run -- see handler_to_op_id's own comment */
@@ -140,7 +140,7 @@ static uint8_t rcur_u8(RCur *r) {
  * continuation bit never clears within that many bytes is rejected
  * (r->failed = 1) rather than looping or reading out of bounds; the
  * caller's existing "any anomaly -> NULL, never a crash" contract
- * (asnix_bytecode_deserialize) covers the rest. */
+ * (ll_bytecode_deserialize) covers the rest. */
 static uint64_t rcur_varu64(RCur *r) {
     uint64_t v = 0;
     int shift = 0;
@@ -170,7 +170,7 @@ static const char *rcur_bytes_with_len(RCur *r, size_t *out_len) {
         *out_len = 0;
         return NULL;
     }
-    char *mem = asnix_arena_alloc((size_t)n);
+    char *mem = ll_arena_alloc((size_t)n);
     rcur_bytes(r, mem, (size_t)n);
     *out_len = (size_t)n;
     return mem;
@@ -188,53 +188,53 @@ static const char *rcur_bytes_with_len(RCur *r, size_t *out_len) {
 enum { VTAG_INT = 0, VTAG_IMM = 1, VTAG_STRING = 2, VTAG_PATH = 3, VTAG_FLOAT = 4, VTAG_ATTRS = 5 };
 
 static int write_value(WBuf *b, Value v) {
-    int tag = asnix_tag_of(v);
-    if (tag == ASNIX_TAG_INT) {
+    int tag = ll_tag_of(v);
+    if (tag == LL_TAG_INT) {
         wbuf_u8(b, VTAG_INT);
-        wbuf_i64(b, asnix_int_value(v));
+        wbuf_i64(b, ll_int_value(v));
         return 0;
     }
-    if (tag == ASNIX_TAG_IMM) {
+    if (tag == LL_TAG_IMM) {
         wbuf_u8(b, VTAG_IMM);
-        wbuf_u8(b, (uint8_t)asnix_imm_subtag(v));
+        wbuf_u8(b, (uint8_t)ll_imm_subtag(v));
         return 0;
     }
-    if (tag == ASNIX_TAG_PTR) {
-        if (asnix_value_is_float(v)) {
-            double d = asnix_float_value(v);
+    if (tag == LL_TAG_PTR) {
+        if (ll_value_is_float(v)) {
+            double d = ll_float_value(v);
             wbuf_u8(b, VTAG_FLOAT);
             wbuf_bytes(b, &d, 8);
             return 0;
         }
         int64_t len;
-        const char *bytes = asnix_ptr_bytes(v, &len);
-        wbuf_u8(b, asnix_value_is_path(v) ? VTAG_PATH : VTAG_STRING);
+        const char *bytes = ll_ptr_bytes(v, &len);
+        wbuf_u8(b, ll_value_is_path(v) ? VTAG_PATH : VTAG_STRING);
         wbuf_bytes_with_len(b, bytes, (size_t)len);
         return 0;
     }
-    if (tag == ASNIX_TAG_ATTRS) {
+    if (tag == LL_TAG_ATTRS) {
         wbuf_u8(b, VTAG_ATTRS);
-        int64_t n = asnix_bshared_attrs_count(v);
+        int64_t n = ll_bshared_attrs_count(v);
         wbuf_i64(b, n);
         for (int64_t i = 0; i < n; i++) {
-            uint32_t sym = asnix_bshared_attrs_sym(v, i);
+            uint32_t sym = ll_bshared_attrs_sym(v, i);
             size_t name_len;
-            const char *name = asnix_sym_name(sym, &name_len);
+            const char *name = ll_sym_name(sym, &name_len);
             wbuf_bytes_with_len(b, name, name_len);
-            if (write_value(b, asnix_bshared_attrs_value(v, i)) != 0) return -1;
+            if (write_value(b, ll_bshared_attrs_value(v, i)) != 0) return -1;
         }
         return 0;
     }
     return -1; /* LIST/CLOSURE/THUNK/PRIMOP: never a real pool constant today */
 }
 
-/* asnix_bshared_make_attrs unconditionally insertion-sorts its syms/vals
+/* ll_bshared_make_attrs unconditionally insertion-sorts its syms/vals
  * arrays in place before building the heap object (builtins_shared.c) --
  * so re-interned, no-longer-sorted-by-new-id entries come out correctly
  * sorted with no extra step needed here. This is the ONE place in this
  * file that's allowed to rely on that -- every other attrset-shaped
  * reconstruction below (OP_MK_ATTRS) does NOT go through
- * asnix_bshared_make_attrs directly (it must also interleave freshly
+ * ll_bshared_make_attrs directly (it must also interleave freshly
  * re-ordered value-producing ops into the surrounding bytecode stream,
  * not just build one heap object) and sorts explicitly itself. */
 static int read_value(RCur *r, Value *out) {
@@ -242,19 +242,19 @@ static int read_value(RCur *r, Value *out) {
     if (r->failed) return -1;
     switch (tag) {
         case VTAG_INT:
-            *out = asnix_make_int(rcur_i64(r));
+            *out = ll_make_int(rcur_i64(r));
             return r->failed ? -1 : 0;
         case VTAG_IMM: {
             uint8_t sub = rcur_u8(r);
-            if (r->failed || sub > ASNIX_IMM_BLACKHOLE) return -1;
-            *out = asnix_make_imm(sub);
+            if (r->failed || sub > LL_IMM_BLACKHOLE) return -1;
+            *out = ll_make_imm(sub);
             return 0;
         }
         case VTAG_FLOAT: {
             double d;
             rcur_bytes(r, &d, 8);
             if (r->failed) return -1;
-            *out = asnix_make_float_value(d);
+            *out = ll_make_float_value(d);
             return 0;
         }
         case VTAG_STRING:
@@ -262,7 +262,7 @@ static int read_value(RCur *r, Value *out) {
             size_t len;
             const char *bytes = rcur_bytes_with_len(r, &len);
             if (r->failed) return -1;
-            *out = (tag == VTAG_PATH) ? asnix_make_path_value(bytes, len) : asnix_make_string_value(bytes, len);
+            *out = (tag == VTAG_PATH) ? ll_make_path_value(bytes, len) : ll_make_string_value(bytes, len);
             return 0;
         }
         case VTAG_ATTRS: {
@@ -278,13 +278,13 @@ static int read_value(RCur *r, Value *out) {
                     rc = -1;
                     break;
                 }
-                syms[i] = asnix_intern(name, name_len);
+                syms[i] = ll_intern(name, name_len);
                 if (read_value(r, &vals[i]) != 0) {
                     rc = -1;
                     break;
                 }
             }
-            if (rc == 0) *out = asnix_bshared_make_attrs(syms, vals, n);
+            if (rc == 0) *out = ll_bshared_make_attrs(syms, vals, n);
             free(syms);
             free(vals);
             return rc;
@@ -324,7 +324,7 @@ static int handler_to_op_id(void *handler) {
      * traffic interleaved, so their freshly-assigned pool indices come
      * out consecutive again exactly like the original compile did --
      * ir_link() (called once on the whole deserialized program right
-     * after this read, asnix_bytecode_deserialize's own last step)
+     * after this read, ll_bytecode_deserialize's own last step)
      * re-discovers and re-fuses the identical run on its own, with no
      * separate handling needed here at all. */
     if (handler == (void *)ll_op_push_int_run) return OP_PUSH_INT;
@@ -409,13 +409,13 @@ enum {
                           * marker can't be built, see write_lazy_thunk_marker). Payload: the
                           * reparse byte offset (one varint), `file_path`/`base_dir` (two
                           * length-prefixed byte strings -- needed so a later force's
-                          * asnix_parse_subexpr/compile_expr gets the exact same `import`/
+                          * ll_parse_subexpr/compile_expr gets the exact same `import`/
                           * `__curPos` context the live path's own descriptor would have
                           * captured), then the ScopeFrame chain the deferred value's lexical
                           * lookups need, OUTERMOST frame first: frame-count (one varint), then
                           * per frame: count + is_with + has_overrides (three varints) followed
                           * by `count` length-prefixed name byte strings. On load, this becomes
-                          * a LazyThunkDescriptor with `body == NULL` -- asnix_compile_lazy_
+                          * a LazyThunkDescriptor with `body == NULL` -- ll_compile_lazy_
                           * thunk_body's own first-force check reparses `file_path`'s source
                           * text (reopened and memoized once per distinct path, see compiler.c's
                           * reparse_source_for_file -- NOT the bytecode-cache entry's own mmap,
@@ -465,9 +465,9 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool);
  * PTAG_OP_LAZY_MARKER's own enum comment for the wire layout. */
 static int write_lazy_thunk_marker(WBuf *b, void *desc) {
     unsigned int pos;
-    if (!asnix_lazy_thunk_descriptor_src_pos(desc, &pos)) return -1;
-    const char *file_path = asnix_lazy_thunk_descriptor_file_path(desc);
-    const char *base_dir = asnix_lazy_thunk_descriptor_base_dir(desc);
+    if (!ll_lazy_thunk_descriptor_src_pos(desc, &pos)) return -1;
+    const char *file_path = ll_lazy_thunk_descriptor_file_path(desc);
+    const char *base_dir = ll_lazy_thunk_descriptor_base_dir(desc);
     wbuf_u8(b, PTAG_OP_LAZY_MARKER);
     wbuf_i64(b, (int64_t)pos);
     wbuf_bytes_with_len(b, file_path, strlen(file_path));
@@ -478,22 +478,22 @@ static int write_lazy_thunk_marker(WBuf *b, void *desc) {
      * -- two small, bounded passes over the same (always shallow: a
      * handful of enclosing let/rec/lambda/with levels, never remotely
      * close to a real file's total node count) chain. */
-    void *scope = asnix_lazy_thunk_descriptor_scope(desc);
+    void *scope = ll_lazy_thunk_descriptor_scope(desc);
     size_t frame_count = 0;
-    for (void *f = scope; f; f = asnix_scope_frame_up(f)) frame_count++;
+    for (void *f = scope; f; f = ll_scope_frame_up(f)) frame_count++;
     void **frames = frame_count ? malloc(frame_count * sizeof(void *)) : NULL;
     size_t fi = 0;
-    for (void *f = scope; f; f = asnix_scope_frame_up(f)) frames[fi++] = f;
+    for (void *f = scope; f; f = ll_scope_frame_up(f)) frames[fi++] = f;
     wbuf_i64(b, (int64_t)frame_count);
     for (size_t i = frame_count; i-- > 0;) {
         void *f = frames[i];
-        int count = asnix_scope_frame_count(f);
+        int count = ll_scope_frame_count(f);
         wbuf_i64(b, count);
-        wbuf_i64(b, asnix_scope_frame_is_with(f));
-        wbuf_i64(b, asnix_scope_frame_has_overrides(f));
+        wbuf_i64(b, ll_scope_frame_is_with(f));
+        wbuf_i64(b, ll_scope_frame_has_overrides(f));
         for (int ni = 0; ni < count; ni++) {
             size_t len;
-            const char *name = asnix_scope_frame_name(f, ni, &len);
+            const char *name = ll_scope_frame_name(f, ni, &len);
             wbuf_bytes_with_len(b, name, len);
         }
     }
@@ -507,7 +507,7 @@ static size_t program_op_count(IrProgram *prog) {
         int op_id = handler_to_op_id(prog->ops[n].handler);
         if (op_id < 0) return (size_t)-1;
         /* Lazy-thunk-compile experiment (compiler.h's own comment on
-         * asnix_lazy_thunk_enabled): an un-upgraded stub IrProgram's
+         * ll_lazy_thunk_enabled): an un-upgraded stub IrProgram's
          * ONLY op is OP_LAZY_THUNK_BODY, with no OP_RET/OP_HALT
          * terminator after it (the stub is meant to be upgraded IN
          * PLACE on first force, replacing its own ops/pool with the
@@ -526,7 +526,7 @@ static size_t program_op_count(IrProgram *prog) {
          * build them) -- caching a file containing an unresolved stub
          * was never going to work, this just makes that refusal
          * explicit and bounded instead of an accidental out-of-bounds
-         * read. Same observable outcome as before (asnix_bytecode_
+         * read. Same observable outcome as before (ll_bytecode_
          * cache_store's own documented "refused -- skip caching"
          * contract, see that function's own comment), now via a real
          * check instead of relying on garbage memory not matching. */
@@ -580,7 +580,7 @@ static int write_program(WBuf *b, IrProgram *prog) {
                 IrOp *valop = &prog->ops[start + (size_t)k];
                 uint32_t sym = (uint32_t)prog->pool[pool_b + k];
                 size_t name_len;
-                const char *name = asnix_sym_name(sym, &name_len);
+                const char *name = ll_sym_name(sym, &name_len);
                 wbuf_bytes_with_len(b, name, name_len);
                 /* Each pair's value-op is written as a length-prefixed,
                  * self-contained blob (not inline) so the reader can
@@ -681,14 +681,14 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
             for (int64_t i = 0; i < required_count; i++) {
                 uint32_t sym = (uint32_t)pool[pool_b + 1 + i];
                 size_t len;
-                const char *name = asnix_sym_name(sym, &len);
+                const char *name = ll_sym_name(sym, &len);
                 wbuf_bytes_with_len(b, name, len);
             }
             if (total_count >= 0) {
                 for (int64_t i = 0; i < total_count; i++) {
                     uint32_t sym = (uint32_t)pool[pool_b + 1 + required_count + i];
                     size_t len;
-                    const char *name = asnix_sym_name(sym, &len);
+                    const char *name = ll_sym_name(sym, &len);
                     wbuf_bytes_with_len(b, name, len);
                 }
             }
@@ -703,7 +703,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
             for (int64_t i = 0; i < n; i++) {
                 uint32_t sym = (uint32_t)pool[pool_b + i];
                 size_t len;
-                const char *name = asnix_sym_name(sym, &len);
+                const char *name = ll_sym_name(sym, &len);
                 wbuf_bytes_with_len(b, name, len);
             }
             wbuf_i64(b, pool[pool_b + n]); /* overrides_slot: plain int, not a symbol */
@@ -721,7 +721,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
              * file's PTAG_OP_SYM_A comment for why this needs its own
              * case (found via a real failure, not by inspection alone). */
             size_t len;
-            const char *name = asnix_sym_name((uint32_t)op->a, &len);
+            const char *name = ll_sym_name((uint32_t)op->a, &len);
             wbuf_u8(b, PTAG_OP_SYM_A);
             wbuf_i64(b, op_id);
             wbuf_bytes_with_len(b, name, len);
@@ -734,7 +734,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
             /* `b` is the bare symbol id here; `a` is a real jump delta,
              * passed through unchanged. See PTAG_OP_SYM_A's comment. */
             size_t len;
-            const char *name = asnix_sym_name((uint32_t)op->b, &len);
+            const char *name = ll_sym_name((uint32_t)op->b, &len);
             wbuf_u8(b, PTAG_OP_SYM_B);
             wbuf_i64(b, op_id);
             wbuf_i64(b, op->a);
@@ -764,7 +764,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
                     wbuf_i64(b, -1);
                 } else {
                     size_t len;
-                    const char *name = asnix_sym_name((uint32_t)sym_or_neg1, &len);
+                    const char *name = ll_sym_name((uint32_t)sym_or_neg1, &len);
                     wbuf_i64(b, (int64_t)len);
                     wbuf_bytes(b, name, len);
                 }
@@ -780,14 +780,14 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
     }
 }
 
-int asnix_bytecode_serialize(IrProgram *prog, uint8_t **out_buf, size_t *out_len) {
+int ll_bytecode_serialize(IrProgram *prog, uint8_t **out_buf, size_t *out_len) {
     WBuf b = { 0 };
     /* M102: magic bumped 01 -> 02 -- the wire format of every
      * opcode/operand/length/symbol-id field changed from fixed 8-byte
      * int64 to a variable-width (zigzag+LEB128) varint. A stale
      * ASNXBC01 entry from before this change must never be misread as
      * ASNXBC02 data (the byte layout no longer lines up at all past the
-     * first field) -- asnix_bytecode_deserialize's own magic check below
+     * first field) -- ll_bytecode_deserialize's own magic check below
      * rejects it outright, same as any other corrupt/foreign entry,
      * degrading cleanly to a cache miss (recompile, overwrite) per this
      * cache's own silent-degrade-to-miss design (bytecode_cache.c).
@@ -819,7 +819,7 @@ int asnix_bytecode_serialize(IrProgram *prog, uint8_t **out_buf, size_t *out_len
  * Deserialization: mirrors write_program/write_one_op exactly, emitting
  * a fresh ops[]/pool[] pair (malloc'd, growable the same way
  * irbuild.c's own ib_emit/ib_pool_add grow -- these are handed to
- * ir_link/asnix_eval exactly like ib_finish's own output, so they must
+ * ir_link/ll_eval exactly like ib_finish's own output, so they must
  * use the SAME allocator convention, not the arena: see irbuild.c's
  * IrBuilder for precedent). Returns NULL on ANY anomaly -- no partial
  * programs are ever returned.
@@ -883,7 +883,7 @@ static int read_sorted_symbol_list(RCur *r, DBuilder *d, int64_t count) {
             free(syms);
             return -1;
         }
-        syms[i] = asnix_intern(name, len);
+        syms[i] = ll_intern(name, len);
     }
     for (int64_t i = 1; i < count; i++) {
         int64_t j = i;
@@ -917,7 +917,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             const char *name = rcur_bytes_with_len(r, &len);
             int64_t b = rcur_i64(r);
             if (r->failed || op_id < 0 || op_id >= OP_COUNT) return -1;
-            db_emit(d, (int)op_id, (int64_t)asnix_intern(name, len), b);
+            db_emit(d, (int)op_id, (int64_t)ll_intern(name, len), b);
             return d->failed ? -1 : 0;
         }
         case PTAG_OP_SYM_B: {
@@ -926,7 +926,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             size_t len;
             const char *name = rcur_bytes_with_len(r, &len);
             if (r->failed || op_id < 0 || op_id >= OP_COUNT) return -1;
-            db_emit(d, (int)op_id, a, (int64_t)asnix_intern(name, len));
+            db_emit(d, (int)op_id, a, (int64_t)ll_intern(name, len));
             return d->failed ? -1 : 0;
         }
         case PTAG_OP_PUSHINT: {
@@ -950,7 +950,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             DBuilder child = { 0 };
             if (read_program_into(r, &child) != 0) return -1;
             /* Every nested program needs its OWN ir_link call -- only
-             * the outermost one gets linked by asnix_bytecode_deserialize
+             * the outermost one gets linked by ll_bytecode_deserialize
              * itself. Missing this leaves child.ops[i].handler holding a
              * raw op-id integer (0, 1, 2, ...) instead of a real handler
              * function pointer; op_call.S/force.S then `jmp *that`,
@@ -1024,7 +1024,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
                 size_t len;
                 const char *name = rcur_bytes_with_len(r, &len);
                 if (r->failed) return -1;
-                int64_t pidx = db_pool_add(d, (int64_t)asnix_intern(name, len));
+                int64_t pidx = db_pool_add(d, (int64_t)ll_intern(name, len));
                 if (i == 0) idx = pidx;
             }
             int64_t overrides_slot = rcur_i64(r);
@@ -1058,7 +1058,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
                         free(name);
                         return -1;
                     }
-                    pidx = db_pool_add(d, (int64_t)asnix_intern(name, (size_t)len));
+                    pidx = db_pool_add(d, (int64_t)ll_intern(name, (size_t)len));
                     free(name);
                 }
                 if (i == 0) idx = pidx;
@@ -1113,14 +1113,14 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
                     names[ni] = nm;
                     lens[ni] = nlen;
                 }
-                if (ok) scope_chain = asnix_lazy_scope_push_frame(scope_chain, (int)count, (int)is_with,
+                if (ok) scope_chain = ll_lazy_scope_push_frame(scope_chain, (int)count, (int)is_with,
                                                                    (int)has_overrides, names, lens);
                 free(names);
                 free(lens);
                 if (!ok) return -1;
             }
 
-            void *desc = asnix_make_cached_lazy_thunk_descriptor((unsigned int)pos, file_path, base_dir,
+            void *desc = ll_make_cached_lazy_thunk_descriptor((unsigned int)pos, file_path, base_dir,
                                                                   scope_chain);
             DBuilder stub = { 0 };
             int64_t desc_idx = db_pool_add(&stub, (int64_t)(intptr_t)desc);
@@ -1130,7 +1130,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             IrProgram *stub_prog = malloc(sizeof(IrProgram));
             stub_prog->ops = stub.ops;
             stub_prog->pool = stub.pool;
-            asnix_lazy_thunk_descriptor_set_self(desc, stub_prog);
+            ll_lazy_thunk_descriptor_set_self(desc, stub_prog);
 
             int64_t idx = db_pool_add(d, (int64_t)(intptr_t)stub_prog);
             db_emit(d, OP_MK_THUNK, 0, idx);
@@ -1160,7 +1160,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
                     free(blob_len);
                     return -1;
                 }
-                new_syms[i] = asnix_intern(name, len);
+                new_syms[i] = ll_intern(name, len);
                 int64_t bl = rcur_i64(r);
                 if (r->failed || bl < 0 || (size_t)bl > r->len - r->pos) {
                     free(new_syms);
@@ -1180,7 +1180,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
              * comment on why this step exists at all). Small counts
              * (real attrsets are rarely more than a few dozen bindings)
              * make insertion sort fine, same simplicity call
-             * asnix_bshared_make_attrs itself already makes. */
+             * ll_bshared_make_attrs itself already makes. */
             for (size_t i = 1; i < (size_t)count; i++) {
                 size_t j = i;
                 while (j > 0 && new_syms[order[j - 1]] > new_syms[order[j]]) {
@@ -1229,7 +1229,7 @@ static int read_program_into(RCur *r, DBuilder *d) {
      * so by the time this loop finishes, `d->len` always equals `n_ops`
      * exactly, never more or less. Presizing `d->ops` to `n_ops` up front
      * (this DBuilder is always freshly `{0}`-initialized by every call
-     * site -- the top-level call in asnix_bytecode_deserialize and both
+     * site -- the top-level call in ll_bytecode_deserialize and both
      * PTAG_OP_THUNK/PTAG_OP_LAMBDA's own fresh `child = {0}`) replaces
      * db_emit's usual start-at-16-and-double growth with a SINGLE
      * allocation and zero growth-reallocs for `ops` at this level,
@@ -1260,10 +1260,10 @@ static int read_program_into(RCur *r, DBuilder *d) {
     return d->failed ? -1 : 0;
 }
 
-IrProgram *asnix_bytecode_deserialize(const uint8_t *buf, size_t len) {
+IrProgram *ll_bytecode_deserialize(const uint8_t *buf, size_t len) {
     /* Also rejects a pre-M102 ASNXBC01 entry (fixed-8-byte-int wire
      * format) and a pre-M169 ASNXBC02 entry (OP_PUSH_INT's old inline-`a`
-     * encoding) -- see asnix_bytecode_serialize's own comment on the
+     * encoding) -- see ll_bytecode_serialize's own comment on the
      * magic bump. */
     if (len < 8 || memcmp(buf, "ASNXBC03", 8) != 0) return NULL;
     RCur r = { .buf = buf, .len = len, .pos = 8, .failed = 0 };

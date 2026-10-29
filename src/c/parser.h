@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_PARSER_H
-#define ASNIX_PARSER_H
+#ifndef LL_PARSER_H
+#define LL_PARSER_H
 
 #include "ast.h"
 #include "lexer.h"
@@ -26,17 +26,17 @@
  * builtins_m54.c's own `unsafeGetAttrPos2_impl` comment).
  *
  * M135: lexes `src` on demand internally (via a LexCursor, lexer.h) --
- * callers no longer call asnix_lex() themselves first; see
+ * callers no longer call ll_lex() themselves first; see
  * docs/architecture.md M134/M135. */
-Ast *asnix_parse(const char *src);
+Ast *ll_parse(const char *src);
 
 /* Marker-reparse addition (see parser.c's own comment on this function):
  * parses exactly one expression starting at `src[start_offset]`, where
- * `src` is a full file buffer an earlier asnix_parse(src) call (in a
+ * `src` is a full file buffer an earlier ll_parse(src) call (in a
  * DIFFERENT, now-dead process) already walked once. Used only by
- * compiler.c's asnix_compile_lazy_thunk_body, for a LazyThunkDescriptor
+ * compiler.c's ll_compile_lazy_thunk_body, for a LazyThunkDescriptor
  * that was reconstructed from a bytecode-cache entry instead of built
  * live during that file's own original compile. */
-Ast *asnix_parse_subexpr(const char *src, size_t start_offset);
+Ast *ll_parse_subexpr(const char *src, size_t start_offset);
 
-#endif /* ASNIX_PARSER_H */
+#endif /* LL_PARSER_H */

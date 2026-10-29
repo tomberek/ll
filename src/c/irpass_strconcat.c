@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,7 +25,7 @@
  * OP_STR_CONCAT, and not a mix of one-constant-one-not): an
  * OP_PUSH_CONST's pool entry can hold ANY constant Value shape (an int,
  * bool, list-of-syms, a Path or Float that merely happens to share
- * ASNIX_TAG_PTR with String, ...) -- there's no way to tell from the op
+ * LL_TAG_PTR with String, ...) -- there's no way to tell from the op
  * alone, so this pass must actually dereference the pool entry and check
  * its runtime tag before assuming "string". A Path or Float operand is
  * deliberately left alone (not folded) even though both ALSO reach
@@ -39,9 +39,9 @@
  * attached via a side table keyed by a String's own arena pointer, and
  * ONLY ever populated by RUNTIME construction call sites (derivation
  * outputs, path/attrs coercion, ...) -- a literal pool constant built by
- * compiler.c (either directly, or via asnix_make_string_value in its own
+ * compiler.c (either directly, or via ll_make_string_value in its own
  * AST_STRING interpolation case) never goes through
- * asnix_string_attach_context, so both operands here are guaranteed
+ * ll_string_attach_context, so both operands here are guaranteed
  * context-free already; the freshly-built folded constant below
  * inherits that same "no context" state for free, identical to what
  * OP_STR_CONCAT's own runtime path (concat_strings_impl, unioning two
@@ -64,7 +64,7 @@ static int op_is_jump(int op_id) {
  * ops[i+1]'s position), bypassing ops[i] (the MISS path's own default-
  * value constant) entirely. Folding ops[i]+ops[i+1] into one constant
  * assumes ops[i] ALWAYS executes first, which is false on that FOUND
- * path. asnix_irpass_remove's own safety check caught this (a live jump
+ * path. ll_irpass_remove's own safety check caught this (a live jump
  * targets the removed range) rather than letting it corrupt the FOUND
  * case's result. Fix: only fold when nothing jumps directly into either
  * op about to be removed -- same incoming-jump guard irpass_dce_if.c's
@@ -75,7 +75,7 @@ static int range_has_incoming_jump(IrOp *ops, size_t len, size_t start, size_t c
     for (size_t i = 0; i < len; i++) {
         int id = (int)(intptr_t)ops[i].handler;
         if (!op_is_jump(id)) continue;
-        int64_t target = (int64_t)i + ops[i].a / ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)i + ops[i].a / LL_IROP_SIZE;
         if (target >= (int64_t)start && target < (int64_t)(start + count)) return 1;
     }
     return 0;
@@ -97,23 +97,23 @@ static int fold_adjacent_const_strings(IrOp *ops, size_t *len, int64_t **pool, s
         Value v1 = { .raw = (uint64_t)(*pool)[idx1] };
         Value v2 = { .raw = (uint64_t)(*pool)[idx2] };
         /* "genuine String" check -- same tag-exclusion pattern
-         * value_util.c's own is_plain_string helper uses (ASNIX_TAG_PTR
+         * value_util.c's own is_plain_string helper uses (LL_TAG_PTR
          * minus the Path/Float sibling kinds that share it); Cell/
          * LazyApp are excluded too purely for defense-in-depth (neither
          * can actually appear in a compile-time constant pool -- both
          * are purely-internal runtime-only devices, see heap.h -- but
          * checking costs nothing and keeps this pass correct even if
          * that ever changed). */
-        if (asnix_tag_of(v1) != ASNIX_TAG_PTR || asnix_value_is_path(v1) || asnix_value_is_float(v1) ||
-            asnix_value_is_cell(v1) || asnix_value_is_lazyapp(v1))
+        if (ll_tag_of(v1) != LL_TAG_PTR || ll_value_is_path(v1) || ll_value_is_float(v1) ||
+            ll_value_is_cell(v1) || ll_value_is_lazyapp(v1))
             continue;
-        if (asnix_tag_of(v2) != ASNIX_TAG_PTR || asnix_value_is_path(v2) || asnix_value_is_float(v2) ||
-            asnix_value_is_cell(v2) || asnix_value_is_lazyapp(v2))
+        if (ll_tag_of(v2) != LL_TAG_PTR || ll_value_is_path(v2) || ll_value_is_float(v2) ||
+            ll_value_is_cell(v2) || ll_value_is_lazyapp(v2))
             continue;
 
         int64_t len1, len2;
-        const char *b1 = asnix_ptr_bytes(v1, &len1);
-        const char *b2 = asnix_ptr_bytes(v2, &len2);
+        const char *b1 = ll_ptr_bytes(v1, &len1);
+        const char *b2 = ll_ptr_bytes(v2, &len2);
 
         /* OP_STR_CONCAT's `parts` array (op_str_concat.S) is VALSTACK's
          * last `count` slots read base-to-top, i.e. in ORIGINAL PUSH
@@ -127,19 +127,19 @@ static int fold_adjacent_const_strings(IrOp *ops, size_t *len, int64_t **pool, s
         if (buf == NULL) continue; /* allocation failure: leave this triple for the runtime op */
         memcpy(buf, b1, (size_t)len1);
         memcpy(buf + len1, b2, (size_t)len2);
-        Value folded = asnix_make_string_value(buf, (size_t)(len1 + len2));
+        Value folded = ll_make_string_value(buf, (size_t)(len1 + len2));
         free(buf);
 
-        size_t new_idx = asnix_irpass_pool_append(pool, pool_len, pool_cap, (int64_t)folded.raw);
+        size_t new_idx = ll_irpass_pool_append(pool, pool_len, pool_cap, (int64_t)folded.raw);
         ops[i].handler = (void *)(intptr_t)OP_PUSH_CONST;
         ops[i].a = 0;
         ops[i].b = (int64_t)new_idx;
-        asnix_irpass_remove(ops, len, i + 1, 2);
+        ll_irpass_remove(ops, len, i + 1, 2);
         return 1; /* re-scan from the top next iteration -- simplest correct strategy */
     }
     return 0;
 }
 
-void asnix_irpass_register_strconcat(void) {
-    asnix_irpass_register("strconcat", fold_adjacent_const_strings);
+void ll_irpass_register_strconcat(void) {
+    ll_irpass_register("strconcat", fold_adjacent_const_strings);
 }

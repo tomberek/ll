@@ -6,7 +6,7 @@
 #
 # All three are builtins.unsafeGetAttrPos/__curPos-style position
 # tracking: position info is a debug-build-only feature here (gated
-# behind ASNIX_IRDUMP_LINE_TRACKING, see compiler.c's asnix_ast_new_at),
+# behind LL_IRDUMP_LINE_TRACKING, see compiler.c's ll_ast_new_at),
 # deliberately not paid for in a normal build -- a real gap, not a typo.
 lang/eval-okay-getattrpos-functionargs.nix
 lang/eval-okay-getattrpos.nix

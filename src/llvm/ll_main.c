@@ -1,5 +1,5 @@
 /* M10: end-to-end CLI: lexer -> parser -> compiler (src/c, vendored
- * from asnix) -> ir_link (dispatch_table.c) -> asnix_eval (ll_eval.c's
+ * from asnix) -> ir_link (dispatch_table.c) -> ll_eval (ll_eval.c's
  * AOT threaded dispatch over src/llvm/ops/*.c's handlers), with
  * `builtins`/`map`/`import`/etc. bound via root_env.c's
  * ll_make_root_env. No LLVM involved at runtime at all -- see
@@ -19,15 +19,15 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "asnix/arena.h"
-#include "asnix/ir.h"
-#include "asnix/value.h"
+#include "ll/arena.h"
+#include "ll/ir.h"
+#include "ll/value.h"
 #include "ast.h"
 #include "compiler.h"
 #include "ll_print.h"
 #include "parser.h"
 #include "root_env.h"
-#include "value_util.h" /* asnix_canon_path */
+#include "value_util.h" /* ll_canon_path */
 
 static double ms_between(struct timespec *a, struct timespec *b) {
     return (b->tv_sec - a->tv_sec) * 1000.0 + (b->tv_nsec - a->tv_nsec) / 1e6;
@@ -76,7 +76,7 @@ static char *current_dir(void) {
  * resolves against *base_dir_out, so a file argument NOT sitting
  * directly in the process's own cwd needs its real directory here, not
  * a placeholder. *resolved_path_out is the canonicalized absolute path
- * itself (asnix_compile's `file_path` argument, g_compile_file_path --
+ * itself (ll_compile's `file_path` argument, g_compile_file_path --
  * read by __curPos__/builtins.unsafeGetAttrPos's own `file` field; a
  * NULL here is why that field printed empty instead of the real path). */
 static void resolve_file_for_compile(const char *path, char **base_dir_out, char **resolved_path_out) {
@@ -92,7 +92,7 @@ static void resolve_file_for_compile(const char *path, char **base_dir_out, char
         memcpy(abs + cwd_len + 1, path, path_len + 1);
         free(cwd);
     }
-    char *canon = asnix_canon_path(abs);
+    char *canon = ll_canon_path(abs);
     free(abs);
 
     const char *slash = strrchr(canon, '/');
@@ -111,11 +111,11 @@ int main(int argc, char **argv) {
     const char *src = file_src ? file_src : (argc > 1 ? argv[1] : "42");
     /* Matches asnix's own two entry points exactly: a real file's
      * relative imports resolve against ITS OWN directory, and its own
-     * resolved path feeds position tracking (asnix_eval_file's
+     * resolved path feeds position tracking (ll_eval_file's
      * base_dir/resolved, via dir_of/resolve_import_path); a literal CLI
      * expression (no file of its own) resolves imports against the
      * process's cwd directly, with no file path at all for position
-     * tracking (asnix_eval_expr_source) -- neither is ever a fixed
+     * tracking (ll_eval_expr_source) -- neither is ever a fixed
      * placeholder. */
     char *base_dir, *resolved_path = NULL;
     if (file_src) {
@@ -127,7 +127,7 @@ int main(int argc, char **argv) {
     struct timespec t0, t1, t2, t3, t4;
 
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t0);
-    asnix_arena_init(0);
+    ll_arena_init(0);
     /* Lazy-thunk-compile experiment, ported from asnix: default ON here
      * (unlike asnix, which keeps it opt-in -- see that repo's own
      * bytecode-cache interaction, which ll has no equivalent of since it
@@ -135,17 +135,17 @@ int main(int argc, char **argv) {
      * states (44/44 difftest, 148/148 nixpkgs-hash, byte-identical real-
      * benchmark output) with a real, substantial win (-6.52% ffmpeg,
      * -2.79% plasma) and no known blocker, so there's no reason to leave
-     * it behind a flag nobody will ever think to set. ASNIX_EAGER_THUNK=1
+     * it behind a flag nobody will ever think to set. LL_EAGER_THUNK=1
      * is the rollback switch if a real regression ever surfaces. */
-    asnix_lazy_thunk_enabled = getenv("ASNIX_EAGER_THUNK") == NULL;
-    Ast *root = asnix_parse(src);
+    ll_lazy_thunk_enabled = getenv("LL_EAGER_THUNK") == NULL;
+    Ast *root = ll_parse(src);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t1);
-    IrProgram *prog = asnix_compile(root, base_dir, resolved_path);
+    IrProgram *prog = ll_compile(root, base_dir, resolved_path);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t2);
     Env *root_env = ll_make_root_env();
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t3);
 
-    Value result = asnix_eval(prog, root_env);
+    Value result = ll_eval(prog, root_env);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t4);
 
     if (show_stats) {

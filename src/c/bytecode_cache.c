@@ -2,10 +2,10 @@
  * see ~/.claude/plans/soft-wishing-engelbart.md.
  *
  * Deliberately a PARTIAL port: the on-disk lookup/store cache itself
- * (asnix_bytecode_cache_enabled/lookup_fast/lookup_verify/store) is
+ * (ll_bytecode_cache_enabled/lookup_fast/lookup_verify/store) is
  * ported essentially verbatim -- it's pure portable C, no asm/io_uring
  * dependency, and this binary's own IrOp/ir_link scheme (dispatch_table.c)
- * is byte-structurally identical to asnix's (same shared include/asnix/ir.h:
+ * is byte-structurally identical to asnix's (same shared include/ll/ir.h:
  * `handler` starts as a small op-id, ir_link() rewrites it to a real
  * function-pointer address -- bytecode.c's serializer already works in
  * terms of the portable op-id/symbol-by-name form, never a raw address,
@@ -18,19 +18,19 @@
  * top of this cache, not required to realize the cache's own measured
  * win (a cold-then-warm TWO-RUN scenario) -- out of scope for this
  * port, consistent with the io_uring prefetch pool staying asnix-only
- * elsewhere in this project. asnix_bytecode_prefetch_imports/_wait
+ * elsewhere in this project. ll_bytecode_prefetch_imports/_wait
  * below are honest no-ops: every call site in eval_file.c already
  * treats them as "maybe nothing happens" (see bytecode_cache.h's own
  * doc comment -- "no-op if prefetching is disabled"), so this is
  * observably identical to running real asnix with
- * ASNIX_BYTECODE_PRODUCER never set.
+ * LL_BYTECODE_PRODUCER never set.
  *
  * KNOWN INTERACTION with `ll`'s own lazy-thunk-body-compile feature
  * (default ON here, unlike asnix which keeps it opt-in -- see
- * ll_main.c's own comment on asnix_lazy_thunk_enabled): a freshly-
+ * ll_main.c's own comment on ll_lazy_thunk_enabled): a freshly-
  * compiled program can contain not-yet-expanded OP_LAZY_THUNK_BODY
  * stub thunks (bodies deferred until first force) at the exact moment
- * eval_file.c calls asnix_bytecode_cache_store right after compiling --
+ * eval_file.c calls ll_bytecode_cache_store right after compiling --
  * bytecode.c's own program_op_count explicitly refuses to serialize
  * ANY program containing one (a LazyThunkDescriptor's `body`/`scope`
  * are compile-time-only Ast/ScopeFrame pointers, meaningless cross-
@@ -40,7 +40,7 @@
  * Measured directly on a real ffmpeg-closure eval: only 32/1132 files
  * stored with lazy-thunk-compile at its default ON, vs. 1113/1132
  * (98.3%, matching asnix's own hit rate almost exactly) with
- * ASNIX_EAGER_THUNK=1 set alongside ASNIX_BYTECODE_CACHE=1. This is
+ * LL_EAGER_THUNK=1 set alongside LL_BYTECODE_CACHE=1. This is
  * exactly the SAME tension asnix's own lazy-thunk-compile experiment
  * already has with ITS bytecode cache -- see that project's own
  * comment on why lazy-thunk-compile stays opt-in there -- `ll` was
@@ -49,8 +49,8 @@
  * bug (every store attempt that DOES go through, or any run with the
  * cache enabled at all, still produces byte-identical output either
  * way -- confirmed directly); just a real hit-rate cost of running
- * both opt-in features together. Set ASNIX_EAGER_THUNK=1 for a
- * meaningful hit rate when ASNIX_BYTECODE_CACHE=1 is also set. */
+ * both opt-in features together. Set LL_EAGER_THUNK=1 for a
+ * meaningful hit rate when LL_BYTECODE_CACHE=1 is also set. */
 #define _DEFAULT_SOURCE /* strdup()/mkdir() under -std=c11 -- same convention
                           * asnix's own eval_file.c/bytecode_cache.c already
                           * establish for this codebase */
@@ -71,10 +71,10 @@
 #include "bytecode.h"
 #include "hash_shim.h"
 
-int asnix_bytecode_cache_enabled(void) {
+int ll_bytecode_cache_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *v = getenv("ASNIX_BYTECODE_CACHE");
+        const char *v = getenv("LL_BYTECODE_CACHE");
         cached = (v && strcmp(v, "1") == 0) ? 1 : 0;
     }
     return cached;
@@ -84,7 +84,7 @@ int asnix_bytecode_cache_enabled(void) {
  * allocations (cache directory path, hex key) -- plain malloc, freed
  * locally, same convention nar.c's own store-copy helpers use for their
  * own scratch buffers. Memoized: the env vars this reads
- * (ASNIX_BYTECODE_CACHE_DIR/HOME) are fixed for the process lifetime,
+ * (LL_BYTECODE_CACHE_DIR/HOME) are fixed for the process lifetime,
  * but every call site resolves one cache file per imported file, so
  * without memoizing this re-reads both env vars and reallocates the
  * path string once per import -- potentially thousands of times on a
@@ -94,7 +94,7 @@ int asnix_bytecode_cache_enabled(void) {
 static char *cache_dir(void) {
     static char *cached = NULL;
     if (cached) return cached;
-    const char *override = getenv("ASNIX_BYTECODE_CACHE_DIR");
+    const char *override = getenv("LL_BYTECODE_CACHE_DIR");
     if (override) {
         cached = strdup(override);
         return cached;
@@ -136,13 +136,13 @@ static int mkdir_p(const char *path) {
  * below), not by the filename -- see bytecode_cache.h's own doc comment
  * for the full reasoning (ported verbatim from asnix). */
 static void path_hash_hex(const char *resolved_path, char out_hex[64]) {
-    unsigned char digest[ASNIX_HASH_SHA256_LEN];
-    int64_t rc = asnix_hash_sha256(resolved_path, strlen(resolved_path), digest);
+    unsigned char digest[LL_HASH_SHA256_LEN];
+    int64_t rc = ll_hash_sha256(resolved_path, strlen(resolved_path), digest);
     if (rc != 0) {
         memset(out_hex, '0', 64);
         return;
     }
-    asnix_hash_to_hex(digest, ASNIX_HASH_SHA256_LEN, out_hex);
+    ll_hash_to_hex(digest, LL_HASH_SHA256_LEN, out_hex);
 }
 
 static char *cache_file_path(const char *resolved_path) {
@@ -170,7 +170,7 @@ static char *cache_file_path(const char *resolved_path) {
 
 typedef struct {
     int64_t mtime_sec, mtime_nsec, size;
-    unsigned char content_hash[ASNIX_HASH_SHA256_LEN];
+    unsigned char content_hash[LL_HASH_SHA256_LEN];
 } CacheHeader;
 
 static int write_header(FILE *f, const CacheHeader *h) {
@@ -182,7 +182,7 @@ static int write_header(FILE *f, const CacheHeader *h) {
     if (fwrite(&h->mtime_sec, sizeof h->mtime_sec, 1, f) != 1) return -1;
     if (fwrite(&h->mtime_nsec, sizeof h->mtime_nsec, 1, f) != 1) return -1;
     if (fwrite(&h->size, sizeof h->size, 1, f) != 1) return -1;
-    if (fwrite(h->content_hash, 1, ASNIX_HASH_SHA256_LEN, f) != ASNIX_HASH_SHA256_LEN) return -1;
+    if (fwrite(h->content_hash, 1, LL_HASH_SHA256_LEN, f) != LL_HASH_SHA256_LEN) return -1;
     return 0;
 }
 
@@ -205,7 +205,7 @@ static int parse_header_from_buf(const uint8_t *buf, size_t len, CacheHeader *h)
     memcpy(&h->mtime_sec, buf + 16, sizeof h->mtime_sec);
     memcpy(&h->mtime_nsec, buf + 24, sizeof h->mtime_nsec);
     memcpy(&h->size, buf + 32, sizeof h->size);
-    memcpy(h->content_hash, buf + 40, ASNIX_HASH_SHA256_LEN);
+    memcpy(h->content_hash, buf + 40, LL_HASH_SHA256_LEN);
     return 0;
 }
 
@@ -213,7 +213,7 @@ static int parse_header_from_buf(const uint8_t *buf, size_t len, CacheHeader *h)
  * instead of `fopen`+`fseek`+`malloc`+`fread`ing its body into a fresh
  * heap buffer. Mapping from offset 0 (always page-aligned) and
  * returning a pointer into the mapping lets the caller read the header
- * AND hand the body straight to `asnix_bytecode_deserialize` with no
+ * AND hand the body straight to `ll_bytecode_deserialize` with no
  * intervening copy at all. Returns NULL on any failure (missing file,
  * empty file, mmap failure); the fd is always closed before returning. */
 static const uint8_t *mmap_whole_file(const char *path, size_t *out_len) {
@@ -231,7 +231,7 @@ static const uint8_t *mmap_whole_file(const char *path, size_t *out_len) {
     return (const uint8_t *)p;
 }
 
-/* Visibility: ASNIX_BYTECODE_CACHE_STATS=1 (on top of ASNIX_BYTECODE_CACHE=1)
+/* Visibility: LL_BYTECODE_CACHE_STATS=1 (on top of LL_BYTECODE_CACHE=1)
  * prints a one-line hit/miss/store summary to stderr at process exit --
  * the cache is otherwise silent by design. Counters are plain process-
  * lifetime globals; no synchronization needed since `ll` (unlike
@@ -243,7 +243,7 @@ static int g_stats_atexit_registered = 0;
 static int stats_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *v = getenv("ASNIX_BYTECODE_CACHE_STATS");
+        const char *v = getenv("LL_BYTECODE_CACHE_STATS");
         cached = (v && strcmp(v, "1") == 0) ? 1 : 0;
     }
     return cached;
@@ -266,8 +266,8 @@ static void ensure_stats_atexit(void) {
 }
 
 /* Writes a complete entry (header + body) atomically via write-temp-
- * then-rename -- shared by asnix_bytecode_cache_store itself and by
- * asnix_bytecode_cache_lookup_verify's own "self-heal" (re-stamp an
+ * then-rename -- shared by ll_bytecode_cache_store itself and by
+ * ll_bytecode_cache_lookup_verify's own "self-heal" (re-stamp an
  * entry with fresh mtime/size once its content is confirmed unchanged,
  * so the FAST path starts working again next time). */
 static void write_entry_atomic(const char *path, const CacheHeader *h, const uint8_t *body, size_t body_len) {
@@ -300,10 +300,10 @@ static void write_entry_atomic(const char *path, const CacheHeader *h, const uin
  * this function for the full contract. No source-file I/O at all: just
  * one open+read of the cache entry itself (or, on a plain miss, not
  * even that beyond the failed open). */
-IrProgram *asnix_bytecode_cache_lookup_fast(const char *resolved_path, int64_t mtime_sec, int64_t mtime_nsec,
+IrProgram *ll_bytecode_cache_lookup_fast(const char *resolved_path, int64_t mtime_sec, int64_t mtime_nsec,
                                              int64_t size, int *out_entry_exists) {
     *out_entry_exists = 0;
-    if (!asnix_bytecode_cache_enabled()) return NULL;
+    if (!ll_bytecode_cache_enabled()) return NULL;
     ensure_stats_atexit();
     char *path = cache_file_path(resolved_path);
     size_t total_len;
@@ -323,14 +323,14 @@ IrProgram *asnix_bytecode_cache_lookup_fast(const char *resolved_path, int64_t m
     if (hdr.mtime_sec != mtime_sec || hdr.mtime_nsec != mtime_nsec || hdr.size != size) {
         /* Stat drifted -- ambiguous, not necessarily stale (could be a
          * touch(1) with unchanged content). Caller should try the
-         * content-hash fallback (asnix_bytecode_cache_lookup_verify)
+         * content-hash fallback (ll_bytecode_cache_lookup_verify)
          * rather than treating this as an outright miss yet. */
         munmap((void *)map, total_len);
         return NULL;
     }
     const uint8_t *body = map + CACHE_HEADER_LEN;
     size_t body_len = total_len - CACHE_HEADER_LEN;
-    IrProgram *prog = asnix_bytecode_deserialize(body, body_len);
+    IrProgram *prog = ll_bytecode_deserialize(body, body_len);
     munmap((void *)map, total_len);
     if (prog) {
         g_stat_hits++;
@@ -338,7 +338,7 @@ IrProgram *asnix_bytecode_cache_lookup_fast(const char *resolved_path, int64_t m
     } else {
         g_stat_misses++;
     }
-    return prog; /* NULL on any anomaly -- asnix_bytecode_deserialize's own contract */
+    return prog; /* NULL on any anomaly -- ll_bytecode_deserialize's own contract */
 }
 
 /* M102 (Finding 1), step 2 -- only called by eval_file.c when step 1
@@ -349,9 +349,9 @@ IrProgram *asnix_bytecode_cache_lookup_fast(const char *resolved_path, int64_t m
  * compare it against the one recorded in the SAME entry step 1 already
  * found. See bytecode_cache.h's own doc comment for the full contract
  * and the mtime+size-as-heuristic tradeoff this accepts. */
-IrProgram *asnix_bytecode_cache_lookup_verify(const char *resolved_path, const char *source, size_t source_len,
+IrProgram *ll_bytecode_cache_lookup_verify(const char *resolved_path, const char *source, size_t source_len,
                                                int64_t mtime_sec, int64_t mtime_nsec, int64_t size) {
-    if (!asnix_bytecode_cache_enabled()) return NULL;
+    if (!ll_bytecode_cache_enabled()) return NULL;
     ensure_stats_atexit();
     char *path = cache_file_path(resolved_path);
     size_t total_len;
@@ -368,11 +368,11 @@ IrProgram *asnix_bytecode_cache_lookup_verify(const char *resolved_path, const c
         g_stat_misses++;
         return NULL;
     }
-    unsigned char digest[ASNIX_HASH_SHA256_LEN];
-    if (asnix_hash_sha256(source, source_len, digest) != 0 ||
-        memcmp(digest, hdr.content_hash, ASNIX_HASH_SHA256_LEN) != 0) {
+    unsigned char digest[LL_HASH_SHA256_LEN];
+    if (ll_hash_sha256(source, source_len, digest) != 0 ||
+        memcmp(digest, hdr.content_hash, LL_HASH_SHA256_LEN) != 0) {
         /* Either couldn't hash, or content genuinely differs -- a real
-         * miss; the caller will recompile and asnix_bytecode_cache_store
+         * miss; the caller will recompile and ll_bytecode_cache_store
          * will overwrite this stale entry. */
         munmap((void *)map, total_len);
         free(path);
@@ -381,7 +381,7 @@ IrProgram *asnix_bytecode_cache_lookup_verify(const char *resolved_path, const c
     }
     const uint8_t *body = map + CACHE_HEADER_LEN;
     size_t body_len = total_len - CACHE_HEADER_LEN;
-    IrProgram *prog = asnix_bytecode_deserialize(body, body_len);
+    IrProgram *prog = ll_bytecode_deserialize(body, body_len);
     if (prog) {
         g_stat_hits++;
         g_stat_verify_hits++;
@@ -405,13 +405,13 @@ IrProgram *asnix_bytecode_cache_lookup_verify(const char *resolved_path, const c
     return prog;
 }
 
-void asnix_bytecode_cache_store(const char *resolved_path, const char *source, size_t source_len, int64_t mtime_sec,
+void ll_bytecode_cache_store(const char *resolved_path, const char *source, size_t source_len, int64_t mtime_sec,
                                  int64_t mtime_nsec, int64_t size, IrProgram *prog) {
-    if (!asnix_bytecode_cache_enabled()) return;
+    if (!ll_bytecode_cache_enabled()) return;
     ensure_stats_atexit();
     uint8_t *buf;
     size_t len;
-    if (asnix_bytecode_serialize(prog, &buf, &len) != 0) return; /* refused -- some
+    if (ll_bytecode_serialize(prog, &buf, &len) != 0) return; /* refused -- some
                                                                     * construct this
                                                                     * format doesn't
                                                                     * support; just
@@ -420,7 +420,7 @@ void asnix_bytecode_cache_store(const char *resolved_path, const char *source, s
     h.mtime_sec = mtime_sec;
     h.mtime_nsec = mtime_nsec;
     h.size = size;
-    if (asnix_hash_sha256(source, source_len, h.content_hash) != 0) {
+    if (ll_hash_sha256(source, source_len, h.content_hash) != 0) {
         free(buf);
         return; /* couldn't hash -- skip caching this one rather than
                   * store an entry with an undefined content hash */
@@ -432,14 +432,14 @@ void asnix_bytecode_cache_store(const char *resolved_path, const char *source, s
 }
 
 /* Deliberately not ported -- see this file's own header comment.
- * Observably identical to real asnix with ASNIX_BYTECODE_PRODUCER
+ * Observably identical to real asnix with LL_BYTECODE_PRODUCER
  * never set: every eval_file.c call site already treats these as
  * "maybe does nothing." */
-void asnix_bytecode_prefetch_imports(Ast *root, const char *base_dir) {
+void ll_bytecode_prefetch_imports(Ast *root, const char *base_dir) {
     (void)root;
     (void)base_dir;
 }
 
-void asnix_bytecode_prefetch_wait(const char *resolved_path) {
+void ll_bytecode_prefetch_wait(const char *resolved_path) {
     (void)resolved_path;
 }

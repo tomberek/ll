@@ -17,11 +17,11 @@
  * plus a bit test) chained with up to four more byte-compares that
  * path_char/ident_cont/uri_scheme_char/uri_tail_char below used to run
  * from scratch on every single call. Confirmed via `perf annotate
- * asnix_lex` on a standalone lex-only microbenchmark (all-packages.nix,
+ * ll_lex` on a standalone lex-only microbenchmark (all-packages.nix,
  * 300+ iterations): path_char alone (inlined into try_scan_path's
  * per-character scan loop, which runs on every leading character of
  * every identifier/number/operator token, not just real path literals)
- * was ~15-20% of asnix_lex's own self time, and try_scan_uri/
+ * was ~15-20% of ll_lex's own self time, and try_scan_uri/
  * uri_scheme_char another ~9-10% -- almost entirely from re-deriving
  * each byte's classification one comparison at a time instead of a
  * single table lookup. Every CC_* bit here mirrors one of this file's
@@ -144,7 +144,7 @@ static size_t scan_path_groups(const char *src, size_t j, int *saw_group) {
  * ends right before "${" (e.g. "./" in "./${foo}", or "/" in "/${foo}"),
  * even though that prefix alone wouldn't otherwise satisfy the "at least
  * one full /PATH_CHAR+ group" rule -- see scan_path_groups. The caller
- * (asnix_lex's main loop) is responsible for noticing that case (checking
+ * (ll_lex's main loop) is responsible for noticing that case (checking
  * at_dollar_brace right after this returns) and switching into MODE_PATH
  * instead of emitting one complete, standalone TOK_PATH. */
 static size_t try_scan_path(const char *src, size_t i) {
@@ -379,14 +379,14 @@ struct Lexer {
     LexMode cur;
     Token pending;
     int has_pending;
-    /* Marker-reparse addition (parser.c's asnix_parse_subexpr): 0 for
+    /* Marker-reparse addition (parser.c's ll_parse_subexpr): 0 for
      * every ordinary Lexer (lexer_new), whose mode stack starts empty
      * and only ever grows from THIS SAME Lexer's own `{`/`${` tokens --
      * for that case, reaching a `}` with nothing left to pop (modes_len
      * == 1) really is a genuine syntax error (an actual unmatched '}' in
      * the source). Set to 1 only by lexer_new_lenient, used when lexing
      * starts PARTWAY into a larger buffer whose own enclosing `{`/`${`
-     * (if any) this Lexer never saw opened: asnix_parse_subexpr's
+     * (if any) this Lexer never saw opened: ll_parse_subexpr's
      * caller only ever wants ONE expression's worth of real tokens, but
      * the 2-token lookahead this file's own cur()/peek2() convention
      * needs (see lexer_new's own comment) unavoidably fetches one token
@@ -395,7 +395,7 @@ struct Lexer {
      * OUTER construct (an enclosing attrset/rec/string-interpolation
      * this Lexer has no record of), it is NOT a real syntax error, just
      * an artifact of always needing one token of lookahead; the fix is
-     * to not crash on it, since asnix_parse_subexpr's caller (compiler.c)
+     * to not crash on it, since ll_parse_subexpr's caller (compiler.c)
      * immediately discards the whole Lexer right after parse_expr
      * returns and never actually consumes this one over-read token
      * either way. */
@@ -436,7 +436,7 @@ static void mode_pop(Lexer *lx) {
 }
 
 static void fatal_unterminated(const char *what) {
-    fprintf(stderr, "asnix: unterminated %s\n", what);
+    fprintf(stderr, "ll: unterminated %s\n", what);
     exit(1);
 }
 
@@ -453,18 +453,18 @@ static char decode_escape_char(char c) {
     }
 }
 
-double asnix_decode_float_literal(const char *src, uint32_t start, uint32_t end) {
+double ll_decode_float_literal(const char *src, uint32_t start, uint32_t end) {
     (void)end; /* see this function's own header comment (lexer.h) for why no bound is needed */
     errno = 0;
     double d = strtod(src + start, NULL);
     if (errno == ERANGE) {
-        fprintf(stderr, "asnix: invalid float '%.*s'\n", (int)(end - start), src + start);
+        fprintf(stderr, "ll: invalid float '%.*s'\n", (int)(end - start), src + start);
         exit(1);
     }
     return d;
 }
 
-char *asnix_decode_dquote_span(const char *src, uint32_t start, uint32_t end, size_t *out_len) {
+char *ll_decode_dquote_span(const char *src, uint32_t start, uint32_t end, size_t *out_len) {
     size_t cap = (size_t)(end - start);
     char *out = malloc(cap ? cap : 1);
     size_t n = 0;
@@ -483,7 +483,7 @@ char *asnix_decode_dquote_span(const char *src, uint32_t start, uint32_t end, si
     return out;
 }
 
-void asnix_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t *out_len) {
+void ll_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t *out_len) {
     char third = src[start + 2];
     if (third == '\'') {
         out[0] = '\''; out[1] = '\'';
@@ -508,7 +508,7 @@ void asnix_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t 
  * M141: the TOK_STR_PART pushed here is a RAW span -- escapes are
  * scanned over (to find where the span ends and to validate there's no
  * unterminated trailing backslash) but never decoded; decoding happens
- * later, on demand, via asnix_decode_dquote_span (see lexer.h). Verified
+ * later, on demand, via ll_decode_dquote_span (see lexer.h). Verified
  * against real `nix-instantiate` for raw embedded newlines (allowed,
  * unlike this lexer's pre-interpolation M5 behavior -- see
  * docs/architecture.md's Known Bugs list) and the \n \r \t \" \\ \$
@@ -591,7 +591,7 @@ static Token lex_dquote_run(Lexer *lx) {
  * closes the string. M141: both TOK_ISTR_PART and TOK_ISTR_ESC carry a
  * RAW span only -- decoding (trivial for ISTR_PART: none needed at all,
  * it's already plain source text; a small fixed-shape decode for
- * TOK_ISTR_ESC) happens on demand, see asnix_decode_istr_esc. See
+ * TOK_ISTR_ESC) happens on demand, see ll_decode_istr_esc. See
  * lexer.h's own TOK_ISTR_ESC comment for the one narrow, documented
  * behavioral difference from the pre-M141 lexer (back-to-back escape
  * units used to merge into one token; M141 never merges).
@@ -711,7 +711,7 @@ static Token lex_indented_run(Lexer *lx) {
 /* M64: scans one run of path-literal content starting at *i (positioned
  * just after a closed "${ ... }" interpolation inside a path literal
  * whose FIRST chunk already established it continues past one -- see the
- * MODE_PATH push sites in asnix_lex's main loop above), up to the next
+ * MODE_PATH push sites in ll_lex's main loop above), up to the next
  * boundary: either another "${" or the first character that isn't a
  * path continuation at all (ending the whole literal). Pushes exactly
  * one TOK_PATH_PART (the literal chunk just scanned, possibly
@@ -762,7 +762,7 @@ static Token lex_path_run(Lexer *lx) {
  * digit) -- see lex_until's two call sites below. `*i` arrives already
  * positioned just past the decisive '.'; this scans the fractional
  * digits and an optional exponent ONLY (no strtod call here anymore --
- * that's deferred to asnix_decode_float_literal, called later from
+ * that's deferred to ll_decode_float_literal, called later from
  * parser.c once an AST_FLOAT node is actually being built). Mirrors real
  * Nix's own lexer.l FLOAT regex exactly, same as the pre-M141 version of
  * this function (renamed from scan_float_tail_and_parse, which also did
@@ -801,7 +801,7 @@ static Token lex_normal(Lexer *lx) {
 
         if (c == '\0') {
             if (lx->modes_len != 1) {
-                fprintf(stderr, "asnix: unexpected end of input inside '${ ... }'\n");
+                fprintf(stderr, "ll: unexpected end of input inside '${ ... }'\n");
                 exit(1);
             }
             lx->pos = i; /* left unchanged: a repeated call at EOF keeps producing TOK_EOF,
@@ -858,7 +858,7 @@ static Token lex_normal(Lexer *lx) {
                 i++;
             }
             if (!src[i]) {
-                fprintf(stderr, "asnix: unterminated block comment\n");
+                fprintf(stderr, "ll: unterminated block comment\n");
                 exit(1);
             }
             i += 2;
@@ -1137,7 +1137,7 @@ static Token lex_normal(Lexer *lx) {
                     lx->pos = i;
                     return mk_tok(TOK_RBRACE, tok_start, i);
                 }
-                fprintf(stderr, "asnix: unmatched '}'\n");
+                fprintf(stderr, "ll: unmatched '}'\n");
                 exit(1);
             }
             i++;
@@ -1202,7 +1202,7 @@ static Token lex_normal(Lexer *lx) {
                 case ',': kind = TOK_COMMA; break;
                 case '@': kind = TOK_AT; break;
                 default:
-                    fprintf(stderr, "asnix: unrecognized character '%c' in source\n", c);
+                    fprintf(stderr, "ll: unrecognized character '%c' in source\n", c);
                     exit(1);
             }
         }
@@ -1286,7 +1286,7 @@ Lexer *lexer_new(const char *src) {
 }
 
 /* Marker-reparse addition -- see Lexer's own `lenient` field comment
- * above and parser.c's asnix_parse_subexpr (the only caller). */
+ * above and parser.c's ll_parse_subexpr (the only caller). */
 Lexer *lexer_new_lenient(const char *src) {
     return lexer_new_ex(src, 1);
 }
@@ -1324,7 +1324,7 @@ void lexer_restore(Lexer *lx, LexerSave save) {
     lx->has_pending = save.has_pending;
 }
 
-/* Dead code as of M135 (every real caller goes through asnix_parse's
+/* Dead code as of M135 (every real caller goes through ll_parse's
  * internal Lexer instead -- see lexer.h's own comment); kept as a still-
  * correct, still-tested-by-construction (same lex_normal/lex_dquote_run/
  * lex_indented_run/lex_path_run core every lexer_next call ultimately
@@ -1335,7 +1335,7 @@ void lexer_restore(Lexer *lx, LexerSave save) {
  * function's own small, local, malloc'd-and-grown array is now the ONLY
  * place in this file that assembles tokens into an array at all (every
  * real, in-use caller never materializes one). */
-Token *asnix_lex(const char *src, size_t *out_count) {
+Token *ll_lex(const char *src, size_t *out_count) {
     keyword_lookup_selfcheck();
     Lexer *lx = lexer_new(src);
     size_t src_len = strlen(src);

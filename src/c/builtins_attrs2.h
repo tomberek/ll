@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_ATTRS2_H
-#define ASNIX_BUILTINS_ATTRS2_H
+#ifndef LL_BUILTINS_ATTRS2_H
+#define LL_BUILTINS_ATTRS2_H
 
 #include <stddef.h>
 
-#include "builtins_misc.h" /* shared AsnixBuiltinMiscDef/-Builder {name, build()} shape */
+#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
 
 /*
  * Second round of attrset builtins, added alongside genericClosure
@@ -20,7 +20,7 @@
  * `lib`-namespaced version instead.
  */
 
-extern const AsnixBuiltinMiscDef ASNIX_ATTRS2_BUILTINS[];
-extern const size_t ASNIX_ATTRS2_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_ATTRS2_BUILTINS[];
+extern const size_t LL_ATTRS2_BUILTINS_COUNT;
 
-#endif /* ASNIX_BUILTINS_ATTRS2_H */
+#endif /* LL_BUILTINS_ATTRS2_H */

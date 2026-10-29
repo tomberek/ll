@@ -4,18 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compiler.h" /* lazy-thunk-compile experiment: asnix_lazy_thunk_enabled,
-                        * see asnix_ast_enter_retained's own comment below. */
+#include "compiler.h" /* lazy-thunk-compile experiment: ll_lazy_thunk_enabled,
+                        * see ll_ast_enter_retained's own comment below. */
 
 /* perf: Ast nodes used to come from the main never-free bump arena, same
  * as every runtime value -- but an AST is pure compile-time scratch:
- * once asnix_compile() walks it into an IrProgram, nothing downstream
+ * once ll_compile() walks it into an IrProgram, nothing downstream
  * ever reads an Ast* again (AstBinding.name/AstFormal.name are raw
  * pointers into the source TEXT buffer, not into Ast nodes, and
  * AST_CURPOS bakes its line/col into the IR as plain integers at compile
  * time). So this file keeps its own chunk list, freed in one shot by
- * asnix_ast_arena_reset() right after each top-level asnix_compile()/
- * asnix_compile_scoped() call returns (see eval_file.c's call sites),
+ * ll_ast_arena_reset() right after each top-level ll_compile()/
+ * ll_compile_scoped() call returns (see eval_file.c's call sites),
  * instead of living in the main arena forever. Measured this session:
  * Ast nodes were ~17% of asnix's total memory footprint on a real
  * nixpkgs eval, entirely reclaimable since nothing needs them past
@@ -31,8 +31,8 @@ typedef struct AstChunk {
 static AstChunk *g_ast_chunks = NULL;
 
 /* Lazy-thunk-compile experiment, ported from asnix -- a second, parallel
- * chunk list that asnix_ast_arena_reset() below never frees, for a
- * deferred stub's retained subtree. Gated on `asnix_lazy_thunk_enabled`
+ * chunk list that ll_ast_arena_reset() below never frees, for a
+ * deferred stub's retained subtree. Gated on `ll_lazy_thunk_enabled`
  * (compiler.h), not unconditional -- an unconditional form would
  * redirect every Ast node into the never-freed list regardless of
  * whether the runtime flag was ever set, inflating the DEFAULT (flag-
@@ -45,13 +45,13 @@ static AstChunk *g_ast_chunks = NULL;
 static AstChunk *g_ast_retained_chunks = NULL;
 static int g_ast_redirect_retained = 0;
 
-int asnix_ast_enter_retained(void) {
+int ll_ast_enter_retained(void) {
     int prev = g_ast_redirect_retained;
-    if (asnix_lazy_thunk_enabled) g_ast_redirect_retained = 1;
+    if (ll_lazy_thunk_enabled) g_ast_redirect_retained = 1;
     return prev;
 }
 
-void asnix_ast_leave_retained(int prev_state) {
+void ll_ast_leave_retained(int prev_state) {
     g_ast_redirect_retained = prev_state;
 }
 
@@ -72,7 +72,7 @@ void asnix_ast_leave_retained(int prev_state) {
  * genuine `__memset_avx2_unaligned_erms` hot symbol (~5.7% of that
  * harness's total cycles), NOT eliminated by `calloc`'s usual "mmap
  * already gives zero pages, skip the memset" fast path -- because
- * `asnix_ast_arena_reset()` frees every chunk right after each FILE's
+ * `ll_ast_arena_reset()` frees every chunk right after each FILE's
  * compile (by design, see this file's own header comment: Ast nodes are
  * ~17% of peak memory and fully reclaimable), so this process allocates-
  * then-frees a ~1 MiB chunk roughly once per imported file (1057 times
@@ -96,7 +96,7 @@ void asnix_ast_leave_retained(int prev_state) {
  * size -- strictly less total zeroing than before for every file that
  * doesn't fill a whole chunk (the common case), and no worse for one
  * that does. */
-Ast *asnix_ast_new(AstKind kind) {
+Ast *ll_ast_new(AstKind kind) {
     size_t need = sizeof(Ast);
     AstChunk **chunks = g_ast_redirect_retained ? &g_ast_retained_chunks : &g_ast_chunks;
     if (!*chunks || (*chunks)->used + need > AST_CHUNK_SIZE) {
@@ -112,11 +112,11 @@ Ast *asnix_ast_new(AstKind kind) {
     return n;
 }
 
-/* Frees every chunk ever allocated by asnix_ast_new -- safe to call only
+/* Frees every chunk ever allocated by ll_ast_new -- safe to call only
  * once the caller is certain no Ast* from the chunks being freed is
- * still reachable (true right after asnix_compile()/asnix_compile_scoped()
+ * still reachable (true right after ll_compile()/ll_compile_scoped()
  * returns, per this file's own header comment above). */
-void asnix_ast_arena_reset(void) {
+void ll_ast_arena_reset(void) {
     AstChunk *c = g_ast_chunks;
     while (c) {
         AstChunk *next = c->next;

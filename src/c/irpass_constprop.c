@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -85,23 +85,23 @@
  * (`(*pool)[ops[i].b] = result`), on the theory that nothing else in
  * the program could be reading that same slot. Reusing one pool index
  * across N replacements breaks that theory: `let x = 5; in x + x + x`
- * under `ASNIX_IR_OPT=1` computed 20, not 15, because cfold's first
+ * under `LL_IR_OPT=1` computed 20, not 15, because cfold's first
  * fold (5+5=10) overwrote the SHARED pool slot in place, and the
  * THIRD occurrence (still pointing at that same, now-mutated, slot)
  * then folded 10+10 instead of 10+5. Fixed by giving every replacement
- * its OWN fresh pool entry via `asnix_irpass_pool_append` instead of
+ * its OWN fresh pool entry via `ll_irpass_pool_append` instead of
  * ever sharing an index with another op -- the one real reason this
  * pass's signature needs `pool`/`pool_len`/`pool_cap` writable at all.
  *
  * Deliberately NOT attempted: propagating a constant across a
  * closure-capture boundary (OP_MK_THUNK/OP_LAMBDA each compile to a
- * SEPARATE IrProgram with its own, independent asnix_irpass_run call --
+ * SEPARATE IrProgram with its own, independent ll_irpass_run call --
  * this pass, like every other one in this framework, only ever sees one
  * flat ops array at a time and never reaches into a nested program's
  * own array). A whole-closure-tree version of this idea is a real,
  * larger follow-on, not attempted here.
  *
- * Bounded, not unbounded: only the first ASNIX_CONSTPROP_MAX_SLOTS
+ * Bounded, not unbounded: only the first LL_CONSTPROP_MAX_SLOTS
  * distinct slot indices in a given program are tracked at all; a slot
  * index at or beyond that bound is silently never recorded and never
  * replaced -- always SAFE (a missed optimization, never a wrong one),
@@ -119,14 +119,14 @@ static int constprop_is_const_push(int op_id) {
     return op_id == OP_PUSH_INT || op_id == OP_PUSH_TRUE || op_id == OP_PUSH_FALSE || op_id == OP_PUSH_NULL;
 }
 
-#define ASNIX_CONSTPROP_MAX_SLOTS 256
+#define LL_CONSTPROP_MAX_SLOTS 256
 
 typedef struct {
     int64_t level;    /* the frame-nesting level this record was established at; -1 == never set/invalidated */
     int32_t kind;      /* OP_PUSH_INT/OP_PUSH_TRUE/OP_PUSH_FALSE/OP_PUSH_NULL */
     int64_t value;     /* meaningful only when kind == OP_PUSH_INT -- the actual int64 value, read ONCE
                          * from the original push's pool slot at recording time. Each replacement gets
-                         * its OWN fresh pool entry (asnix_irpass_pool_append) holding this same value --
+                         * its OWN fresh pool entry (ll_irpass_pool_append) holding this same value --
                          * never the original op's own index; see this file's "POOL ALIASING HAZARD"
                          * comment above for why sharing an index is a real correctness bug, not a
                          * theoretical one. */
@@ -141,12 +141,12 @@ static int constprop_run(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_le
     for (size_t i = 0; i < n; i++) {
         int id = (int)(intptr_t)ops[i].handler;
         if (!constprop_op_is_jump(id)) continue;
-        int64_t target = (int64_t)i + ops[i].a / ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)i + ops[i].a / LL_IROP_SIZE;
         if (target >= 0 && (size_t)target < n) is_target[(size_t)target] = 1;
     }
 
-    ConstSlot slots[ASNIX_CONSTPROP_MAX_SLOTS];
-    for (size_t s = 0; s < ASNIX_CONSTPROP_MAX_SLOTS; s++) slots[s].level = -1;
+    ConstSlot slots[LL_CONSTPROP_MAX_SLOTS];
+    for (size_t s = 0; s < LL_CONSTPROP_MAX_SLOTS; s++) slots[s].level = -1;
 
     int fired = 0;
     int64_t level = 0;
@@ -164,7 +164,7 @@ static int constprop_run(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_le
         }
         if (id == OP_FRAME_SET) {
             int32_t s = ops[i].a;
-            if (s >= 0 && s < ASNIX_CONSTPROP_MAX_SLOTS) {
+            if (s >= 0 && s < LL_CONSTPROP_MAX_SLOTS) {
                 int prev_id = (i > 0) ? (int)(intptr_t)ops[i - 1].handler : -1;
                 if (i > 0 && !is_target[i] && !is_target[i - 1] && constprop_is_const_push(prev_id)) {
                     slots[s].level = level;
@@ -178,17 +178,17 @@ static int constprop_run(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_le
         }
         if (id == OP_VAR_REF_CELL) {
             int32_t depth = ops[i].a, s = ops[i].b;
-            if (depth == 0 && s >= 0 && s < ASNIX_CONSTPROP_MAX_SLOTS) slots[s].level = -1;
+            if (depth == 0 && s >= 0 && s < LL_CONSTPROP_MAX_SLOTS) slots[s].level = -1;
             continue;
         }
         if (id == OP_VAR_REF) {
             int32_t depth = ops[i].a, s = ops[i].b;
-            if (depth == 0 && s >= 0 && s < ASNIX_CONSTPROP_MAX_SLOTS && slots[s].level == level && !is_target[i]) {
+            if (depth == 0 && s >= 0 && s < LL_CONSTPROP_MAX_SLOTS && slots[s].level == level && !is_target[i]) {
                 int32_t kind = slots[s].kind;
                 ops[i].handler = (void *)(intptr_t)kind;
                 ops[i].a = 0;
                 ops[i].b = (kind == OP_PUSH_INT)
-                    ? (int32_t)asnix_irpass_pool_append(pool, pool_len, pool_cap, slots[s].value)
+                    ? (int32_t)ll_irpass_pool_append(pool, pool_len, pool_cap, slots[s].value)
                     : 0;
                 fired = 1;
             }
@@ -200,6 +200,6 @@ static int constprop_run(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_le
     return fired;
 }
 
-void asnix_irpass_register_constprop(void) {
-    asnix_irpass_register("constprop", constprop_run);
+void ll_irpass_register_constprop(void) {
+    ll_irpass_register("constprop", constprop_run);
 }

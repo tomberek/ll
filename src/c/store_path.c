@@ -7,24 +7,24 @@
 
 #include "base32.h"
 
-#define ASNIX_STORE_PATH_MAX_NAME_LEN 211
+#define LL_STORE_PATH_MAX_NAME_LEN 211
 
-void asnix_check_store_path_name(const char *name) {
+void ll_check_store_path_name(const char *name) {
     size_t len = strlen(name);
     if (len == 0) {
-        fprintf(stderr, "asnix: invalid derivation name: name must not be empty. Please pass a different 'name'.\n");
+        fprintf(stderr, "ll: invalid derivation name: name must not be empty. Please pass a different 'name'.\n");
         exit(1);
     }
-    if (len > ASNIX_STORE_PATH_MAX_NAME_LEN) {
+    if (len > LL_STORE_PATH_MAX_NAME_LEN) {
         fprintf(stderr,
-                "asnix: invalid derivation name: name '%s' must be no longer than %d characters. "
+                "ll: invalid derivation name: name '%s' must be no longer than %d characters. "
                 "Please pass a different 'name'.\n",
-                name, ASNIX_STORE_PATH_MAX_NAME_LEN);
+                name, LL_STORE_PATH_MAX_NAME_LEN);
         exit(1);
     }
     if (name[0] == '.') {
         if (len == 1 || (name[1] == '-') || (len >= 2 && name[1] == '.' && (len == 2 || name[2] == '-'))) {
-            fprintf(stderr, "asnix: invalid derivation name: name '%s' is not valid. Please pass a different 'name'.\n", name);
+            fprintf(stderr, "ll: invalid derivation name: name '%s' is not valid. Please pass a different 'name'.\n", name);
             exit(1);
         }
     }
@@ -34,7 +34,7 @@ void asnix_check_store_path_name(const char *name) {
                  c == '+' || c == '-' || c == '.' || c == '_' || c == '?' || c == '=';
         if (!ok) {
             fprintf(stderr,
-                    "asnix: invalid derivation name: name '%s' contains illegal character '%c'. "
+                    "ll: invalid derivation name: name '%s' contains illegal character '%c'. "
                     "Please pass a different 'name'.\n",
                     name, c);
             exit(1);
@@ -42,9 +42,9 @@ void asnix_check_store_path_name(const char *name) {
     }
 }
 
-size_t asnix_store_path_preimage(const char *type, const char *hash_with_algo, const char *name, char *out,
+size_t ll_store_path_preimage(const char *type, const char *hash_with_algo, const char *name, char *out,
                                   size_t out_cap) {
-    int n = snprintf(out, out_cap, "%s:%s:%s:%s", type, hash_with_algo, ASNIX_STORE_DIR, name);
+    int n = snprintf(out, out_cap, "%s:%s:%s:%s", type, hash_with_algo, LL_STORE_DIR, name);
     if (n < 0 || (size_t)n >= out_cap) return 0;
     return (size_t)n;
 }
@@ -56,14 +56,14 @@ static void compress_hash(const uint8_t *digest, size_t digest_len, uint8_t *out
     }
 }
 
-size_t asnix_make_store_path_from_digest(const uint8_t digest[32], const char *name, char *out, size_t out_cap) {
+size_t ll_make_store_path_from_digest(const uint8_t digest[32], const char *name, char *out, size_t out_cap) {
     uint8_t compressed[20];
     compress_hash(digest, 32, compressed, sizeof(compressed));
 
-    char hash32[32]; /* asnix_base32_encoded_length(20) == 32, fixed by the format */
-    asnix_base32_encode(compressed, sizeof(compressed), hash32);
+    char hash32[32]; /* ll_base32_encoded_length(20) == 32, fixed by the format */
+    ll_base32_encode(compressed, sizeof(compressed), hash32);
 
-    int n = snprintf(out, out_cap, "%s/%.32s-%s", ASNIX_STORE_DIR, hash32, name);
+    int n = snprintf(out, out_cap, "%s/%.32s-%s", LL_STORE_DIR, hash32, name);
     if (n < 0 || (size_t)n >= out_cap) return 0;
     return (size_t)n;
 }

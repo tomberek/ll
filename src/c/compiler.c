@@ -12,38 +12,38 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/irbuild.h"
-#include "asnix/value.h"
-#include "builtins_list2.h"  /* M110: asnix_prim_{elem,any,all}2_impl */
-#include "builtins_m23.h"    /* M110: asnix_prim_intersectAttrs2_impl */
-#include "builtins_regex.h"  /* M110: asnix_prim_match2_impl */
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/irbuild.h"
+#include "ll/value.h"
+#include "builtins_list2.h"  /* M110: ll_prim_{elem,any,all}2_impl */
+#include "builtins_m23.h"    /* M110: ll_prim_intersectAttrs2_impl */
+#include "builtins_regex.h"  /* M110: ll_prim_match2_impl */
 #include "builtins_shared.h"
-#include "eval_file.h" /* M80: asnix_eval_top_level_file, for AST_CURPOS's `file` field */
-#include "parser.h" /* marker-reparse addition: asnix_parse_subexpr, for a cache-loaded
-                      * lazy-thunk stub's first force (asnix_compile_lazy_thunk_body) */
+#include "eval_file.h" /* M80: ll_eval_top_level_file, for AST_CURPOS's `file` field */
+#include "parser.h" /* marker-reparse addition: ll_parse_subexpr, for a cache-loaded
+                      * lazy-thunk stub's first force (ll_compile_lazy_thunk_body) */
 #include "symtab.h"
 #include "tryeval.h"
 #include "value_util.h"
 
 /* AST_PATH resolution (import-paths). `base_dir` is constant for one whole
- * asnix_compile() call (every path literal in a given file resolves
+ * ll_compile() call (every path literal in a given file resolves
  * against that *file's* directory, not wherever the thunk/lambda body
  * containing it happens to run later) -- threading it through every
  * compile_expr recursive call as an explicit parameter would touch every
  * call site for no benefit, so it's stashed here instead. Safe as a
- * single global rather than a stack: asnix_compile() always runs to
- * completion (there is no `call asnix_compile` while another
- * asnix_compile() frame is still on the C stack) before asnix_eval() ever
+ * single global rather than a stack: ll_compile() always runs to
+ * completion (there is no `call ll_compile` while another
+ * ll_compile() frame is still on the C stack) before ll_eval() ever
  * starts running the IR that might later trigger `import` (which runs a
- * *fresh, separate* asnix_eval_file() call, well after this one
+ * *fresh, separate* ll_eval_file() call, well after this one
  * returned) -- see src/c/eval_file.c. */
 static const char *g_compile_base_dir = NULL;
 
-/* M82: see compiler.h's own comment on asnix_compile's `file_path`
+/* M82: see compiler.h's own comment on ll_compile's `file_path`
  * parameter -- same lifetime/scoping rules as `g_compile_base_dir` just
- * above (valid for exactly one asnix_compile()/asnix_compile_scoped()
+ * above (valid for exactly one ll_compile()/ll_compile_scoped()
  * call, read only by AST_CURPOS in compile_expr). */
 static const char *g_compile_file_path = NULL;
 
@@ -53,10 +53,10 @@ static const char *g_compile_file_path = NULL;
  * ./sub/../foo.nix'`), but -- unlike `canonPath` -- never touches the
  * filesystem (no symlink resolution): cheap, and sufficient for every
  * case this project's fixtures exercise. `in` must start with '/'.
- * M57g: moved to value_util.c as `asnix_canon_path` so `asnix_add_values`
+ * M57g: moved to value_util.c as `ll_canon_path` so `ll_add_values`
  * (`path + string` concatenation) can reuse it too -- see that
  * function's own comment, value_util.h. */
-#define canon_path asnix_canon_path
+#define canon_path ll_canon_path
 
 /* Resolves a NIX_PATH search-path entry name (the text inside `<...>`,
  * e.g. "nixpkgs" or "nixpkgs/lib") the same way real Nix's `findFile`
@@ -119,11 +119,11 @@ static char *resolve_search_path(const char *name, size_t name_len) {
      * fail gracefully when `$NIX_PATH` doesn't define
      * `nixpkgs-overlays`). Falls back to identical write+exit(1)
      * behavior when no `tryEval` is active. */
-    static const char fmt[] = "asnix: file '%.*s' was not found in the Nix search path (set $NIX_PATH)\n";
+    static const char fmt[] = "ll: file '%.*s' was not found in the Nix search path (set $NIX_PATH)\n";
     int needed = snprintf(NULL, 0, fmt, (int)name_len, name); /* exact length first, not guessed */
     char *formatted = malloc((size_t)needed + 1);
     snprintf(formatted, (size_t)needed + 1, fmt, (int)name_len, name);
-    asnix_tryeval_raise_or_fatal(formatted, (size_t)needed);
+    ll_tryeval_raise_or_fatal(formatted, (size_t)needed);
 }
 
 /* `<nix/fetchurl.nix>` (M46) is NOT an ordinary search-path lookup in
@@ -149,7 +149,7 @@ static char *resolve_search_path(const char *name, size_t name_len) {
  * cut, not hit by anything this project has evaluated so far). Found
  * needed evaluating real nixpkgs: `pkgs/build-support/fetchurl/
  * default.nix` imports this. */
-static const char ASNIX_FETCHURL_NIX_SOURCE[] =
+static const char LL_FETCHURL_NIX_SOURCE[] =
     "{\n"
     "  system ? \"\", # obsolete\n"
     "  url,\n"
@@ -223,10 +223,10 @@ static const char ASNIX_FETCHURL_NIX_SOURCE[] =
     "  // (if impure then { __impure = true; } else { inherit outputHashAlgo outputHash; })\n"
     ")\n";
 
-#define ASNIX_FETCHURL_TEMP_PATH "/tmp/.asnix-corepkgs-fetchurl.nix"
+#define LL_FETCHURL_TEMP_PATH "/tmp/.asnix-corepkgs-fetchurl.nix"
 
 /* Unlike derivation.c's write_derivation_nix (called at most once per
- * process, from asnix_make_derivation_wrapper_value's own have_cached
+ * process, from ll_make_derivation_wrapper_value's own have_cached
  * guard), this one is reached straight from OP_RESOLVE_SEARCH_PATH --
  * once per `<nix/fetchurl.nix>` AST node *evaluation*, not once per
  * process. Real nixpkgs' pkgs/build-support/fetchurl/boot.nix makes
@@ -240,19 +240,19 @@ static const char ASNIX_FETCHURL_NIX_SOURCE[] =
  * same never-changing 1350 bytes evaluating d.nix). The file's content
  * is static for the whole process, so write it once and reuse the
  * path after that -- same have_cached shape as
- * asnix_make_derivation_wrapper_value. */
+ * ll_make_derivation_wrapper_value. */
 static const char *write_fetchurl_nix(void) {
     static int written = 0;
-    if (written) return ASNIX_FETCHURL_TEMP_PATH;
-    FILE *f = fopen(ASNIX_FETCHURL_TEMP_PATH, "w");
+    if (written) return LL_FETCHURL_TEMP_PATH;
+    FILE *f = fopen(LL_FETCHURL_TEMP_PATH, "w");
     if (!f) {
-        fprintf(stderr, "asnix: could not write '%s' for <nix/fetchurl.nix>\n", ASNIX_FETCHURL_TEMP_PATH);
+        fprintf(stderr, "ll: could not write '%s' for <nix/fetchurl.nix>\n", LL_FETCHURL_TEMP_PATH);
         exit(1);
     }
-    fwrite(ASNIX_FETCHURL_NIX_SOURCE, 1, sizeof(ASNIX_FETCHURL_NIX_SOURCE) - 1, f);
+    fwrite(LL_FETCHURL_NIX_SOURCE, 1, sizeof(LL_FETCHURL_NIX_SOURCE) - 1, f);
     fclose(f);
     written = 1;
-    return ASNIX_FETCHURL_TEMP_PATH;
+    return LL_FETCHURL_TEMP_PATH;
 }
 
 /* `<name>` search-path resolution, called from OP_RESOLVE_SEARCH_PATH
@@ -269,15 +269,15 @@ static const char *write_fetchurl_nix(void) {
  * fallback above. Pops nothing extra here; takes the name directly as a
  * Value (already pushed as an ordinary compile-time string constant by
  * compile_expr's AST_PATH case, exactly like a plain string literal). */
-Value asnix_resolve_search_path_value(Value name_val) {
+Value ll_resolve_search_path_value(Value name_val) {
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(name_val, &len);
+    const char *bytes = ll_ptr_bytes(name_val, &len);
     if (len == 16 && memcmp(bytes, "nix/fetchurl.nix", 16) == 0) {
         const char *path = write_fetchurl_nix();
-        return asnix_make_path_value(path, strlen(path));
+        return ll_make_path_value(path, strlen(path));
     }
     char *resolved = canon_path(resolve_search_path(bytes, (size_t)len));
-    Value v = asnix_make_path_value(resolved, strlen(resolved));
+    Value v = ll_make_path_value(resolved, strlen(resolved));
     free(resolved);
     return v;
 }
@@ -301,7 +301,7 @@ Value asnix_resolve_search_path_value(Value name_val) {
 static char *resolve_home_literal(const char *text, size_t len) {
     const char *home = getenv("HOME");
     if (!home || !home[0]) {
-        fprintf(stderr, "asnix: cannot resolve '~' -- $HOME is not set\n");
+        fprintf(stderr, "ll: cannot resolve '~' -- $HOME is not set\n");
         exit(1);
     }
     size_t home_len = strlen(home);
@@ -313,7 +313,7 @@ static char *resolve_home_literal(const char *text, size_t len) {
     return joined;
 }
 
-/* Resolves one ordinary (non-search, see asnix_resolve_search_path_value
+/* Resolves one ordinary (non-search, see ll_resolve_search_path_value
  * above for that case) AST_PATH node's raw lexeme to an absolute,
  * canonicalized path string (malloc'd, NUL-terminated). M64: dispatches
  * to resolve_home_literal (no canon at all) for `~`-prefixed literals --
@@ -326,7 +326,7 @@ static char *resolve_path_literal(Ast *node) {
     size_t len = node->as.path.len;
 
     if (len > 0 && text[len - 1] == '/') {
-        fprintf(stderr, "asnix: path has a trailing slash\n");
+        fprintf(stderr, "ll: path has a trailing slash\n");
         exit(1);
     }
 
@@ -378,7 +378,7 @@ static char *resolve_path_literal(Ast *node) {
 static Value resolve_path_chunk(const char *text, size_t len, int is_home) {
     if (is_home) {
         char *joined = resolve_home_literal(text, len);
-        Value v = asnix_make_path_value(joined, strlen(joined));
+        Value v = ll_make_path_value(joined, strlen(joined));
         free(joined);
         return v;
     }
@@ -407,7 +407,7 @@ static Value resolve_path_chunk(const char *text, size_t len, int is_home) {
         free(canon);
         canon = with_slash;
     }
-    Value v = asnix_make_path_value(canon, strlen(canon));
+    Value v = ll_make_path_value(canon, strlen(canon));
     free(canon);
     return v;
 }
@@ -457,8 +457,8 @@ typedef struct ScopeFrame {
 } ScopeFrame;
 
 /* Lazy-thunk-compile experiment, ported from asnix -- see compiler.h's
- * own comment on asnix_lazy_thunk_enabled. */
-int asnix_lazy_thunk_enabled = 0;
+ * own comment on ll_lazy_thunk_enabled. */
+int ll_lazy_thunk_enabled = 0;
 
 /* Pool payload for a stub IrProgram's single OP_LAZY_THUNK_BODY op (see
  * docs/lazy-thunk-compile-proposal.md's "Concrete mechanism" section,
@@ -486,7 +486,7 @@ typedef struct LazyThunkDescriptor {
      * write_lazy_thunk_marker refuses to cache this stub when 0,
      * identical to the unconditional refusal this feature replaces.
      * Cache-load path (`body == NULL`): the byte offset within
-     * `file_path`'s own source text to asnix_parse_subexpr from --
+     * `file_path`'s own source text to ll_parse_subexpr from --
      * always valid/nonzero here, since a 0 value never gets written to
      * a marker in the first place. */
     uint32_t value_src_pos;
@@ -519,7 +519,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
 /* Marker-reparse addition: per-process, never-freed memoization of
  * "file path -> full source text", keyed by `file_path` (the same
  * string every descriptor sharing one cache-loaded file already carries
- * -- see LazyThunkDescriptor's own comment). Lets asnix_compile_lazy_
+ * -- see LazyThunkDescriptor's own comment). Lets ll_compile_lazy_
  * thunk_body's cache-load branch reopen a file's source text ONCE no
  * matter how many of that file's own deferred fields eventually get
  * forced, instead of once per force -- and, more importantly, lets a
@@ -550,13 +550,13 @@ static const char *reparse_source_for_file(const char *path) {
     }
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "asnix: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
+        fprintf(stderr, "ll: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
         exit(1);
     }
     struct stat st;
     if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
         fclose(f);
-        fprintf(stderr, "asnix: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
+        fprintf(stderr, "ll: cannot reopen '%s' to force a cache-loaded lazy thunk\n", path);
         exit(1);
     }
     size_t size = (size_t)st.st_size;
@@ -574,7 +574,7 @@ static const char *reparse_source_for_file(const char *path) {
 
 /* C bridge for OP_LAZY_THUNK_BODY's handler (src/llvm/ops/
  * op_lazy_thunk_body.c) -- ported from asnix. Runs the exact same
- * compile_expr/ib_finish pipeline a top-level asnix_compile() call
+ * compile_expr/ib_finish pipeline a top-level ll_compile() call
  * would, mid-dispatch, saving/restoring the two file-scope globals
  * compile_expr depends on beyond its explicit parameters.
  *
@@ -583,12 +583,12 @@ static const char *reparse_source_for_file(const char *path) {
  * PTAG_OP_LAZY_MARKER), not built live during this process's own
  * compile -- there is no Ast at all yet, only a byte offset
  * (`value_src_pos`) into `file_path`'s own source text. Reparse exactly
- * that one expression first (asnix_parse_subexpr), THEN fall into the
+ * that one expression first (ll_parse_subexpr), THEN fall into the
  * same compile_expr/ib_finish pipeline the live path always used --
  * from this point on the two paths are identical: compile_expr has no
  * way to tell a freshly-reparsed Ast apart from one that's been sitting
  * in memory since this same process's own original parse. */
-IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
+IrProgram *ll_compile_lazy_thunk_body(void *desc_void) {
     LazyThunkDescriptor *desc = (LazyThunkDescriptor *)desc_void;
     const char *saved_base_dir = g_compile_base_dir;
     const char *saved_file_path = g_compile_file_path;
@@ -598,7 +598,7 @@ IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
     Ast *body = desc->body;
     if (!body) {
         const char *src = reparse_source_for_file(desc->file_path);
-        body = asnix_parse_subexpr(src, desc->value_src_pos);
+        body = ll_parse_subexpr(src, desc->value_src_pos);
     }
 
     IrBuilder *real_b = ib_new();
@@ -623,48 +623,48 @@ IrProgram *asnix_compile_lazy_thunk_body(void *desc_void) {
  * outside this file ever allowed to touch either struct's fields.
  * --------------------------------------------------------------------- */
 
-int asnix_lazy_thunk_descriptor_src_pos(void *desc_void, unsigned int *out_pos) {
+int ll_lazy_thunk_descriptor_src_pos(void *desc_void, unsigned int *out_pos) {
     LazyThunkDescriptor *desc = (LazyThunkDescriptor *)desc_void;
     if (desc->value_src_pos == 0) return 0;
     *out_pos = desc->value_src_pos;
     return 1;
 }
 
-const char *asnix_lazy_thunk_descriptor_file_path(void *desc_void) {
+const char *ll_lazy_thunk_descriptor_file_path(void *desc_void) {
     return ((LazyThunkDescriptor *)desc_void)->file_path;
 }
 
-const char *asnix_lazy_thunk_descriptor_base_dir(void *desc_void) {
+const char *ll_lazy_thunk_descriptor_base_dir(void *desc_void) {
     return ((LazyThunkDescriptor *)desc_void)->base_dir;
 }
 
-void *asnix_lazy_thunk_descriptor_scope(void *desc_void) {
+void *ll_lazy_thunk_descriptor_scope(void *desc_void) {
     return ((LazyThunkDescriptor *)desc_void)->scope;
 }
 
-void *asnix_scope_frame_up(void *frame) {
+void *ll_scope_frame_up(void *frame) {
     return frame ? ((ScopeFrame *)frame)->up : NULL;
 }
 
-int asnix_scope_frame_count(void *frame) {
+int ll_scope_frame_count(void *frame) {
     return (int)((ScopeFrame *)frame)->count;
 }
 
-int asnix_scope_frame_is_with(void *frame) {
+int ll_scope_frame_is_with(void *frame) {
     return ((ScopeFrame *)frame)->is_with;
 }
 
-int asnix_scope_frame_has_overrides(void *frame) {
+int ll_scope_frame_has_overrides(void *frame) {
     return ((ScopeFrame *)frame)->has_overrides;
 }
 
-const char *asnix_scope_frame_name(void *frame, int i, size_t *out_len) {
+const char *ll_scope_frame_name(void *frame, int i, size_t *out_len) {
     ScopeFrame *f = (ScopeFrame *)frame;
     *out_len = f->name_lens[i];
     return f->names[i];
 }
 
-void *asnix_lazy_scope_push_frame(void *up_chain, int count, int is_with, int has_overrides,
+void *ll_lazy_scope_push_frame(void *up_chain, int count, int is_with, int has_overrides,
                                    const char **names, const size_t *name_lens) {
     ScopeFrame *f = malloc(sizeof(ScopeFrame));
     f->up = (ScopeFrame *)up_chain;
@@ -679,7 +679,7 @@ void *asnix_lazy_scope_push_frame(void *up_chain, int count, int is_with, int ha
         for (int i = 0; i < count; i++) {
             /* Deep-copy the name bytes themselves (not just the pointer)
              * -- `names[i]` here typically points into a bytecode-cache
-             * mmap that gets munmap'd right after asnix_bytecode_
+             * mmap that gets munmap'd right after ll_bytecode_
              * deserialize returns (bytecode_cache.c's lookup_fast/
              * lookup_verify), unlike the live scope_frame_persist case,
              * where every name instead aliases `src` (kept alive for
@@ -698,13 +698,13 @@ void *asnix_lazy_scope_push_frame(void *up_chain, int count, int is_with, int ha
     return f;
 }
 
-void *asnix_make_cached_lazy_thunk_descriptor(unsigned int reparse_pos, const char *file_path,
+void *ll_make_cached_lazy_thunk_descriptor(unsigned int reparse_pos, const char *file_path,
                                                const char *base_dir, void *scope_chain) {
     LazyThunkDescriptor *desc = malloc(sizeof(LazyThunkDescriptor));
-    desc->self = NULL; /* set via asnix_lazy_thunk_descriptor_set_self once the caller
+    desc->self = NULL; /* set via ll_lazy_thunk_descriptor_set_self once the caller
                            has built the one-op stub IrProgram this descriptor belongs to */
     desc->body = NULL; /* marks this as a cache-load (reparse-first) descriptor --
-                           see asnix_compile_lazy_thunk_body's own comment */
+                           see ll_compile_lazy_thunk_body's own comment */
     desc->scope = (ScopeFrame *)scope_chain;
     desc->file_path = file_path;
     desc->base_dir = base_dir;
@@ -712,7 +712,7 @@ void *asnix_make_cached_lazy_thunk_descriptor(unsigned int reparse_pos, const ch
     return desc;
 }
 
-void asnix_lazy_thunk_descriptor_set_self(void *desc_void, IrProgram *self) {
+void ll_lazy_thunk_descriptor_set_self(void *desc_void, IrProgram *self) {
     ((LazyThunkDescriptor *)desc_void)->self = self;
 }
 
@@ -749,7 +749,7 @@ static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value
      * (including `rec{}`'s `__overrides` sibling-slot rewrite) is
      * unaffected -- this is a compile-time-only, never user-observable
      * change. */
-    if (!asnix_lazy_thunk_enabled || value->src_pos == 0) {
+    if (!ll_lazy_thunk_enabled || value->src_pos == 0) {
         IrBuilder *thunk_b = ib_new();
         compile_expr(thunk_b, value, value_scope);
         ib_ret(thunk_b);
@@ -780,7 +780,7 @@ static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value
  * deep never happens in practice and a fixed-size stack array keeps the
  * AST_VAR case simple (same spirit as other deliberate, documented scope
  * cuts in this project, e.g. M6's non-recursive `let`). */
-#define ASNIX_MAX_WITH_CHAIN 64
+#define LL_MAX_WITH_CHAIN 64
 
 /* perf: profiled directly (callgrind on real nixpkgs ffmpeg-full/plasma
  * evals) as the dominant self-cost inside compile_expr's own body -- the
@@ -880,7 +880,7 @@ static int scope_find_lexical(ScopeFrame *scope, const char *name, size_t name_l
  * ~line 1048-1065): a bare variable reference that resolves lexically
  * skips allocating a fresh deferred-computation cell entirely and instead
  * emits OP_VAR_REF_CELL, aliasing the EXISTING Env slot that variable
- * already lives in (see heap.h's ASNIX_CELL_MARKER comment for why this
+ * already lives in (see heap.h's LL_CELL_MARKER comment for why this
  * matters -- it's what lets `==`/the printer recover real Nix's
  * `&v1==&v2` slot-identity shortcut). Returns 1 if it emitted the Cell op
  * (the caller must NOT also emit the ordinary thunk in that case), 0
@@ -939,8 +939,8 @@ typedef struct {
  * `SymIdxPair` -- same fix, same rationale, as builtins_shared.c's
  * sibling `merge_sort_make_attrs_entries` (not shared via a header since
  * the two sorts operate on unrelated data, matching this file's own
- * existing convention for `ASNIX_ATTRSET_SORT_INSERTION_MAX`/
- * `ASNIX_MAKE_ATTRS_SORT_INSERTION_MAX`). Removes the indirect call
+ * existing convention for `LL_ATTRSET_SORT_INSERTION_MAX`/
+ * `LL_MAKE_ATTRS_SORT_INSERTION_MAX`). Removes the indirect call
  * through `symidxpair_cmp` that `qsort` paid once per comparison. Names
  * are already unique by the time this runs (this case's own comment,
  * below) so there is no tie-break to preserve either way -- any stable
@@ -993,11 +993,11 @@ static SymIdxPair *merge_sort_symidxpairs(SymIdxPair *a, SymIdxPair *tmp, size_t
  * two decisions -- "is this literal small enough to sort with plain
  * insertion sort" and "is this literal small enough to put its scratch on
  * the stack" -- can never drift apart. */
-#define ASNIX_COMPILE_SCRATCH_MAX 32
+#define LL_COMPILE_SCRATCH_MAX 32
 /* Threshold below which plain insertion sort beats qsort's per-comparison
  * indirect-call overhead -- tuned empirically against the real d.nix eval,
  * see the AST_ATTRSET case's own comment. */
-#define ASNIX_ATTRSET_SORT_INSERTION_MAX ASNIX_COMPILE_SCRATCH_MAX
+#define LL_ATTRSET_SORT_INSERTION_MAX LL_COMPILE_SCRATCH_MAX
 /* Factored out of compile_expr's AST_ATTRSET case so the (astronomically
  * rare -- only literals bigger than the threshold above ever reach this)
  * qsort path doesn't grow compile_expr's own code size/layout for the
@@ -1005,8 +1005,8 @@ static SymIdxPair *merge_sort_symidxpairs(SymIdxPair *a, SymIdxPair *tmp, size_t
  * directly into the switch and measured a small but real regression on
  * the COMMON (small-n) path purely from compile_expr growing larger. */
 static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n) {
-    SymIdxPair *pairs = asnix_arena_alloc(n * sizeof(SymIdxPair));
-    SymIdxPair *scratch = asnix_arena_alloc(n * sizeof(SymIdxPair));
+    SymIdxPair *pairs = ll_arena_alloc(n * sizeof(SymIdxPair));
+    SymIdxPair *scratch = ll_arena_alloc(n * sizeof(SymIdxPair));
     for (size_t i = 0; i < n; i++) { pairs[i].sym = syms[i]; pairs[i].idx = i; }
     SymIdxPair *sorted = merge_sort_symidxpairs(pairs, scratch, n);
     for (size_t i = 0; i < n; i++) order[i] = sorted[i].idx;
@@ -1032,10 +1032,10 @@ static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n)
 /* M136: compile-time constant folding for `AST_BINOP` when both operands
  * are int literals -- mirrors op_arith.S's own overflow-checked semantics
  * EXACTLY (both the true int64-overflow check via `__builtin_*_overflow`
- * AND the narrower ASNIX_INT_MIN/MAX tagged-value window `+`/`-`/`*` are
+ * AND the narrower LL_INT_MIN/MAX tagged-value window `+`/`-`/`*` are
  * additionally bounded to there, see op_arith.S's own M56 comment) --
  * any case that would abort at runtime (overflow, division by zero, the
- * `ASNIX_INT_MIN / -1` edge) is deliberately left unfolded, so the
+ * `LL_INT_MIN / -1` edge) is deliberately left unfolded, so the
  * ordinary runtime op still reaches the exact same abort with the exact
  * same message, never silently wrapping or producing a different result
  * than an unoptimized build would. `>`/`<=` (`'g'`/`'L'`) compute the
@@ -1058,7 +1058,7 @@ static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n)
  * follow-ons. Int/int (both operands AST_INT) keeps the EXACT path
  * above unchanged -- a pure-int fold must keep its exact int64 overflow
  * semantics, not get silently rerouted through double arithmetic (which
- * would both lose precision for large ints near ASNIX_INT_MAX/MIN and
+ * would both lose precision for large ints near LL_INT_MAX/MIN and
  * change the *type* of the result from int to float, a real behavior
  * change real Nix does not make for `1 + 2`). The float branch only
  * runs once at least one operand is AST_FLOAT, and mirrors value_util.c's
@@ -1069,15 +1069,15 @@ static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n)
  * fold (real IEEE-754 double arithmetic has no overflow-abort case the
  * way checked-int arithmetic does -- a too-large result is `inf`, the
  * exact same `inf` the unfolded op would also produce, see
- * asnix_add/sub/mul_values, none of which ever call asnix_fatal); `/`
+ * ll_add/sub/mul_values, none of which ever call ll_fatal); `/`
  * is left unfolded exactly when the (promoted-to-double) divisor is
- * 0.0, mirroring asnix_div_values's own unconditional "divisor == 0.0"
+ * 0.0, mirroring ll_div_values's own unconditional "divisor == 0.0"
  * fatal check (real Nix's own rule: EVERY division by a zero divisor is
  * a hard error, even `1.0 / 0.0`, never silently IEEE-754 infinity --
  * see that function's own comment) so the runtime op still reaches the
  * identical "division by zero" abort. The six comparisons compute a
  * plain double `<`/`<=`/`>`/`>=`/`==`/`!=`, the same promotion
- * asnix_cmp_{lt,gt,le,ge}_values / asnix_bshared_value_eq's own
+ * ll_cmp_{lt,gt,le,ge}_values / ll_bshared_value_eq's own
  * Float-on-either-side branch already use at runtime. */
 static int try_fold_const_binop(Ast *node, int *out_is_bool, int *out_is_float, int64_t *out_val,
                                  double *out_fval) {
@@ -1112,7 +1112,7 @@ static int try_fold_const_binop(Ast *node, int *out_is_bool, int *out_is_float, 
             case 'L': *out_is_bool = 1; *out_is_float = 0; *out_val = (a <= b); return 1;
             default: return 0;
         }
-        if (result < ASNIX_INT_MIN || result > ASNIX_INT_MAX) return 0;
+        if (result < LL_INT_MIN || result > LL_INT_MAX) return 0;
         *out_is_bool = 0;
         *out_is_float = 0;
         *out_val = result;
@@ -1130,7 +1130,7 @@ static int try_fold_const_binop(Ast *node, int *out_is_bool, int *out_is_float, 
         case '-': *out_is_bool = 0; *out_is_float = 1; *out_fval = a - b; return 1;
         case '*': *out_is_bool = 0; *out_is_float = 1; *out_fval = a * b; return 1;
         case '/':
-            if (b == 0.0) return 0; /* matches asnix_div_values's unconditional divisor-==0.0 fatal */
+            if (b == 0.0) return 0; /* matches ll_div_values's unconditional divisor-==0.0 fatal */
             *out_is_bool = 0;
             *out_is_float = 1;
             *out_fval = a / b;
@@ -1159,8 +1159,8 @@ static int is_thunk_free_literal(Ast *node) {
              * in nixos/modules/services/network-filesystems/orangefs/
              * server.nix). Falling through to the ordinary OP_MK_THUNK
              * path keeps it lazy, matching try_fold_const_binop's own
-             * ASNIX_INT_MIN/MAX guard (below) for the folded-binop case. */
-            return node->as.int_val >= ASNIX_INT_MIN && node->as.int_val <= ASNIX_INT_MAX;
+             * LL_INT_MIN/MAX guard (below) for the folded-binop case. */
+            return node->as.int_val >= LL_INT_MIN && node->as.int_val <= LL_INT_MAX;
         case AST_FLOAT:
         case AST_BOOL:
         case AST_NULL:
@@ -1216,20 +1216,20 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
  * calls observed. All five are arity-2.
  *
  * Each table entry's `noforce` flag must match the native's own build_*
- * registration EXACTLY (`asnix_bshared_make_curried_native_noforce` vs.
- * the ordinary `asnix_bshared_make_curried_native`) -- this is the one
+ * registration EXACTLY (`ll_bshared_make_curried_native_noforce` vs.
+ * the ordinary `ll_bshared_make_curried_native`) -- this is the one
  * real risk surface a wrong fusion could introduce (a silently wrong
  * VALUE, not a crash), not the AST-shape recognition itself:
  *
  * - `elem` (NOFORCE): its own curry chain reassembles both arguments
  *   with `ib_var_ref_raw` (no forcing) and its native impl
- *   (asnix_prim_elem2_impl) forces ONLY `list` (args[1]) itself, leaving
+ *   (ll_prim_elem2_impl) forces ONLY `list` (args[1]) itself, leaving
  *   `x` (args[0]) deliberately unforced -- see that function's own M92
  *   comment for why (`eqValues`-style slot-identity preservation). The
  *   fused call site below compiles both arguments exactly like any other
  *   ordinary call argument (the same try_cell_ref/is_thunk_free_literal/
  *   thunk fallback every AST_APP case already uses) and mints the primop
- *   via `asnix_bshared_make_primop_noforce` -- op_call.S's own dispatch
+ *   via `ll_bshared_make_primop_noforce` -- op_call.S's own dispatch
  *   (see its M25/M30 comments) then skips its post-dispatch force loop
  *   for a NOFORCE primop, so both arguments reach the native function
  *   exactly as unforced as the original 2-hop chain would have delivered
@@ -1242,11 +1242,11 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
  *   their own curry chains reassemble arguments with plain `ib_var_ref`
  *   (forces on read) before the tail call into an ordinary (non-NOFORCE)
  *   primop -- op_call.S's post-dispatch force loop then forces them
- *   AGAIN there, redundantly but cheaply (asnix_force_for_print's fast
+ *   AGAIN there, redundantly but cheaply (ll_force_for_print's fast
  *   path on an already-forced Value is a single tag check). The fused
  *   call site compiles both arguments the identical ordinary way (same
  *   thunk-wrap fallback) and mints an ordinary (force) primop via
- *   `asnix_bshared_make_primop` -- op_call.S's SAME force loop then does
+ *   `ll_bshared_make_primop` -- op_call.S's SAME force loop then does
  *   the forcing exactly once, landing in the exact same already-forced
  *   state the native impl always required. No native-impl-specific
  *   handling needed at all for this group: the generic OP_CALL dispatch
@@ -1273,11 +1273,11 @@ typedef struct {
 } FusedNative2;
 
 static const FusedNative2 FUSED_NATIVES_2[] = {
-    { "elem", 4, (void *)asnix_prim_elem2_impl, 1 },
-    { "any", 3, (void *)asnix_prim_any2_impl, 0 },
-    { "all", 3, (void *)asnix_prim_all2_impl, 0 },
-    { "match", 5, (void *)asnix_prim_match2_impl, 0 },
-    { "intersectAttrs", 15, (void *)asnix_prim_intersectAttrs2_impl, 0 },
+    { "elem", 4, (void *)ll_prim_elem2_impl, 1 },
+    { "any", 3, (void *)ll_prim_any2_impl, 0 },
+    { "all", 3, (void *)ll_prim_all2_impl, 0 },
+    { "match", 5, (void *)ll_prim_match2_impl, 0 },
+    { "intersectAttrs", 15, (void *)ll_prim_intersectAttrs2_impl, 0 },
 };
 #define FUSED_NATIVES_2_COUNT (sizeof(FUSED_NATIVES_2) / sizeof(FUSED_NATIVES_2[0]))
 
@@ -1335,8 +1335,8 @@ static int try_fused_native_call2(IrBuilder *b, Ast *node, ScopeFrame *scope) {
      * convention (compile_expr(fn) always runs before the argument is
      * compiled -- see AST_APP's own code below) -- OP_CALL expects the
      * callee beneath its arguments on VALSTACK, not above them. */
-    Value native_primop = entry->noforce ? asnix_bshared_make_primop_noforce(entry->fn, 2)
-                                          : asnix_bshared_make_primop(entry->fn, 2);
+    Value native_primop = entry->noforce ? ll_bshared_make_primop_noforce(entry->fn, 2)
+                                          : ll_bshared_make_primop(entry->fn, 2);
     ib_push_const(b, (int64_t)native_primop.raw);
     if (!try_cell_ref(b, arg1, scope)) {
         if (is_thunk_free_literal(arg1)) {
@@ -1408,7 +1408,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * mechanism AST_PATH/AST_STRING already use for a heap-value
              * compile-time constant: ib_push_const stashes the raw
              * tagged word in the constant pool. */
-            Value fv = asnix_make_float_value(node->as.float_val);
+            Value fv = ll_make_float_value(node->as.float_val);
             ib_push_const(b, (int64_t)fv.raw);
             return;
         }
@@ -1423,7 +1423,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             return;
         case AST_VAR: {
             int depth = 0;
-            int64_t with_depths[ASNIX_MAX_WITH_CHAIN];
+            int64_t with_depths[LL_MAX_WITH_CHAIN];
             size_t with_count = 0;
             for (ScopeFrame *f = scope; f; f = f->up, depth++) {
                 /* A lexical binding always wins over any enclosing `with`,
@@ -1439,16 +1439,16 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     }
                 }
                 if (f->is_with) {
-                    if (with_count >= ASNIX_MAX_WITH_CHAIN) {
-                        fprintf(stderr, "asnix: too many nested `with` scopes (limit %d)\n",
-                                ASNIX_MAX_WITH_CHAIN);
+                    if (with_count >= LL_MAX_WITH_CHAIN) {
+                        fprintf(stderr, "ll: too many nested `with` scopes (limit %d)\n",
+                                LL_MAX_WITH_CHAIN);
                         exit(1);
                     }
                     with_depths[with_count++] = depth;
                 }
             }
             if (with_count == 0) {
-                fprintf(stderr, "asnix: undefined variable '%.*s'\n", (int)node->as.var.name_len,
+                fprintf(stderr, "ll: undefined variable '%.*s'\n", (int)node->as.var.name_len,
                         node->as.var.name);
                 exit(1);
             }
@@ -1464,8 +1464,8 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * OP_JMP right after only runs on a hit, skipping straight to
              * `end` past every remaining level. If no level has the key,
              * execution falls into OP_WITH_MISS. */
-            uint32_t sym = asnix_intern(node->as.var.name, node->as.var.name_len);
-            size_t jmp_sites[ASNIX_MAX_WITH_CHAIN];
+            uint32_t sym = ll_intern(node->as.var.name, node->as.var.name_len);
+            size_t jmp_sites[LL_MAX_WITH_CHAIN];
             for (size_t i = 0; i < with_count; i++) {
                 ib_var_ref(b, with_depths[i], 0);
                 size_t try_site = ib_with_try(b, sym);
@@ -1503,10 +1503,10 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             size_t n = node->as.let1.count;
             AstBinding *bindings = node->as.let1.bindings;
             /* M146: stack scratch for the common small-n case -- see
-             * ASNIX_COMPILE_SCRATCH_MAX's own comment. */
-            const char *names_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            size_t name_lens_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            int names_on_stack = (n <= ASNIX_COMPILE_SCRATCH_MAX);
+             * LL_COMPILE_SCRATCH_MAX's own comment. */
+            const char *names_stack[LL_COMPILE_SCRATCH_MAX];
+            size_t name_lens_stack[LL_COMPILE_SCRATCH_MAX];
+            int names_on_stack = (n <= LL_COMPILE_SCRATCH_MAX);
             const char **names = names_on_stack ? names_stack : malloc(n * sizeof(char *));
             size_t *name_lens = names_on_stack ? name_lens_stack : malloc(n * sizeof(size_t));
             for (size_t i = 0; i < n; i++) {
@@ -1555,7 +1555,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * binop's own separate optimization. */
             if (cond->kind == AST_HAS_ATTR && !cond->as.has_attr.attr_expr) {
                 compile_expr(b, cond->as.has_attr.target, scope);
-                uint32_t sym = asnix_intern(cond->as.has_attr.attr, cond->as.has_attr.attr_len);
+                uint32_t sym = ll_intern(cond->as.has_attr.attr, cond->as.has_attr.attr_len);
                 size_t if_site = ib_has_attr_if(b, sym);
                 compile_expr(b, then_node, scope);
                 size_t jmp_site = ib_jmp(b);
@@ -1663,7 +1663,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                  * a)` == `{}`; a curried `a: b: a` is just two nested
                  * non-pattern lambdas, so this applies at every level --
                  * M37). */
-                ib_lambda(b, 1, body_prog, (int64_t)asnix_bshared_make_attrs(NULL, NULL, 0).raw);
+                ib_lambda(b, 1, body_prog, (int64_t)ll_bshared_make_attrs(NULL, NULL, 0).raw);
                 return;
             }
 
@@ -1701,25 +1701,25 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * application, even if the body never reads the offending
              * field (confirmed against nix-instantiate). -- */
             /* M146: stack scratch for the common small-nf case -- see
-             * ASNIX_COMPILE_SCRATCH_MAX's own comment. All seven of this
+             * LL_COMPILE_SCRATCH_MAX's own comment. All seven of this
              * case's scratch buffers (below, and field_names/
              * field_name_lens/fa_syms/fa_vals further down) switch
              * together on the SAME `nf_on_stack` flag, so a pattern with
              * more formals than the cap falls back to malloc for every
              * one of them uniformly, never a mix. */
-            int nf_on_stack = (nf <= ASNIX_COMPILE_SCRATCH_MAX);
-            uint32_t all_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            uint32_t required_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            uint32_t all_syms_sorted_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            const char *field_names_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            size_t field_name_lens_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            uint32_t fa_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            Value fa_vals_stack[ASNIX_COMPILE_SCRATCH_MAX];
+            int nf_on_stack = (nf <= LL_COMPILE_SCRATCH_MAX);
+            uint32_t all_syms_stack[LL_COMPILE_SCRATCH_MAX];
+            uint32_t required_syms_stack[LL_COMPILE_SCRATCH_MAX];
+            uint32_t all_syms_sorted_stack[LL_COMPILE_SCRATCH_MAX];
+            const char *field_names_stack[LL_COMPILE_SCRATCH_MAX];
+            size_t field_name_lens_stack[LL_COMPILE_SCRATCH_MAX];
+            uint32_t fa_syms_stack[LL_COMPILE_SCRATCH_MAX];
+            Value fa_vals_stack[LL_COMPILE_SCRATCH_MAX];
 
             uint32_t *all_syms = nf_on_stack ? all_syms_stack : malloc((nf ? nf : 1) * sizeof(uint32_t));
             size_t required_count = 0;
             for (size_t i = 0; i < nf; i++) {
-                all_syms[i] = asnix_intern(node->as.lambda.formals[i].name, node->as.lambda.formals[i].name_len);
+                all_syms[i] = ll_intern(node->as.lambda.formals[i].name, node->as.lambda.formals[i].name_len);
                 if (!node->as.lambda.formals[i].default_) required_count++;
             }
             uint32_t *required_syms = nf_on_stack ? required_syms_stack : malloc((required_count ? required_count : 1) * sizeof(uint32_t));
@@ -1758,13 +1758,13 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * writes into it" ordering ib_check_formals/ib_frame_alloc
              * above already established for the thunk-based path. */
             {
-                int formalsmap_on_stack = (nf <= ASNIX_COMPILE_SCRATCH_MAX);
-                int64_t fm_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                int formalsmap_on_stack = (nf <= LL_COMPILE_SCRATCH_MAX);
+                int64_t fm_syms_stack[LL_COMPILE_SCRATCH_MAX];
                 int64_t *fm_syms = formalsmap_on_stack ? fm_syms_stack : malloc((nf ? nf : 1) * sizeof(int64_t));
                 for (size_t i = 0; i < nf; i++) {
                     fm_syms[i] = node->as.lambda.formals[i].default_
                                      ? -1
-                                     : (int64_t)asnix_intern(node->as.lambda.formals[i].name,
+                                     : (int64_t)ll_intern(node->as.lambda.formals[i].name,
                                                               node->as.lambda.formals[i].name_len);
                 }
                 ib_mk_formalsmap(body_b, (int64_t)nf, fm_syms);
@@ -1795,24 +1795,24 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                  * AST nodes so it goes through the exact same compile_expr
                  * paths as hand-written source would: `if arg ? field then
                  * arg.field else default`. */
-                Ast *arg_var = asnix_ast_new(AST_VAR);
+                Ast *arg_var = ll_ast_new(AST_VAR);
                 arg_var->as.var.name = arg_names[0];
                 arg_var->as.var.name_len = arg_name_lens[0];
 
-                Ast *select_node = asnix_ast_new(AST_SELECT);
+                Ast *select_node = ll_ast_new(AST_SELECT);
                 select_node->as.select.target = arg_var;
                 select_node->as.select.attr = node->as.lambda.formals[i].name;
                 select_node->as.select.attr_len = node->as.lambda.formals[i].name_len;
 
-                Ast *arg_var2 = asnix_ast_new(AST_VAR);
+                Ast *arg_var2 = ll_ast_new(AST_VAR);
                 arg_var2->as.var.name = arg_names[0];
                 arg_var2->as.var.name_len = arg_name_lens[0];
-                Ast *has_node = asnix_ast_new(AST_HAS_ATTR);
+                Ast *has_node = ll_ast_new(AST_HAS_ATTR);
                 has_node->as.has_attr.target = arg_var2;
                 has_node->as.has_attr.attr = node->as.lambda.formals[i].name;
                 has_node->as.has_attr.attr_len = node->as.lambda.formals[i].name_len;
 
-                Ast *if_node = asnix_ast_new(AST_IF);
+                Ast *if_node = ll_ast_new(AST_IF);
                 if_node->as.if1.cond = has_node;
                 if_node->as.if1.then_ = select_node;
                 if_node->as.if1.else_ = node->as.lambda.formals[i].default_;
@@ -1849,10 +1849,10 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             uint32_t *fa_syms = nf_on_stack ? fa_syms_stack : malloc((nf ? nf : 1) * sizeof(uint32_t));
             Value *fa_vals = nf_on_stack ? fa_vals_stack : malloc((nf ? nf : 1) * sizeof(Value));
             for (size_t i = 0; i < nf; i++) {
-                fa_syms[i] = asnix_intern(node->as.lambda.formals[i].name, node->as.lambda.formals[i].name_len);
-                fa_vals[i] = node->as.lambda.formals[i].default_ ? ASNIX_TRUE : ASNIX_FALSE;
+                fa_syms[i] = ll_intern(node->as.lambda.formals[i].name, node->as.lambda.formals[i].name_len);
+                fa_vals[i] = node->as.lambda.formals[i].default_ ? LL_TRUE : LL_FALSE;
             }
-            Value function_args = asnix_bshared_make_attrs(fa_syms, fa_vals, (int64_t)nf);
+            Value function_args = ll_bshared_make_attrs(fa_syms, fa_vals, (int64_t)nf);
             if (!nf_on_stack) {
                 free(fa_syms);
                 free(fa_vals);
@@ -1867,12 +1867,12 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 /* Dynamic `? ${expr}` -- same split as AST_SELECT's
                  * attr_expr case: push the name's value, let
                  * OP_HAS_ATTR_DYNAMIC intern/look it up at runtime (see
-                 * asnix_bshared_has_attr_dynamic, builtins_shared.c). */
+                 * ll_bshared_has_attr_dynamic, builtins_shared.c). */
                 compile_expr(b, node->as.has_attr.attr_expr, scope);
                 ib_has_attr_dynamic(b);
                 return;
             }
-            uint32_t sym = asnix_intern(node->as.has_attr.attr, node->as.has_attr.attr_len);
+            uint32_t sym = ll_intern(node->as.has_attr.attr, node->as.has_attr.attr_len);
             ib_has_attr(b, sym);
             return;
         }
@@ -1920,8 +1920,8 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 chain_walk = chain_walk->as.app.fn;
             }
             if (chain_len >= 2) {
-                int args_on_stack = (chain_len <= ASNIX_COMPILE_SCRATCH_MAX);
-                Ast *args_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                int args_on_stack = (chain_len <= LL_COMPILE_SCRATCH_MAX);
+                Ast *args_stack[LL_COMPILE_SCRATCH_MAX];
                 Ast **args = args_on_stack ? args_stack : malloc(chain_len * sizeof(Ast *));
                 Ast *cur = node;
                 for (size_t i = chain_len; i-- > 0;) {
@@ -1963,7 +1963,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                      * immediate, so it's materialized once here and
                      * pooled via ib_push_const, never re-allocated per
                      * eval. */
-                    Value fv = asnix_make_float_value(fold_fval);
+                    Value fv = ll_make_float_value(fold_fval);
                     ib_push_const(b, (int64_t)fv.raw);
                 } else {
                     ib_push_int(b, fold_val);
@@ -1995,7 +1995,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * b"); `a <= b` becomes "push b, push a, lt, not" (computing
              * "!(b < a)", i.e. exactly "a <= b") -- rather than adding a
              * new IR op: OP_GT/OP_LE (ib_gt/ib_le, op_cmp.S's
-             * asnix_op_gt/asnix_op_le) are left completely unused by the
+             * ll_op_gt/ll_op_le) are left completely unused by the
              * compiler after this change (not deleted -- harmless dead
              * code, same convention as any other op this project has
              * ever superseded without ripping out). */
@@ -2075,11 +2075,11 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             size_t else_idx = ib_len(b);
             ib_patch_delta(b, if_site, else_idx);
 
-            static const char prefix[] = "asnix: assertion '";
+            static const char prefix[] = "ll: assertion '";
             static const char suffix[] = "' failed, aborting\n";
             size_t text_len = node->as.assert1.cond_text_len;
             size_t total = sizeof(prefix) - 1 + text_len + sizeof(suffix) - 1;
-            char *msg = asnix_arena_alloc(total);
+            char *msg = ll_arena_alloc(total);
             memcpy(msg, prefix, sizeof(prefix) - 1);
             memcpy(msg + sizeof(prefix) - 1, node->as.assert1.cond_text, text_len);
             memcpy(msg + sizeof(prefix) - 1 + text_len, suffix, sizeof(suffix) - 1);
@@ -2104,14 +2104,14 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                  * constant, exactly like pre-interpolation M5 did. */
                 size_t total = 0;
                 for (size_t i = 0; i < count; i++) total += parts[i].text_len;
-                void *mem = asnix_arena_alloc(8 + total);
-                *(int64_t *)((char *)mem + ASNIX_STRING_OFF_LEN) = (int64_t)total;
-                char *out = (char *)mem + ASNIX_STRING_OFF_BYTES;
+                void *mem = ll_arena_alloc(8 + total);
+                *(int64_t *)((char *)mem + LL_STRING_OFF_LEN) = (int64_t)total;
+                char *out = (char *)mem + LL_STRING_OFF_BYTES;
                 for (size_t i = 0; i < count; i++) {
                     memcpy(out, parts[i].text, parts[i].text_len);
                     out += parts[i].text_len;
                 }
-                Value v = { .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PTR };
+                Value v = { .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PTR };
                 ib_push_const(b, (int64_t)v.raw);
                 return;
             }
@@ -2151,7 +2151,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 if (parts[i].is_expr) {
                     compile_expr(b, parts[i].expr, scope);
                 } else {
-                    Value v = asnix_make_string_value(parts[i].text, parts[i].text_len);
+                    Value v = ll_make_string_value(parts[i].text, parts[i].text_len);
                     ib_push_const(b, (int64_t)v.raw);
                 }
                 emit_count++;
@@ -2172,7 +2172,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * construction bytecode unconditionally ran every element's
              * code (including calling `throw`/`abort` if an element was
              * such a call) the moment the list value itself was forced to
-             * WHNF (e.g. by any consumer needing its ASNIX_TAG_LIST tag/
+             * WHNF (e.g. by any consumer needing its LL_TAG_LIST tag/
              * count/elems pointer) -- a real, previously-documented-but-
              * deliberately-unfixed gap (see M34's scope notes) that
              * surfaced as a conformance failure once a list literal
@@ -2208,7 +2208,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
         case AST_ATTRSET: {
             size_t n = node->as.attrset.count;
             /* M146: stack scratch for the common small-n case -- see
-             * ASNIX_COMPILE_SCRATCH_MAX's own comment. `small_n` doubles
+             * LL_COMPILE_SCRATCH_MAX's own comment. `small_n` doubles
              * as the stack-vs-heap decision for every scratch buffer in
              * this whole case (hnames/hname_lens and visible_sorted_syms
              * below included: their own sizes -- hidden_count, visible_
@@ -2217,14 +2217,14 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * insertion-sort-vs-qsort choice right below already uses,
              * so a literal that takes the "large" path for one takes it
              * for the other too, never a mix. */
-            uint32_t syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            size_t order_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            uint32_t sorted_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
-            int small_n = (n <= ASNIX_ATTRSET_SORT_INSERTION_MAX);
+            uint32_t syms_stack[LL_COMPILE_SCRATCH_MAX];
+            size_t order_stack[LL_COMPILE_SCRATCH_MAX];
+            uint32_t sorted_syms_stack[LL_COMPILE_SCRATCH_MAX];
+            int small_n = (n <= LL_ATTRSET_SORT_INSERTION_MAX);
             uint32_t *syms = small_n ? syms_stack : malloc(n * sizeof(uint32_t));
             size_t *order = small_n ? order_stack : malloc(n * sizeof(size_t));
             for (size_t i = 0; i < n; i++) {
-                syms[i] = asnix_intern(node->as.attrset.bindings[i].name, node->as.attrset.bindings[i].name_len);
+                syms[i] = ll_intern(node->as.attrset.bindings[i].name, node->as.attrset.bindings[i].name_len);
                 order[i] = i;
             }
             /* perf (M142): was an unconditional O(n^2) insertion sort on the
@@ -2353,9 +2353,9 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 }
                 /* hidden_count <= n, so whenever `small_n` is true (n fit
                  * the stack cap) so does hidden_count -- same flag reused,
-                 * see ASNIX_COMPILE_SCRATCH_MAX's comment. */
-                const char *hnames_stack[ASNIX_COMPILE_SCRATCH_MAX];
-                size_t hname_lens_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                 * see LL_COMPILE_SCRATCH_MAX's comment. */
+                const char *hnames_stack[LL_COMPILE_SCRATCH_MAX];
+                size_t hname_lens_stack[LL_COMPILE_SCRATCH_MAX];
                 const char **hnames = small_n ? hnames_stack : malloc((hidden_count ? hidden_count : 1) * sizeof(char *));
                 size_t *hname_lens = small_n ? hname_lens_stack : malloc((hidden_count ? hidden_count : 1) * sizeof(size_t));
                 size_t hi = 0;
@@ -2411,7 +2411,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     hi++;
                 }
                 size_t visible_count = n - hidden_count;
-                uint32_t visible_sorted_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                uint32_t visible_sorted_syms_stack[LL_COMPILE_SCRATCH_MAX];
                 uint32_t *visible_sorted_syms = small_n ? visible_sorted_syms_stack : malloc((visible_count ? visible_count : 1) * sizeof(uint32_t));
                 size_t vi = 0;
                 for (size_t i = 0; i < n; i++) {
@@ -2475,8 +2475,8 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                  * Thunk itself still gets forced later, lazily, the
                  * first time something actually selects that field. */
                 AstBinding *bindings = node->as.attrset.bindings;
-                const char *names_stack[ASNIX_COMPILE_SCRATCH_MAX];
-                size_t name_lens_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                const char *names_stack[LL_COMPILE_SCRATCH_MAX];
+                size_t name_lens_stack[LL_COMPILE_SCRATCH_MAX];
                 const char **names = small_n ? names_stack : malloc(n * sizeof(char *));
                 size_t *name_lens = small_n ? name_lens_stack : malloc(n * sizeof(size_t));
                 for (size_t i = 0; i < n; i++) {
@@ -2559,7 +2559,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                      * loop is identical to the pre-M80 unfiltered one. */
                     size_t visible_count = 0;
                     for (size_t i = 0; i < n; i++) if (!bindings[order[i]].is_hidden) visible_count++;
-                    uint32_t visible_sorted_syms_stack[ASNIX_COMPILE_SCRATCH_MAX];
+                    uint32_t visible_sorted_syms_stack[LL_COMPILE_SCRATCH_MAX];
                     uint32_t *visible_sorted_syms = small_n ? visible_sorted_syms_stack : malloc((visible_count ? visible_count : 1) * sizeof(uint32_t));
                     size_t vi = 0;
                     for (size_t i = 0; i < n; i++) {
@@ -2626,12 +2626,12 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                      * name expr's *value* (a string) is pushed and
                      * OP_SELECT_DYNAMIC (src/asm/ops/op_select_dynamic.S)
                      * interns/looks it up at runtime (see
-                     * asnix_bshared_select_dynamic, builtins_shared.c). */
+                     * ll_bshared_select_dynamic, builtins_shared.c). */
                     compile_expr(b, node->as.select.attr_expr, scope);
                     ib_select_dynamic(b);
                     return;
                 }
-                uint32_t sym = asnix_intern(node->as.select.attr, node->as.select.attr_len);
+                uint32_t sym = ll_intern(node->as.select.attr, node->as.select.attr_len);
                 ib_select(b, sym);
                 return;
             }
@@ -2690,7 +2690,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     compile_expr(b, seg->as.select.attr_expr, scope);
                     try_sites[i] = ib_select_dynamic_or(b);
                 } else {
-                    uint32_t sym = asnix_intern(seg->as.select.attr, seg->as.select.attr_len);
+                    uint32_t sym = ll_intern(seg->as.select.attr, seg->as.select.attr_len);
                     try_sites[i] = ib_select_or(b, sym);
                 }
             }
@@ -2752,7 +2752,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
             if (node->as.path.is_search) {
                 /* `<name>` (M31): unlike an ordinary path literal below,
                  * this must resolve LAZILY, at evaluation time, not here
-                 * at compile time -- see asnix_resolve_search_path_value's
+                 * at compile time -- see ll_resolve_search_path_value's
                  * own comment above for why (real Nix's own `findFile`
                  * throws a catchable-by-tryEval exception on failure,
                  * which only makes sense if the lookup happens during
@@ -2761,7 +2761,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                  * uses for an all-literal string), then
                  * OP_RESOLVE_SEARCH_PATH performs the actual lookup at
                  * runtime. */
-                Value name_v = asnix_make_string_value(node->as.path.text, node->as.path.len);
+                Value name_v = ll_make_string_value(node->as.path.text, node->as.path.len);
                 ib_push_const(b, (int64_t)name_v.raw);
                 ib_resolve_search_path(b);
                 return;
@@ -2787,7 +2787,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                     if (part->is_expr) {
                         compile_expr(b, part->expr, scope);
                     } else {
-                        Value sv = asnix_make_string_value(part->text, part->text_len);
+                        Value sv = ll_make_string_value(part->text, part->text_len);
                         ib_push_const(b, (int64_t)sv.raw);
                     }
                 }
@@ -2801,7 +2801,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * resolve_path_literal()). */
             char *abs = resolve_path_literal(node);
             size_t len = strlen(abs);
-            Value v = asnix_make_path_value(abs, len);
+            Value v = ll_make_path_value(abs, len);
             free(abs);
             ib_push_const(b, (int64_t)v.raw);
             return;
@@ -2818,13 +2818,13 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * `file`: M82 made this exact, not approximate --
              * `g_compile_file_path` is THIS compile call's own resolved
              * file path (every real caller, eval_file.c, passes its own
-             * `resolved` path through asnix_compile/asnix_compile_scoped
+             * `resolved` path through ll_compile/ll_compile_scoped
              * now), so a `__curPos` token inside an IMPORTED file
              * correctly reports that file, not the outermost file asnix
              * was invoked on. Only falls back to
-             * `asnix_eval_top_level_file()` when `g_compile_file_path`
+             * `ll_eval_top_level_file()` when `g_compile_file_path`
              * is NULL, which happens for exactly one caller
-             * (`asnix_eval_expr_source`, CLI `--arg`/`--argstr`
+             * (`ll_eval_expr_source`, CLI `--arg`/`--argstr`
              * expression evaluation, which has no file of its own) plus
              * this file's own unit tests. `line`/`column` are exact
              * regardless -- M80's whole point (see parser.c's
@@ -2833,17 +2833,17 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
              * approximate, out of scope -- see docs/architecture.md's
              * M82 notes), only ever need ONE token's position (the
              * `__curPos` occurrence itself). */
-            const char *file = g_compile_file_path ? g_compile_file_path : asnix_eval_top_level_file();
+            const char *file = g_compile_file_path ? g_compile_file_path : ll_eval_top_level_file();
             if (!file) file = "";
             uint32_t syms[3];
             Value vals[3];
-            syms[0] = asnix_intern("file", 4);
-            vals[0] = asnix_make_string_value(file, strlen(file));
-            syms[1] = asnix_intern("line", 4);
-            vals[1] = asnix_make_int(node->as.curpos.line);
-            syms[2] = asnix_intern("column", 6);
-            vals[2] = asnix_make_int(node->as.curpos.column);
-            Value v = asnix_bshared_make_attrs(syms, vals, 3);
+            syms[0] = ll_intern("file", 4);
+            vals[0] = ll_make_string_value(file, strlen(file));
+            syms[1] = ll_intern("line", 4);
+            vals[1] = ll_make_int(node->as.curpos.line);
+            syms[2] = ll_intern("column", 6);
+            vals[2] = ll_make_int(node->as.curpos.column);
+            Value v = ll_bshared_make_attrs(syms, vals, 3);
             ib_push_const(b, (int64_t)v.raw);
             return;
         }
@@ -2855,7 +2855,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
  * `removeAttrs`/`isNull`/`throw`/`derivation`/`baseNameOf`/`dirOf`/
  * `fromTOML`/`placeholder`/`scopedImport`/`derivationStrict`/`fetchGit`
  * bare -- names real Nix exposes as bare globals in addition to
- * `builtins.X` (see builtins.h's asnix_make_import_primop comment). This
+ * `builtins.X` (see builtins.h's ll_make_import_primop comment). This
  * scope frame makes `builtins.toString 5` and bare `import ./x`/`map f
  * xs`/`abort "msg"`/`toString 5`/`removeAttrs set ["a"]`/`isNull x`/
  * `throw "msg"`/`derivation {...}`/`baseNameOf x`/`dirOf x`/`fromTOML s`/
@@ -2863,7 +2863,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
  * `fetchGit {...}` (M58: `derivation` itself is now a Nix-level wrapper
  * around this, see derivation.h; M82: `fetchGit`, see
  * builtins_fetchgit.c) all resolve like any other variable reference.
- * Shared by asnix_compile and asnix_compile_scoped (M54) below -- both
+ * Shared by ll_compile and ll_compile_scoped (M54) below -- both
  * need exactly this same outermost frame, just with a possible extra
  * frame spliced in front of it for the latter. */
 static void init_builtins_frame(ScopeFrame *f) {
@@ -2885,7 +2885,7 @@ static void init_builtins_frame(ScopeFrame *f) {
     f->has_overrides = 0;
 }
 
-IrProgram *asnix_compile(Ast *root, const char *base_dir, const char *file_path) {
+IrProgram *ll_compile(Ast *root, const char *base_dir, const char *file_path) {
     g_compile_base_dir = base_dir;
     g_compile_file_path = file_path;
     IrBuilder *b = ib_new();
@@ -2897,7 +2897,7 @@ IrProgram *asnix_compile(Ast *root, const char *base_dir, const char *file_path)
 }
 
 /*
- * M54: `builtins.scopedImport scope path` -- like `asnix_compile` above,
+ * M54: `builtins.scopedImport scope path` -- like `ll_compile` above,
  * but with one extra NAMED (not `with`-style fallback) ScopeFrame spliced
  * in between the root `builtins_frame` and `root`'s own top-level
  * expression, holding `scope`'s attribute names. This mirrors cppnix's
@@ -2917,11 +2917,11 @@ IrProgram *asnix_compile(Ast *root, const char *base_dir, const char *file_path)
  * fallback never beats an outer NAMED frame either, which is the wrong
  * priority order for this feature. `extra_names`/`extra_lens` must stay
  * alive for the whole of this one compile call (the caller, eval_file.c's
- * asnix_eval_file_scoped, keeps them on the C stack for exactly that
+ * ll_eval_file_scoped, keeps them on the C stack for exactly that
  * long); `extra_count` may be 0 (an empty `scope` attrset), in which case
  * this frame simply never matches anything and every name falls through
  * to `builtins_frame` as usual. */
-IrProgram *asnix_compile_scoped(Ast *root, const char *base_dir, const char *file_path,
+IrProgram *ll_compile_scoped(Ast *root, const char *base_dir, const char *file_path,
                                  const char **extra_names, size_t *extra_lens, size_t extra_count) {
     g_compile_base_dir = base_dir;
     g_compile_file_path = file_path;

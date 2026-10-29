@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_VALUE_H
-#define ASNIX_VALUE_H
+#ifndef LL_VALUE_H
+#define LL_VALUE_H
 
 /*
  * 8-byte pointer-tagged word. See docs/value-encoding.md for full rationale.
@@ -25,23 +25,23 @@
  * is C-only (typedefs, prototypes, inline functions).
  */
 
-#define ASNIX_TAG_MASK   0x7
-#define ASNIX_TAG_BITS   3
+#define LL_TAG_MASK   0x7
+#define LL_TAG_BITS   3
 
-#define ASNIX_TAG_PTR      0x0 /* generic heap pointer (strings etc. via a header Kind byte) */
-#define ASNIX_TAG_INT      0x1 /* 61-bit immediate signed integer */
-#define ASNIX_TAG_IMM      0x2 /* small fixed enumeration (null/false/true/blackhole/...) */
-#define ASNIX_TAG_ATTRS    0x3 /* pointer to an attrset heap object */
-#define ASNIX_TAG_LIST     0x4 /* pointer to a list heap object */
-#define ASNIX_TAG_CLOSURE  0x5 /* pointer to a lambda/closure heap object */
-#define ASNIX_TAG_THUNK    0x6 /* pointer to a 2-word thunk cell */
-#define ASNIX_TAG_PRIMOP   0x7 /* pointer to a native builtin-function heap object (M7) */
+#define LL_TAG_PTR      0x0 /* generic heap pointer (strings etc. via a header Kind byte) */
+#define LL_TAG_INT      0x1 /* 61-bit immediate signed integer */
+#define LL_TAG_IMM      0x2 /* small fixed enumeration (null/false/true/blackhole/...) */
+#define LL_TAG_ATTRS    0x3 /* pointer to an attrset heap object */
+#define LL_TAG_LIST     0x4 /* pointer to a list heap object */
+#define LL_TAG_CLOSURE  0x5 /* pointer to a lambda/closure heap object */
+#define LL_TAG_THUNK    0x6 /* pointer to a 2-word thunk cell */
+#define LL_TAG_PRIMOP   0x7 /* pointer to a native builtin-function heap object (M7) */
 
-/* IMM sub-tags, packed into bits [63:3] of an ASNIX_TAG_IMM word. */
-#define ASNIX_IMM_NULL      0
-#define ASNIX_IMM_FALSE     1
-#define ASNIX_IMM_TRUE      2
-#define ASNIX_IMM_BLACKHOLE 3
+/* IMM sub-tags, packed into bits [63:3] of an LL_TAG_IMM word. */
+#define LL_IMM_NULL      0
+#define LL_IMM_FALSE     1
+#define LL_IMM_TRUE      2
+#define LL_IMM_BLACKHOLE 3
 
 /* 61-bit signed immediate integer range (M56): the ±2^60 window a
  * TAG_INT word can actually hold. Spelled as plain decimal literals (no
@@ -51,11 +51,11 @@
  * `1152921504606846975` directly, but chokes on C integer-suffix syntax.
  * Needed in asm now because op_push_int/op_arith.S's add/sub/mul/div
  * fast paths inline the overflow check directly (see those files) rather
- * than paying a `call` into asnix_make_int per op -- same inlining
+ * than paying a `call` into ll_make_int per op -- same inlining
  * tradeoff value.h's own header comment already describes for the
  * tagging bit tricks themselves. */
-#define ASNIX_INT_MAX 1152921504606846975
-#define ASNIX_INT_MIN (-1152921504606846976)
+#define LL_INT_MAX 1152921504606846975
+#define LL_INT_MIN (-1152921504606846976)
 
 #ifndef __ASSEMBLER__
 
@@ -72,22 +72,22 @@ typedef struct {
  * in op handlers instead of paying a `call` per tag check -- these routines
  * exist for the C-side boundary (compiler, debug printing, tests).
  */
-int asnix_tag_of(Value v);
-Value asnix_make_int(int64_t n);
-int64_t asnix_int_value(Value v);
-Value asnix_make_imm(int subtag);
-int asnix_imm_subtag(Value v);
-int asnix_is_thunk(Value v);
+int ll_tag_of(Value v);
+Value ll_make_int(int64_t n);
+int64_t ll_int_value(Value v);
+Value ll_make_imm(int subtag);
+int ll_imm_subtag(Value v);
+int ll_is_thunk(Value v);
 
-static inline int asnix_values_equal(Value a, Value b) {
+static inline int ll_values_equal(Value a, Value b) {
     return a.raw == b.raw;
 }
 
-#define ASNIX_NULL      (asnix_make_imm(ASNIX_IMM_NULL))
-#define ASNIX_TRUE      (asnix_make_imm(ASNIX_IMM_TRUE))
-#define ASNIX_FALSE     (asnix_make_imm(ASNIX_IMM_FALSE))
-#define ASNIX_BLACKHOLE (asnix_make_imm(ASNIX_IMM_BLACKHOLE))
+#define LL_NULL      (ll_make_imm(LL_IMM_NULL))
+#define LL_TRUE      (ll_make_imm(LL_IMM_TRUE))
+#define LL_FALSE     (ll_make_imm(LL_IMM_FALSE))
+#define LL_BLACKHOLE (ll_make_imm(LL_IMM_BLACKHOLE))
 
 #endif /* __ASSEMBLER__ */
 
-#endif /* ASNIX_VALUE_H */
+#endif /* LL_VALUE_H */

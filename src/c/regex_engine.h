@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_REGEX_ENGINE_H
-#define ASNIX_REGEX_ENGINE_H
+#ifndef LL_REGEX_ENGINE_H
+#define LL_REGEX_ENGINE_H
 
 #include <stdint.h>
 
@@ -15,11 +15,11 @@
  * convention, for a match span glibc's regexec already correctly found
  * (the common case, whenever the pattern has any capture group at all);
  * (2) as a full standalone replacement for regcomp/regexec on patterns
- * `asnix_regex_needs_custom_engine` flags glibc can't be trusted for at
+ * `ll_regex_needs_custom_engine` flags glibc can't be trusted for at
  * all.
  */
 
-typedef struct AsnixCustomRegex AsnixCustomRegex;
+typedef struct LlCustomRegex LlCustomRegex;
 
 /* A single capture group's result, as an ABSOLUTE byte offset pair into
  * whatever subject buffer the match call was given -- so < 0 means "did
@@ -28,7 +28,7 @@ typedef struct AsnixCustomRegex AsnixCustomRegex;
 typedef struct {
     int64_t so;
     int64_t eo;
-} AsnixRegexGroup;
+} LlRegexGroup;
 
 /* Bracket-expression-aware pre-scan: true iff `pattern` uses a construct
  * glibc's regcomp/regexec cannot be trusted for at all -- a
@@ -39,7 +39,7 @@ typedef struct {
  * before (this function does not duplicate `pattern_rejected_by_real_nix`'s
  * job -- a pattern can be both "not rejected" and "needs the custom
  * engine", that's the whole point). */
-int asnix_regex_needs_custom_engine(const char *pattern, int64_t len);
+int ll_regex_needs_custom_engine(const char *pattern, int64_t len);
 
 /* Parses `pattern` (the POSIX ERE subset documented at the top of
  * regex_engine.c) into a reusable compiled form. Returns NULL if the
@@ -50,9 +50,9 @@ int asnix_regex_needs_custom_engine(const char *pattern, int64_t len);
  * glibc result exists to fall back to) should treat it the same as
  * compile_or_fatal's regcomp failure. *nsub_out receives the number of
  * capture groups (same meaning as regex_t's re_nsub). */
-AsnixCustomRegex *asnix_regex_compile(const char *pattern, int64_t len, int64_t *nsub_out);
+LlCustomRegex *ll_regex_compile(const char *pattern, int64_t len, int64_t *nsub_out);
 
-void asnix_regex_free(AsnixCustomRegex *re);
+void ll_regex_free(LlCustomRegex *re);
 
 /* Anchored match: does `re` match `subject[start, end)`, consuming
  * exactly that span, no more, no less (conceptually `regexec` on a
@@ -62,8 +62,8 @@ void asnix_regex_free(AsnixCustomRegex *re);
  * span). On success, fills `groups_out` (caller-allocated, nsub entries)
  * with each group's own absolute span and returns 1; on failure returns
  * 0 and leaves `groups_out` untouched. `notbol` mirrors REG_NOTBOL. */
-int asnix_regex_match_anchored(const AsnixCustomRegex *re, const char *subject, int64_t slen,
-                                int64_t start, int64_t end, int notbol, AsnixRegexGroup *groups_out);
+int ll_regex_match_anchored(const LlCustomRegex *re, const char *subject, int64_t slen,
+                                int64_t start, int64_t end, int notbol, LlRegexGroup *groups_out);
 
 /* From-scratch leftmost-longest search (used only on the
  * needs-custom-engine path, where glibc is bypassed entirely): finds the
@@ -74,8 +74,8 @@ int asnix_regex_match_anchored(const AsnixCustomRegex *re, const char *subject, 
  * caller doesn't need captures) on success, 0 if no match exists
  * anywhere in subject[from_pos..slen]. `notbol` mirrors REG_NOTBOL
  * (split's windowed re-search from pos > 0). */
-int asnix_regex_search(const AsnixCustomRegex *re, const char *subject, int64_t slen,
+int ll_regex_search(const LlCustomRegex *re, const char *subject, int64_t slen,
                         int64_t from_pos, int notbol, int64_t *out_start, int64_t *out_end,
-                        AsnixRegexGroup *groups_out);
+                        LlRegexGroup *groups_out);
 
-#endif /* ASNIX_REGEX_ENGINE_H */
+#endif /* LL_REGEX_ENGINE_H */

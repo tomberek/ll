@@ -1,10 +1,10 @@
-#ifndef ASNIX_ART_SYM_H
-#define ASNIX_ART_SYM_H
+#ifndef LL_ART_SYM_H
+#define LL_ART_SYM_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /*
  * M195: specialized, mutable (non-persistent) ART-style radix trie keyed
@@ -13,13 +13,13 @@
  * across all input attrsets, sort, dedupe" step; M198 generalized it into
  * a real sym->Value map (each leaf now carries a `Value`, written only
  * the FIRST time a given sym is inserted -- a duplicate insert is a no-op
- * that touches nothing, see asnix_art_sym_insert's own comment) so
+ * that touches nothing, see ll_art_sym_insert's own comment) so
  * listToAttrs's "first occurrence of a duplicate name wins" dedupe (M196)
  * could be done by the SAME insert-then-traverse shape instead of its own
  * separate sort+dedupe pass -- the two problems are identical once you
  * notice "keep the sym's first-ever-inserted value" is exactly what this
  * structure already does by design. Not a general attrset representation
- * change -- asnix_bshared_make_attrs's flat sorted array is still what
+ * change -- ll_bshared_make_attrs's flat sorted array is still what
  * every attrset actually IS; this type is a throwaway scratch structure
  * built once per call and read out via one in-order traversal.
  *
@@ -38,7 +38,7 @@
  * and discards it immediately after one traversal -- no old root ever
  * has to stay valid). Fixing both (variable-size-per-kind node structs;
  * plain mutable in-place insertion via `ArtNode **ref`, same pattern as
- * this codebase's own asnix_arena_alloc bump arena) reversed the result:
+ * this codebase's own ll_arena_alloc bump arena) reversed the result:
  * callgrind instruction counts, duplicate-aware workload (distinct_n
  * ~60% of total_n, matching module-merge key overlap), bulk-collect+
  * qsort+dedupe baseline vs this ART:
@@ -54,18 +54,18 @@
  * early-exit scalar scan) -- not reused here; every known use of this
  * type is insert-heavy, not search-heavy, so it wouldn't apply anyway.
  *
- * All nodes are allocated via asnix_arena_alloc (never individually
+ * All nodes are allocated via ll_arena_alloc (never individually
  * freed, same as every other scratch allocation in this codebase) --
  * there is no separate arena/lifetime to manage here.
  */
 
-typedef struct AsnixArtSymNode AsnixArtSymNode;
+typedef struct LlArtSymNode LlArtSymNode;
 
 typedef struct {
-    AsnixArtSymNode *root;
-} AsnixArtSymSet;
+    LlArtSymNode *root;
+} LlArtSymSet;
 
-static inline void asnix_art_sym_init(AsnixArtSymSet *set) { set->root = NULL; }
+static inline void ll_art_sym_init(LlArtSymSet *set) { set->root = NULL; }
 
 /* Inserts `sym` -> `val` into the set. Idempotent AND first-wins: if
  * `sym` is already present, this is a complete no-op (no allocation, and
@@ -76,7 +76,7 @@ static inline void asnix_art_sym_init(AsnixArtSymSet *set) { set->root = NULL; }
  * don't need a payload (e.g. zipAttrsWith's own distinct-syms-only use)
  * can just pass `(Value){0}` and ignore `out_vals` in the collect call
  * below. */
-void asnix_art_sym_insert(AsnixArtSymSet *set, uint32_t sym, Value val);
+void ll_art_sym_insert(LlArtSymSet *set, uint32_t sym, Value val);
 
 /* Writes every distinct sym in the set, in ascending numeric order, into
  * `out_syms` (caller-allocated; must hold at least as many entries as
@@ -86,6 +86,6 @@ void asnix_art_sym_insert(AsnixArtSymSet *set, uint32_t sym, Value val);
  * passing NULL skips writing values entirely (zero extra cost) for
  * callers that only need the sorted distinct sym list. Returns the
  * number of distinct syms written. */
-int64_t asnix_art_sym_collect_sorted(const AsnixArtSymSet *set, uint32_t *out_syms, Value *out_vals);
+int64_t ll_art_sym_collect_sorted(const LlArtSymSet *set, uint32_t *out_syms, Value *out_vals);
 
-#endif /* ASNIX_ART_SYM_H */
+#endif /* LL_ART_SYM_H */

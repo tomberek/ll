@@ -17,9 +17,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/ir.h"
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
 #include "builtins_shared.h"
 #include "hash_shim.h"
 #include "symtab.h"
@@ -68,41 +68,41 @@ static int ptrset_contains_or_add(PtrSet *s, const void *p) {
 }
 
 static void deep_force_rec(Value v, PtrSet *seen) {
-    v = asnix_force_for_print(v);
-    int tag = asnix_tag_of(v);
-    if (tag != ASNIX_TAG_ATTRS && tag != ASNIX_TAG_LIST) return;
-    const void *ptr = (const void *)(uintptr_t)(v.raw & ~(uint64_t)ASNIX_TAG_MASK);
+    v = ll_force_for_print(v);
+    int tag = ll_tag_of(v);
+    if (tag != LL_TAG_ATTRS && tag != LL_TAG_LIST) return;
+    const void *ptr = (const void *)(uintptr_t)(v.raw & ~(uint64_t)LL_TAG_MASK);
     if (ptrset_contains_or_add(seen, ptr)) return; /* already visited this object -- a cycle */
-    if (tag == ASNIX_TAG_ATTRS) {
-        int64_t n = asnix_bshared_attrs_count(v);
-        for (int64_t i = 0; i < n; i++) deep_force_rec(asnix_bshared_attrs_value(v, i), seen);
+    if (tag == LL_TAG_ATTRS) {
+        int64_t n = ll_bshared_attrs_count(v);
+        for (int64_t i = 0; i < n; i++) deep_force_rec(ll_bshared_attrs_value(v, i), seen);
     } else {
-        int64_t n = asnix_bshared_list_count(v);
-        const Value *elems = asnix_bshared_list_elems(v);
+        int64_t n = ll_bshared_list_count(v);
+        const Value *elems = ll_bshared_list_elems(v);
         for (int64_t i = 0; i < n; i++) deep_force_rec(elems[i], seen);
     }
 }
 
 static Value seq2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    asnix_force_for_print(args[0]);
-    return asnix_force_for_print(args[1]);
+    ll_force_for_print(args[0]);
+    return ll_force_for_print(args[1]);
 }
-static Value build_seq(void) { return asnix_bshared_make_curried_native((void *)seq2_impl, 2); }
+static Value build_seq(void) { return ll_bshared_make_curried_native((void *)seq2_impl, 2); }
 
 static Value deepSeq2_impl(const Value *args, int64_t argc) {
     (void)argc;
     PtrSet seen = { 0 };
     deep_force_rec(args[0], &seen);
     free(seen.items);
-    return asnix_force_for_print(args[1]);
+    return ll_force_for_print(args[1]);
 }
-static Value build_deepSeq(void) { return asnix_bshared_make_curried_native((void *)deepSeq2_impl, 2); }
+static Value build_deepSeq(void) { return ll_bshared_make_curried_native((void *)deepSeq2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * Filesystem path resolution shared by pathExists/readFile/readFileType/
  * readDir/toPath: accepts a Path, an absolute-path String, or anything
- * asnix_coerce_to_string's __toString/outPath protocol can turn into one
+ * ll_coerce_to_string's __toString/outPath protocol can turn into one
  * (same acceptance rule prim_import, builtins.c, already established) --
  * fatal on anything else or a non-absolute string, matching real Nix's
  * own wording for this exact situation (verified: `nix-instantiate --eval
@@ -110,14 +110,14 @@ static Value build_deepSeq(void) { return asnix_bshared_make_curried_native((voi
  * an absolute path"). Returns a NUL-terminated, arena-owned C string.
  * --------------------------------------------------------------------- */
 static char *resolve_fs_path(Value v, const char *who) {
-    Value coerced = asnix_coerce_to_string(v); /* fatal on anything uncoercible */
+    Value coerced = ll_coerce_to_string(v); /* fatal on anything uncoercible */
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(coerced, &len);
+    const char *bytes = ll_ptr_bytes(coerced, &len);
     if (len == 0 || bytes[0] != '/') {
-        fprintf(stderr, "asnix: %s: string '%.*s' doesn't represent an absolute path\n", who, (int)len, bytes);
+        fprintf(stderr, "ll: %s: string '%.*s' doesn't represent an absolute path\n", who, (int)len, bytes);
         exit(1);
     }
-    char *path = asnix_arena_alloc((size_t)len + 1);
+    char *path = ll_arena_alloc((size_t)len + 1);
     memcpy(path, bytes, (size_t)len);
     path[len] = '\0';
     return path;
@@ -135,11 +135,11 @@ static char *resolve_fs_path(Value v, const char *who) {
  * here. */
 static Value prim_pathExists(const Value *args, int64_t argc) {
     (void)argc;
-    Value v = asnix_force_for_print(args[0]);
+    Value v = ll_force_for_print(args[0]);
     int must_be_dir = 0;
-    if (asnix_tag_of(v) == ASNIX_TAG_PTR && !asnix_value_is_path(v) && !asnix_value_is_float(v)) {
+    if (ll_tag_of(v) == LL_TAG_PTR && !ll_value_is_path(v) && !ll_value_is_float(v)) {
         int64_t slen;
-        const char *s = asnix_ptr_bytes(v, &slen);
+        const char *s = ll_ptr_bytes(v, &slen);
         if (slen >= 1 && s[slen - 1] == '/') must_be_dir = 1;
         else if (slen >= 2 && s[slen - 2] == '/' && s[slen - 1] == '.') must_be_dir = 1;
     }
@@ -151,7 +151,7 @@ static Value prim_pathExists(const Value *args, int64_t argc) {
     } else {
         exists = (lstat(path, &st) == 0);
     }
-    return asnix_make_imm(exists ? ASNIX_IMM_TRUE : ASNIX_IMM_FALSE);
+    return ll_make_imm(exists ? LL_IMM_TRUE : LL_IMM_FALSE);
 }
 
 /* Shared by readFile/hashFile: reads the whole file at `path` into a
@@ -162,13 +162,13 @@ static Value prim_pathExists(const Value *args, int64_t argc) {
 static char *read_whole_file(const char *path, const char *who, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "asnix: %s: cannot open '%s'\n", who, path);
+        fprintf(stderr, "ll: %s: cannot open '%s'\n", who, path);
         exit(1);
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     if (size < 0) {
-        fprintf(stderr, "asnix: %s: cannot read '%s' (not a regular file?)\n", who, path);
+        fprintf(stderr, "ll: %s: cannot read '%s' (not a regular file?)\n", who, path);
         exit(1);
     }
     fseek(f, 0, SEEK_SET);
@@ -187,7 +187,7 @@ static Value prim_readFile(const Value *args, int64_t argc) {
     char *path = resolve_fs_path(args[0], "readFile");
     size_t len;
     char *buf = read_whole_file(path, "readFile", &len);
-    Value result = asnix_make_string_value(buf, len);
+    Value result = ll_make_string_value(buf, len);
     free(buf);
     return result;
 }
@@ -209,11 +209,11 @@ static Value prim_readFileType(const Value *args, int64_t argc) {
     char *path = resolve_fs_path(args[0], "readFileType");
     struct stat st;
     if (lstat(path, &st) != 0) {
-        fprintf(stderr, "asnix: readFileType: cannot stat '%s'\n", path);
+        fprintf(stderr, "ll: readFileType: cannot stat '%s'\n", path);
         exit(1);
     }
     const char *kind = stat_type_str(&st);
-    return asnix_make_string_value(kind, strlen(kind));
+    return ll_make_string_value(kind, strlen(kind));
 }
 
 /* `builtins.readDir p` -- an attrset of directory-entry-name -> file-type
@@ -243,7 +243,7 @@ static Value prim_readDir(const Value *args, int64_t argc) {
     char *path = resolve_fs_path(args[0], "readDir");
     DIR *dir = opendir(path);
     if (!dir) {
-        fprintf(stderr, "asnix: readDir: cannot open directory '%s'\n", path);
+        fprintf(stderr, "ll: readDir: cannot open directory '%s'\n", path);
         exit(1);
     }
     uint32_t *syms = NULL;
@@ -273,12 +273,12 @@ static Value prim_readDir(const Value *args, int64_t argc) {
             syms = realloc(syms, cap * sizeof(uint32_t));
             vals = realloc(vals, cap * sizeof(Value));
         }
-        syms[n] = asnix_intern(ent->d_name, namelen);
-        vals[n] = asnix_make_string_value(kind, strlen(kind));
+        syms[n] = ll_intern(ent->d_name, namelen);
+        vals[n] = ll_make_string_value(kind, strlen(kind));
         n++;
     }
     closedir(dir);
-    Value result = asnix_bshared_make_attrs(syms, vals, (int64_t)n);
+    Value result = ll_bshared_make_attrs(syms, vals, (int64_t)n);
     free(syms);
     free(vals);
     return result;
@@ -290,14 +290,14 @@ static Value prim_readDir(const Value *args, int64_t argc) {
  * (builtins.toPath "/foo/bar")` => "string", not "path". */
 static Value prim_toPath(const Value *args, int64_t argc) {
     (void)argc;
-    Value coerced = asnix_coerce_to_string(args[0]);
+    Value coerced = ll_coerce_to_string(args[0]);
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(coerced, &len);
+    const char *bytes = ll_ptr_bytes(coerced, &len);
     if (len == 0 || bytes[0] != '/') {
-        fprintf(stderr, "asnix: string '%.*s' doesn't represent an absolute path\n", (int)len, bytes);
+        fprintf(stderr, "ll: string '%.*s' doesn't represent an absolute path\n", (int)len, bytes);
         exit(1);
     }
-    return asnix_make_string_value(bytes, (size_t)len);
+    return ll_make_string_value(bytes, (size_t)len);
 }
 
 /* `builtins.getEnv name` -- real Nix gates this behind pure-eval mode
@@ -307,15 +307,15 @@ static Value prim_toPath(const Value *args, int64_t argc) {
  * real Nix either way. */
 static Value prim_getEnv(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "getEnv");
+    LL_REQUIRE_STRING(args[0], "getEnv");
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(args[0], &len);
-    char *name = asnix_arena_alloc((size_t)len + 1);
+    const char *bytes = ll_ptr_bytes(args[0], &len);
+    char *name = ll_arena_alloc((size_t)len + 1);
     memcpy(name, bytes, (size_t)len);
     name[len] = '\0';
     const char *val = getenv(name);
-    if (!val) return asnix_make_string_value("", 0);
-    return asnix_make_string_value(val, strlen(val));
+    if (!val) return ll_make_string_value("", 0);
+    return ll_make_string_value(val, strlen(val));
 }
 
 /* `builtins.hashFile algo path` -- reads the whole file then hashes it,
@@ -323,43 +323,43 @@ static Value prim_getEnv(const Value *args, int64_t argc) {
  * (hash_shim.h) -- deliberately NOT sharing builtins.c's own hashString
  * dispatch code (that file's `hash_apply` takes an in-memory string, not
  * a filesystem path), but using the exact same underlying
- * asnix_hash_md5/sha1/sha256/sha512 + asnix_hash_to_hex primitives. */
+ * ll_hash_md5/sha1/sha256/sha512 + ll_hash_to_hex primitives. */
 static Value hashFile_apply(const char *path, int64_t (*hash_fn)(const void *, size_t, unsigned char *),
                              size_t raw_len) {
     size_t len;
     char *buf = read_whole_file(path, "hashFile", &len);
-    unsigned char raw[ASNIX_HASH_SHA512_LEN];
+    unsigned char raw[LL_HASH_SHA512_LEN];
     int64_t rc = hash_fn(buf, len, raw);
     free(buf);
     if (rc != 0) {
-        fprintf(stderr, "asnix: hashFile: failed to load libcrypto (rc=%lld) -- "
-                         "enter the flake devShell (needs ASNIX_LIBCRYPTO_LIB / openssl)\n",
+        fprintf(stderr, "ll: hashFile: failed to load libcrypto (rc=%lld) -- "
+                         "enter the flake devShell (needs LL_LIBCRYPTO_LIB / openssl)\n",
                 (long long)rc);
         exit(1);
     }
-    char hex[2 * ASNIX_HASH_SHA512_LEN];
-    asnix_hash_to_hex(raw, raw_len, hex);
-    return asnix_make_string_value(hex, 2 * raw_len);
+    char hex[2 * LL_HASH_SHA512_LEN];
+    ll_hash_to_hex(raw, raw_len, hex);
+    return ll_make_string_value(hex, 2 * raw_len);
 }
 
 static Value hashFile2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "hashFile");
+    LL_REQUIRE_STRING(args[0], "hashFile");
     int64_t len;
-    const char *name = asnix_ptr_bytes(args[0], &len);
+    const char *name = ll_ptr_bytes(args[0], &len);
     char *path = resolve_fs_path(args[1], "hashFile");
 
-    if (len == 3 && memcmp(name, "md5", 3) == 0) return hashFile_apply(path, asnix_hash_md5, ASNIX_HASH_MD5_LEN);
-    if (len == 4 && memcmp(name, "sha1", 4) == 0) return hashFile_apply(path, asnix_hash_sha1, ASNIX_HASH_SHA1_LEN);
+    if (len == 3 && memcmp(name, "md5", 3) == 0) return hashFile_apply(path, ll_hash_md5, LL_HASH_MD5_LEN);
+    if (len == 4 && memcmp(name, "sha1", 4) == 0) return hashFile_apply(path, ll_hash_sha1, LL_HASH_SHA1_LEN);
     if (len == 6 && memcmp(name, "sha256", 6) == 0)
-        return hashFile_apply(path, asnix_hash_sha256, ASNIX_HASH_SHA256_LEN);
+        return hashFile_apply(path, ll_hash_sha256, LL_HASH_SHA256_LEN);
     if (len == 6 && memcmp(name, "sha512", 6) == 0)
-        return hashFile_apply(path, asnix_hash_sha512, ASNIX_HASH_SHA512_LEN);
-    fprintf(stderr, "asnix: hashFile: unsupported algorithm \"%.*s\" (expected md5/sha1/sha256/sha512)\n", (int)len,
+        return hashFile_apply(path, ll_hash_sha512, LL_HASH_SHA512_LEN);
+    fprintf(stderr, "ll: hashFile: unsupported algorithm \"%.*s\" (expected md5/sha1/sha256/sha512)\n", (int)len,
             name);
     exit(1);
 }
-static Value build_hashFile(void) { return asnix_bshared_make_curried_native((void *)hashFile2_impl, 2); }
+static Value build_hashFile(void) { return ll_bshared_make_curried_native((void *)hashFile2_impl, 2); }
 
 /* ---------------------------------------------------------------------
  * intersectAttrs e1 e2 -- the subset of e2 whose NAMES also appear in
@@ -385,44 +385,44 @@ static Value build_hashFile(void) { return asnix_bshared_make_curried_native((vo
  * walked: both inputs are sorted by symbol id, so walking either one
  * in order yields an output already sorted by symbol id (no re-sort
  * needed), and the emitted value always comes from e2 either way. */
-Value asnix_prim_intersectAttrs2_impl(const Value *args, int64_t argc) {
+Value ll_prim_intersectAttrs2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value e1 = args[0], e2 = args[1];
-    ASNIX_REQUIRE_ATTRS(e1, "intersectAttrs");
-    ASNIX_REQUIRE_ATTRS(e2, "intersectAttrs");
-    int64_t n1 = asnix_bshared_attrs_count(e1);
-    int64_t n2 = asnix_bshared_attrs_count(e2);
+    LL_REQUIRE_ATTRS(e1, "intersectAttrs");
+    LL_REQUIRE_ATTRS(e2, "intersectAttrs");
+    int64_t n1 = ll_bshared_attrs_count(e1);
+    int64_t n2 = ll_bshared_attrs_count(e2);
     int64_t cap = n1 < n2 ? n1 : n2;
     uint32_t *syms = cap > 0 ? malloc((size_t)cap * sizeof(uint32_t)) : NULL;
     Value *vals = cap > 0 ? malloc((size_t)cap * sizeof(Value)) : NULL;
     int64_t out_n = 0;
     if (n1 <= n2) {
         for (int64_t i = 0; i < n1; i++) {
-            uint32_t sym = asnix_bshared_attrs_sym(e1, i);
-            int64_t j = asnix_bshared_attrs_find(e2, sym);
+            uint32_t sym = ll_bshared_attrs_sym(e1, i);
+            int64_t j = ll_bshared_attrs_find(e2, sym);
             if (j >= 0) {
                 syms[out_n] = sym;
-                vals[out_n] = asnix_bshared_attrs_value(e2, j);
+                vals[out_n] = ll_bshared_attrs_value(e2, j);
                 out_n++;
             }
         }
     } else {
         for (int64_t i = 0; i < n2; i++) {
-            uint32_t sym = asnix_bshared_attrs_sym(e2, i);
-            if (asnix_bshared_attrs_find(e1, sym) >= 0) {
+            uint32_t sym = ll_bshared_attrs_sym(e2, i);
+            if (ll_bshared_attrs_find(e1, sym) >= 0) {
                 syms[out_n] = sym;
-                vals[out_n] = asnix_bshared_attrs_value(e2, i);
+                vals[out_n] = ll_bshared_attrs_value(e2, i);
                 out_n++;
             }
         }
     }
-    Value result = asnix_bshared_make_attrs(syms, vals, out_n); /* already sorted -- re-sort is a cheap no-op */
+    Value result = ll_bshared_make_attrs(syms, vals, out_n); /* already sorted -- re-sort is a cheap no-op */
     free(syms);
     free(vals);
     return result;
 }
 static Value build_intersectAttrs(void) {
-    return asnix_bshared_make_curried_native((void *)asnix_prim_intersectAttrs2_impl, 2);
+    return ll_bshared_make_curried_native((void *)ll_prim_intersectAttrs2_impl, 2);
 }
 
 /* ---------------------------------------------------------------------
@@ -432,10 +432,10 @@ static Value build_intersectAttrs(void) {
  * Verified: `builtins.groupBy (n: if n < 0 then "neg" else "pos") [ -1 2
  * -3 4 ]` == `{ neg = [ -1 -3 ]; pos = [ 2 4 ]; }`.
  *
- * perf: below ASNIX_GROUPBY_HASH_MIN, a plain linear bucket-search is
+ * perf: below LL_GROUPBY_HASH_MIN, a plain linear bucket-search is
  * fine (and faster than hashing, same small-N reasoning as
  * attrs_find_flat_noresolve's <=8 linear-scan threshold and
- * asnix_bshared_make_attrs's/json_encode_attrs_ctx's 32-entry stack-
+ * ll_bshared_make_attrs's/json_encode_attrs_ctx's 32-entry stack-
  * array thresholds elsewhere in this codebase) -- most real groupBy
  * calls carry only a handful of items. This WAS an unconditional
  * O(n * distinct-keys) scan with no size-based escape valve (the
@@ -453,7 +453,7 @@ static Value build_intersectAttrs(void) {
  * starts, so no incremental grow is needed) gives O(1)-average lookup
  * instead, the same bug class and same style of fix as
  * prim_genericClosure's own O(n^2)-dedup-scan fix. */
-#define ASNIX_GROUPBY_HASH_MIN 32
+#define LL_GROUPBY_HASH_MIN 32
 
 typedef struct {
     uint32_t sym;
@@ -464,13 +464,13 @@ typedef struct {
 static Value groupBy2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0], list = args[1];
-    ASNIX_REQUIRE_LIST(list, "groupBy");
-    int64_t n = asnix_bshared_list_count(list);
-    const Value *elems = asnix_bshared_list_elems(list);
+    LL_REQUIRE_LIST(list, "groupBy");
+    int64_t n = ll_bshared_list_count(list);
+    const Value *elems = ll_bshared_list_elems(list);
     GroupBucket *buckets = NULL;
     size_t nbuckets = 0, bcap = 0;
 
-    int use_hash = n > ASNIX_GROUPBY_HASH_MIN;
+    int use_hash = n > LL_GROUPBY_HASH_MIN;
     size_t hcap = 0;
     uint32_t *hsym = NULL;  /* hcap entries, parallel to hused/hbucket */
     size_t *hbucket = NULL;
@@ -484,15 +484,15 @@ static Value groupBy2_impl(const Value *args, int64_t argc) {
     }
 
     for (int64_t i = 0; i < n; i++) {
-        Value key = asnix_apply(f, &elems[i], 1);
-        key = asnix_force_for_print(key);
-        if (asnix_tag_of(key) != ASNIX_TAG_PTR || asnix_value_is_path(key) || asnix_value_is_float(key)) {
-            fprintf(stderr, "asnix: groupBy: key function must return a string\n");
+        Value key = ll_apply(f, &elems[i], 1);
+        key = ll_force_for_print(key);
+        if (ll_tag_of(key) != LL_TAG_PTR || ll_value_is_path(key) || ll_value_is_float(key)) {
+            fprintf(stderr, "ll: groupBy: key function must return a string\n");
             exit(1);
         }
         int64_t klen;
-        const char *kbytes = asnix_ptr_bytes(key, &klen);
-        uint32_t sym = asnix_intern(kbytes, (size_t)klen);
+        const char *kbytes = ll_ptr_bytes(key, &klen);
+        uint32_t sym = ll_intern(kbytes, (size_t)klen);
         GroupBucket *b = NULL;
         size_t hslot = 0;
         if (use_hash) {
@@ -545,16 +545,16 @@ static Value groupBy2_impl(const Value *args, int64_t argc) {
     Value *vals = nbuckets > 0 ? malloc(nbuckets * sizeof(Value)) : NULL;
     for (size_t j = 0; j < nbuckets; j++) {
         syms[j] = buckets[j].sym;
-        vals[j] = asnix_bshared_make_list(buckets[j].items, (int64_t)buckets[j].len);
+        vals[j] = ll_bshared_make_list(buckets[j].items, (int64_t)buckets[j].len);
         free(buckets[j].items);
     }
     free(buckets);
-    Value result = asnix_bshared_make_attrs(syms, vals, (int64_t)nbuckets);
+    Value result = ll_bshared_make_attrs(syms, vals, (int64_t)nbuckets);
     free(syms);
     free(vals);
     return result;
 }
-static Value build_groupBy(void) { return asnix_bshared_make_curried_native((void *)groupBy2_impl, 2); }
+static Value build_groupBy(void) { return ll_bshared_make_curried_native((void *)groupBy2_impl, 2); }
 
 /* `builtins.parseDrvName s` -- splits a derivation-name-style string
  * into `{ name; version; }`, ported directly from real Nix's own
@@ -569,9 +569,9 @@ static Value build_groupBy(void) { return asnix_bshared_make_curried_native((voi
  * matching dash at all means the whole string is the name, version "". */
 static Value prim_parseDrvName(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_STRING(args[0], "parseDrvName");
+    LL_REQUIRE_STRING(args[0], "parseDrvName");
     int64_t len;
-    const char *s = asnix_ptr_bytes(args[0], &len);
+    const char *s = ll_ptr_bytes(args[0], &len);
     int64_t split = -1;
     for (int64_t i = 0; i < len - 1; i++) {
         if (s[i] == '-' && !isalpha((unsigned char)s[i + 1])) {
@@ -581,84 +581,84 @@ static Value prim_parseDrvName(const Value *args, int64_t argc) {
     }
     Value name_val, version_val;
     if (split < 0) {
-        name_val = asnix_make_string_value(s, (size_t)len);
-        version_val = asnix_make_string_value("", 0);
+        name_val = ll_make_string_value(s, (size_t)len);
+        version_val = ll_make_string_value("", 0);
     } else {
-        name_val = asnix_make_string_value(s, (size_t)split);
-        version_val = asnix_make_string_value(s + split + 1, (size_t)(len - split - 1));
+        name_val = ll_make_string_value(s, (size_t)split);
+        version_val = ll_make_string_value(s + split + 1, (size_t)(len - split - 1));
     }
-    uint32_t syms[2] = { asnix_intern("name", 4), asnix_intern("version", 7) };
+    uint32_t syms[2] = { ll_intern("name", 4), ll_intern("version", 7) };
     Value vals[2] = { name_val, version_val };
-    /* order doesn't matter -- asnix_bshared_make_attrs sorts by sym id */
-    return asnix_bshared_make_attrs(syms, vals, 2);
+    /* order doesn't matter -- ll_bshared_make_attrs sorts by sym id */
+    return ll_bshared_make_attrs(syms, vals, 2);
 }
 
 /* `builtins.add`/`sub`/`mul`/`div` -- plain two-argument arithmetic,
  * exposed as builtins (distinct from the `+`/`-`/`*`/`/` *operators*,
  * which compile to IR ops directly -- see compiler.c/op_arith.S). M51:
  * now shares the exact same int/float promotion rule the operators use
- * (asnix_add_values/asnix_sub_values/asnix_mul_values/asnix_div_values,
+ * (ll_add_values/ll_sub_values/ll_mul_values/ll_div_values,
  * value_util.c) rather than being INT-only -- verified against
  * `nix-instantiate --eval`: `builtins.add 2.0 2` => 4 (and
  * `builtins.typeOf (builtins.add 2.0 2)` => "float"), matching real
  * Nix's own `prim_add`/`prim_sub`/`prim_mul`/`prim_div`
  * (~/nix/src/libexpr/primops.cc), which promote exactly the same way
  * `+`/`-`/`*`/`/` do -- these are not two independently-scoped features.
- * The all-int fast path asnix_add_values/etc. themselves keep (checked
+ * The all-int fast path ll_add_values/etc. themselves keep (checked
  * first, before ever considering float) means `builtins.add 2 3` still
  * costs nothing extra over before this milestone. */
 static Value add2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    return asnix_add_values(args[0], args[1]);
+    return ll_add_values(args[0], args[1]);
 }
 static Value sub2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    if (asnix_tag_of(args[0]) == ASNIX_TAG_INT && asnix_tag_of(args[1]) == ASNIX_TAG_INT) {
-        return asnix_make_int(asnix_int_value(args[0]) - asnix_int_value(args[1]));
+    if (ll_tag_of(args[0]) == LL_TAG_INT && ll_tag_of(args[1]) == LL_TAG_INT) {
+        return ll_make_int(ll_int_value(args[0]) - ll_int_value(args[1]));
     }
-    return asnix_sub_values(args[0], args[1]);
+    return ll_sub_values(args[0], args[1]);
 }
 static Value mul2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    if (asnix_tag_of(args[0]) == ASNIX_TAG_INT && asnix_tag_of(args[1]) == ASNIX_TAG_INT) {
+    if (ll_tag_of(args[0]) == LL_TAG_INT && ll_tag_of(args[1]) == LL_TAG_INT) {
         /* M56: unlike add/sub (operands already bounded to +-2^60, so plain
          * int64 `+`/`-` can never themselves overflow), two such operands'
          * *product* genuinely can overflow int64 -- true signed-overflow UB
-         * in C, not just a value asnix_make_int could catch after the fact.
+         * in C, not just a value ll_make_int could catch after the fact.
          * __builtin_mul_overflow computes the product without that UB and
-         * reports it; asnix_make_int (src/asm/value.S) still re-checks the
+         * reports it; ll_make_int (src/asm/value.S) still re-checks the
          * narrower +-2^60 window for a product that fits in 64 bits but not
          * that window. M51: a non-int operand (a float) falls through to
-         * asnix_mul_values below instead of this fast, overflow-checked
+         * ll_mul_values below instead of this fast, overflow-checked
          * int-only path -- matching add2/sub2_impl's own int-fast-path-
          * plus-float-fallback shape just above. */
-        int64_t a = asnix_int_value(args[0]), b = asnix_int_value(args[1]), r;
+        int64_t a = ll_int_value(args[0]), b = ll_int_value(args[1]), r;
         if (__builtin_mul_overflow(a, b, &r)) {
-            fprintf(stderr, "asnix: integer overflow in multiplying %lld * %lld\n", (long long)a, (long long)b);
+            fprintf(stderr, "ll: integer overflow in multiplying %lld * %lld\n", (long long)a, (long long)b);
             exit(1);
         }
-        return asnix_make_int(r);
+        return ll_make_int(r);
     }
-    return asnix_mul_values(args[0], args[1]);
+    return ll_mul_values(args[0], args[1]);
 }
 static Value div2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    if (asnix_tag_of(args[0]) == ASNIX_TAG_INT && asnix_tag_of(args[1]) == ASNIX_TAG_INT) {
-        int64_t rhs = asnix_int_value(args[1]);
+    if (ll_tag_of(args[0]) == LL_TAG_INT && ll_tag_of(args[1]) == LL_TAG_INT) {
+        int64_t rhs = ll_int_value(args[1]);
         if (rhs == 0) {
-            fprintf(stderr, "asnix: division by zero, aborting\n");
+            fprintf(stderr, "ll: division by zero, aborting\n");
             exit(1);
         }
-        return asnix_make_int(asnix_int_value(args[0]) / rhs);
+        return ll_make_int(ll_int_value(args[0]) / rhs);
     }
-    return asnix_div_values(args[0], args[1]);
+    return ll_div_values(args[0], args[1]);
 }
-static Value build_add(void) { return asnix_bshared_make_curried_native((void *)add2_impl, 2); }
-static Value build_sub(void) { return asnix_bshared_make_curried_native((void *)sub2_impl, 2); }
-static Value build_mul(void) { return asnix_bshared_make_curried_native((void *)mul2_impl, 2); }
-static Value build_div(void) { return asnix_bshared_make_curried_native((void *)div2_impl, 2); }
+static Value build_add(void) { return ll_bshared_make_curried_native((void *)add2_impl, 2); }
+static Value build_sub(void) { return ll_bshared_make_curried_native((void *)sub2_impl, 2); }
+static Value build_mul(void) { return ll_bshared_make_curried_native((void *)mul2_impl, 2); }
+static Value build_div(void) { return ll_bshared_make_curried_native((void *)div2_impl, 2); }
 
-const AsnixBuiltinMiscDef ASNIX_M23_BUILTINS[] = {
+const LlBuiltinMiscDef LL_M23_BUILTINS[] = {
     { "seq", build_seq },
     { "deepSeq", build_deepSeq },
     { "intersectAttrs", build_intersectAttrs },
@@ -670,17 +670,17 @@ const AsnixBuiltinMiscDef ASNIX_M23_BUILTINS[] = {
     { "hashFile", build_hashFile },
 };
 
-const size_t ASNIX_M23_BUILTINS_COUNT = sizeof(ASNIX_M23_BUILTINS) / sizeof(ASNIX_M23_BUILTINS[0]);
+const size_t LL_M23_BUILTINS_COUNT = sizeof(LL_M23_BUILTINS) / sizeof(LL_M23_BUILTINS[0]);
 
 /* pathExists/readFile/readFileType/readDir/toPath/getEnv are plain
  * arity-1 PrimOps -- registered directly in builtins.c's own BUILTINS[]
  * table (the {name, fn, arity} shape) rather than through this file's
  * {name, build()} table, since they don't need currying. Exposed here
  * for that registration. */
-Value asnix_prim_pathExists(const Value *args, int64_t argc) { return prim_pathExists(args, argc); }
-Value asnix_prim_readFile(const Value *args, int64_t argc) { return prim_readFile(args, argc); }
-Value asnix_prim_readFileType(const Value *args, int64_t argc) { return prim_readFileType(args, argc); }
-Value asnix_prim_readDir(const Value *args, int64_t argc) { return prim_readDir(args, argc); }
-Value asnix_prim_toPath(const Value *args, int64_t argc) { return prim_toPath(args, argc); }
-Value asnix_prim_getEnv(const Value *args, int64_t argc) { return prim_getEnv(args, argc); }
-Value asnix_prim_parseDrvName(const Value *args, int64_t argc) { return prim_parseDrvName(args, argc); }
+Value ll_prim_pathExists(const Value *args, int64_t argc) { return prim_pathExists(args, argc); }
+Value ll_prim_readFile(const Value *args, int64_t argc) { return prim_readFile(args, argc); }
+Value ll_prim_readFileType(const Value *args, int64_t argc) { return prim_readFileType(args, argc); }
+Value ll_prim_readDir(const Value *args, int64_t argc) { return prim_readDir(args, argc); }
+Value ll_prim_toPath(const Value *args, int64_t argc) { return prim_toPath(args, argc); }
+Value ll_prim_getEnv(const Value *args, int64_t argc) { return prim_getEnv(args, argc); }
+Value ll_prim_parseDrvName(const Value *args, int64_t argc) { return prim_parseDrvName(args, argc); }

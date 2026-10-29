@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 
@@ -29,12 +29,12 @@
  * - FALSE: we want execution to fall straight into the "else" branch
  *   instead, so we remove the WHOLE range [push_false_index, else_start)
  *   -- the PUSH_FALSE, the OP_IF, the entire "then" branch, and its
- *   trailing OP_JMP -- as one contiguous asnix_irpass_remove call, where
+ *   trailing OP_JMP -- as one contiguous ll_irpass_remove call, where
  *   else_start is exactly OP_IF's own resolved target.
  *
- * Both sub-cases must check, BEFORE calling asnix_irpass_remove, that no
+ * Both sub-cases must check, BEFORE calling ll_irpass_remove, that no
  * jump anywhere in the whole ops array targets an index strictly inside
- * the range about to be removed -- asnix_irpass_remove enforces this
+ * the range about to be removed -- ll_irpass_remove enforces this
  * itself, but it treats a violation as FATAL (exit 1), not a "can't fold
  * this one, try something else" signal. A real, constructible case where
  * this matters: `if A then B else (if true then X else Y)` -- the outer
@@ -42,7 +42,7 @@
  * exactly index `start` of the inner pair's own removal range. That's
  * actually fine semantically (the outer jump should end up landing on the
  * inner "then" branch, which is exactly what the surviving op at that
- * position becomes after the fold), but asnix_irpass_remove's blanket
+ * position becomes after the fold), but ll_irpass_remove's blanket
  * check doesn't special-case "targets exactly `start`" as safe -- so we
  * pre-check ourselves and just skip (return 0, let the scan continue)
  * rather than ever reaching that fatal exit.
@@ -54,7 +54,7 @@ static int op_is_jump(int op_id) {
            op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF; /* M162 */
 }
 
-/* Mirrors asnix_irpass_remove's own internal safety scan (irpass.c) so we
+/* Mirrors ll_irpass_remove's own internal safety scan (irpass.c) so we
  * can decide NOT to attempt a removal that primitive would otherwise abort
  * the whole process over. Returns 1 if some jump (anywhere in ops[0..len))
  * targets an index inside [start, start+count). */
@@ -62,7 +62,7 @@ static int range_has_incoming_jump(IrOp *ops, size_t len, size_t start, size_t c
     for (size_t i = 0; i < len; i++) {
         int id = (int)(intptr_t)ops[i].handler;
         if (!op_is_jump(id)) continue;
-        int64_t target = (int64_t)i + ops[i].a / ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)i + ops[i].a / LL_IROP_SIZE;
         if (target >= (int64_t)start && target < (int64_t)(start + count)) return 1;
     }
     return 0;
@@ -71,7 +71,7 @@ static int range_has_incoming_jump(IrOp *ops, size_t len, size_t start, size_t c
 static int dce_if(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size_t *pool_cap) {
     (void)pool;
     (void)pool_len;
-    (void)pool_cap; /* M118 strconcat-fold extension widened AsnixIrPass's signature for every
+    (void)pool_cap; /* M118 strconcat-fold extension widened LlIrPass's signature for every
                       * pass uniformly (see irpass.h) -- this pass only removes dead-branch ops,
                       * never touches the constant pool. */
     size_t n = *len;
@@ -84,7 +84,7 @@ static int dce_if(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size
             /* Remove just the [PUSH_TRUE, OP_IF] pair -- execution then
              * falls straight through into the existing "then" branch. */
             if (range_has_incoming_jump(ops, n, i, 2)) continue;
-            asnix_irpass_remove(ops, len, i, 2);
+            ll_irpass_remove(ops, len, i, 2);
             return 1;
         }
 
@@ -93,16 +93,16 @@ static int dce_if(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size
          * [i, else_start) -- PUSH_FALSE, OP_IF, the whole "then" branch,
          * and its trailing OP_JMP -- all in one shot, so execution falls
          * straight into what's left: the "else" branch. */
-        int64_t else_start = (int64_t)(i + 1) + ops[i + 1].a / ASNIX_IROP_SIZE;
+        int64_t else_start = (int64_t)(i + 1) + ops[i + 1].a / LL_IROP_SIZE;
         if (else_start <= (int64_t)(i + 1)) continue; /* malformed/degenerate -- never emitted by compiler.c, skip defensively */
         size_t count = (size_t)else_start - i;
         if (range_has_incoming_jump(ops, n, i, count)) continue;
-        asnix_irpass_remove(ops, len, i, count);
+        ll_irpass_remove(ops, len, i, count);
         return 1;
     }
     return 0;
 }
 
-void asnix_irpass_register_dce_if(void) {
-    asnix_irpass_register("dce_if", dce_if);
+void ll_irpass_register_dce_if(void) {
+    ll_irpass_register("dce_if", dce_if);
 }

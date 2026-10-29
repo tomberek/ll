@@ -1,11 +1,11 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_M23_H
-#define ASNIX_BUILTINS_M23_H
+#ifndef LL_BUILTINS_M23_H
+#define LL_BUILTINS_M23_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "builtins_misc.h" /* shared AsnixBuiltinMiscDef/-Builder {name, build()} shape */
+#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
 
 /*
  * M23 builtins-expansion pass: seq, deepSeq, pathExists, readFile,
@@ -20,25 +20,25 @@
  * make_curried_native, the mechanism every arity>=2 entry's build() uses.
  */
 
-extern const AsnixBuiltinMiscDef ASNIX_M23_BUILTINS[];
-extern const size_t ASNIX_M23_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_M23_BUILTINS[];
+extern const size_t LL_M23_BUILTINS_COUNT;
 
 /* The plain arity-1 members of this batch -- registered directly in
  * builtins.c's own {name, fn, arity} BUILTINS[] table instead of through
- * ASNIX_M23_BUILTINS above, since they don't need currying. */
-Value asnix_prim_pathExists(const Value *args, int64_t argc);
-Value asnix_prim_readFile(const Value *args, int64_t argc);
-Value asnix_prim_readFileType(const Value *args, int64_t argc);
-Value asnix_prim_readDir(const Value *args, int64_t argc);
-Value asnix_prim_toPath(const Value *args, int64_t argc);
-Value asnix_prim_getEnv(const Value *args, int64_t argc);
-Value asnix_prim_parseDrvName(const Value *args, int64_t argc);
+ * LL_M23_BUILTINS above, since they don't need currying. */
+Value ll_prim_pathExists(const Value *args, int64_t argc);
+Value ll_prim_readFile(const Value *args, int64_t argc);
+Value ll_prim_readFileType(const Value *args, int64_t argc);
+Value ll_prim_readDir(const Value *args, int64_t argc);
+Value ll_prim_toPath(const Value *args, int64_t argc);
+Value ll_prim_getEnv(const Value *args, int64_t argc);
+Value ll_prim_parseDrvName(const Value *args, int64_t argc);
 
 /* M110: exported so compiler.c's try_fused_native_call2 can fuse a
  * statically-recognized, fully-saturated `builtins.intersectAttrs a b`
  * call site into one direct native call -- see compiler.c's own
  * comment. Ordinary force-by-default native, no special handling
  * needed. */
-Value asnix_prim_intersectAttrs2_impl(const Value *args, int64_t argc);
+Value ll_prim_intersectAttrs2_impl(const Value *args, int64_t argc);
 
-#endif /* ASNIX_BUILTINS_M23_H */
+#endif /* LL_BUILTINS_M23_H */

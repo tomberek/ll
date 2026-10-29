@@ -1,17 +1,17 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 
 /* Removes a redundant OP_JMP whose target is exactly the op right after
  * it -- i.e. a jump that's a no-op: falling through (not jumping at all)
  * lands in exactly the same place. ib_patch_delta (irbuild.c) sets an
- * OP_JMP's field `a` to `(target_idx - site) * ASNIX_IROP_SIZE`, and
- * asnix_irpass_remove/every jump consumer recovers the target the same
- * way: `target_index = i + a/ASNIX_IROP_SIZE` (see ir.h's own comment on
+ * OP_JMP's field `a` to `(target_idx - site) * LL_IROP_SIZE`, and
+ * ll_irpass_remove/every jump consumer recovers the target the same
+ * way: `target_index = i + a/LL_IROP_SIZE` (see ir.h's own comment on
  * the jump-delta-bearing ops, irpass.h's op_is_jump). So the no-op case
- * is simply `a == ASNIX_IROP_SIZE`, i.e. target_index == i + 1 -- no
- * division needed, `a` is always an exact multiple of ASNIX_IROP_SIZE
+ * is simply `a == LL_IROP_SIZE`, i.e. target_index == i + 1 -- no
+ * division needed, `a` is always an exact multiple of LL_IROP_SIZE
  * (every delta this project ever writes comes from ib_patch_delta).
  *
  * This never legitimately happens from compiler.c's own direct emission
@@ -36,7 +36,7 @@
  * op (which doesn't happen from compiler.c's direct emission alone, but
  * could in principle after a future pass shrinks the else-branch), so
  * this can't currently arise from this fork's only other pass (cfold,
- * which never touches jumps) -- but asnix_irpass_remove's own contract
+ * which never touches jumps) -- but ll_irpass_remove's own contract
  * is unconditional: ANY live jump landing inside [i, i+1) -- including
  * exactly AT i -- is fatal, not just one that would land strictly past
  * it. Removing it would actually still be semantically safe (jumping to
@@ -57,7 +57,7 @@ static int is_targeted_by_another_jump(IrOp *ops, size_t len, size_t idx) {
         if (j == idx) continue;
         int id = (int)(intptr_t)ops[j].handler;
         if (!op_is_jump(id)) continue;
-        int64_t target = (int64_t)j + ops[j].a / (int64_t)ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)j + ops[j].a / (int64_t)LL_IROP_SIZE;
         if (target == (int64_t)idx) return 1;
     }
     return 0;
@@ -66,19 +66,19 @@ static int is_targeted_by_another_jump(IrOp *ops, size_t len, size_t idx) {
 static int remove_noop_jmp(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size_t *pool_cap) {
     (void)pool;
     (void)pool_len;
-    (void)pool_cap; /* M118 strconcat-fold extension widened AsnixIrPass's signature for every
+    (void)pool_cap; /* M118 strconcat-fold extension widened LlIrPass's signature for every
                       * pass uniformly (see irpass.h) -- this pass only removes a no-op OP_JMP,
                       * never touches the constant pool. */
     for (size_t i = 0; i < *len; i++) {
         if ((int)(intptr_t)ops[i].handler != OP_JMP) continue;
-        if (ops[i].a != (int64_t)ASNIX_IROP_SIZE) continue;
+        if (ops[i].a != (int64_t)LL_IROP_SIZE) continue;
         if (is_targeted_by_another_jump(ops, *len, i)) continue;
-        asnix_irpass_remove(ops, len, i, 1);
+        ll_irpass_remove(ops, len, i, 1);
         return 1; /* re-scan from the top next iteration -- simplest correct strategy */
     }
     return 0;
 }
 
-void asnix_irpass_register_jmpnop(void) {
-    asnix_irpass_register("jmpnop", remove_noop_jmp);
+void ll_irpass_register_jmpnop(void) {
+    ll_irpass_register("jmpnop", remove_noop_jmp);
 }

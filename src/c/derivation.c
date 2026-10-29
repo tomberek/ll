@@ -6,53 +6,53 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/ir.h" /* asnix_force_for_print */
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/ir.h" /* ll_force_for_print */
 #include "aterm.h"
 #include "base32.h"
 #include "base64.h"
-#include "builtins_compare.h" /* asnix_toJSON_cstr -- M69's __structuredAttrs support */
-#include "builtins_json.h" /* asnix_json_parse_structured_attrs -- M80's literal `__json` normalization */
-#include "builtins_shared.h" /* asnix_bshared_make_primop, asnix_bshared_make_attrs */
-#include "eval_file.h"       /* asnix_eval_file -- M58's derivation.nix wrapper */
+#include "builtins_compare.h" /* ll_toJSON_cstr -- M69's __structuredAttrs support */
+#include "builtins_json.h" /* ll_json_parse_structured_attrs -- M80's literal `__json` normalization */
+#include "builtins_shared.h" /* ll_bshared_make_primop, ll_bshared_make_attrs */
+#include "eval_file.h"       /* ll_eval_file -- M58's derivation.nix wrapper */
 #include "hash_shim.h"
-#include "nar.h" /* asnix_copy_path_to_store -- M75 */
+#include "nar.h" /* ll_copy_path_to_store -- M75 */
 #include "store_path.h"
 #include "string_context.h" /* M76 */
 #include "symtab.h"
 #include "value_util.h"
 
-#define ASNIX_DRV_MAX_ARGS    64
+#define LL_DRV_MAX_ARGS    64
 /* M72: bumped from 64 -- found via d.nix, a real stdenv.mkDerivation
  * call (structuredAttrs-era make-derivation.nix sets a couple dozen
  * attributes unconditionally -- enableParallelBuilding, strictDeps,
  * depsBuildBuild, depsHostHostPropagated, __structuredAttrs, env,
  * outputChecks, ... -- before the package itself adds any of its own)
  * exceeded this on its very first attribute-count check. These are
- * plain fixed-size stack arrays (`env[ASNIX_DRV_MAX_ENV]` etc. below),
+ * plain fixed-size stack arrays (`env[LL_DRV_MAX_ENV]` etc. below),
  * not an arena allocation, so the cost of a larger bound is just more
  * stack space per `derivation {...}` call, negligible at this size. */
-#define ASNIX_DRV_MAX_ENV     256
+#define LL_DRV_MAX_ENV     256
 /* Real nixpkgs derivations rarely declare more than ~6 outputs
  * (out/bin/dev/lib/man/doc/debug being the usual full set); 16 is a
  * generous cap matching this file's existing "small bounded arrays,
- * fatal if exceeded" convention (see ASNIX_DRV_MAX_ARGS/ENV above). */
-#define ASNIX_DRV_MAX_OUTPUTS 16
+ * fatal if exceeded" convention (see LL_DRV_MAX_ARGS/ENV above). */
+#define LL_DRV_MAX_OUTPUTS 16
 /* M74: bound for the number of distinct input derivations one
  * `derivation {}` call can reference -- moved up here (from its
  * original spot right before its own first use, deep inside
- * `asnix_prim_derivation`) by M143 so the depth-indexed scratch-pool
+ * `ll_prim_derivation`) by M143 so the depth-indexed scratch-pool
  * types above that same function can use it too; see that function's
  * own `group_paths` comment for why this one is heap-, not
  * stack-allocated. */
-#define ASNIX_DRV_MAX_INPUT_DRVS 1024
+#define LL_DRV_MAX_INPUT_DRVS 1024
 
 static void sha256_or_die(const char *s, size_t len, uint8_t out[32]) {
-    int64_t rc = asnix_hash_sha256(s, len, out);
+    int64_t rc = ll_hash_sha256(s, len, out);
     if (rc != 0) {
         fprintf(stderr,
-                "asnix: derivation: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
+                "ll: derivation: failed to load libcrypto (rc=%lld) -- enter the flake devShell\n",
                 (long long)rc);
         exit(1);
     }
@@ -125,7 +125,7 @@ static size_t hash_algo_digest_bytes(const char *s, size_t len) {
 /* M73: on top of validate_output_hash_fields's existing well-formedness
  * checks (unchanged below), this ALSO decodes a valid `outputHash` into
  * raw digest bytes and reports the resolved algorithm -- needed by
- * asnix_compute_fixed_output_path (below) to actually implement real Nix's
+ * ll_compute_fixed_output_path (below) to actually implement real Nix's
  * `makeFixedOutputPath` formula, which this project validated the
  * SHAPE of since M48 but never actually used for path computation
  * (confirmed via a direct `nix-instantiate` comparison: a fixed-output
@@ -140,7 +140,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
                                 size_t *out_raw_len, const char **out_algo, size_t *out_algo_len) {
     *out_has_hash = 0;
     if (output_hash_mode && strcmp(output_hash_mode, "flat") != 0 && strcmp(output_hash_mode, "recursive") != 0) {
-        fprintf(stderr, "asnix: unknown hash mode '%s', expected 'flat' or 'recursive'\n", output_hash_mode);
+        fprintf(stderr, "ll: unknown hash mode '%s', expected 'flat' or 'recursive'\n", output_hash_mode);
         exit(1);
     }
     /* M48: an EMPTY `outputHashAlgo` means "unspecified, infer the
@@ -157,7 +157,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
      * logic further down that would have resolved it correctly. */
     if (output_hash_algo && output_hash_algo[0] == '\0') output_hash_algo = NULL;
     if (output_hash_algo && !valid_hash_algo_str(output_hash_algo, strlen(output_hash_algo))) {
-        fprintf(stderr, "asnix: unknown hash algorithm '%s'\n", output_hash_algo);
+        fprintf(stderr, "ll: unknown hash algorithm '%s'\n", output_hash_algo);
         exit(1);
     }
     if (!output_hash) return;
@@ -186,7 +186,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
     size_t n = hash_algo_digest_bytes(algo, algo_len);
     size_t hash_len = strlen(hash_body);
     size_t hex_len = 2 * n;
-    size_t b32_len = asnix_base32_encoded_length(n);
+    size_t b32_len = ll_base32_encoded_length(n);
     size_t b64_len = ((n + 2) / 3) * 4;
     /* real Nix's SRI hashes are routinely UNPADDED base64 (no trailing
      * '='s) -- confirmed needed chasing d.nix past `ffmpeg`'s own fetcher
@@ -197,7 +197,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
      * confirmed directly: real `derivation { ...; outputHash =
      * "sha256-UlI+6OMUj5F6uVAw+Mg2wOZrjfdRq73d1qufaXVI/go"; }` (43
      * chars) evaluates fine against real `nix-instantiate`.
-     * `asnix_base64_decode` (base64.c) already handles an unpadded tail
+     * `ll_base64_decode` (base64.c) already handles an unpadded tail
      * correctly on its own (it just stops accumulating once the input
      * runs out, same as real Nix's own decoder) -- this length
      * pre-check was the only place rejecting it. General formula for
@@ -206,7 +206,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
      * multiple of 4. */
     size_t b64_unpadded_len = (n * 8 + 5) / 6;
     if (hash_len != hex_len && hash_len != b32_len && hash_len != b64_len && hash_len != b64_unpadded_len) {
-        fprintf(stderr, "asnix: hash '%s' has wrong length for hash algorithm '%.*s'\n",
+        fprintf(stderr, "ll: hash '%s' has wrong length for hash algorithm '%.*s'\n",
                 output_hash, (int)algo_len, algo);
         exit(1);
     }
@@ -216,19 +216,19 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
             int hi = hex_digit_value(hash_body[2 * i]);
             int lo = hex_digit_value(hash_body[2 * i + 1]);
             if (hi < 0 || lo < 0) {
-                fprintf(stderr, "asnix: hash '%s' is not valid hex\n", output_hash);
+                fprintf(stderr, "ll: hash '%s' is not valid hex\n", output_hash);
                 exit(1);
             }
             out_raw[i] = (uint8_t)((hi << 4) | lo);
         }
     } else if (hash_len == b32_len) {
-        if (asnix_base32_decode(hash_body, hash_len, out_raw, n) != 0) {
-            fprintf(stderr, "asnix: hash '%s' is not valid base32\n", output_hash);
+        if (ll_base32_decode(hash_body, hash_len, out_raw, n) != 0) {
+            fprintf(stderr, "ll: hash '%s' is not valid base32\n", output_hash);
             exit(1);
         }
     } else {
-        if (asnix_base64_decode(hash_body, hash_len, out_raw, 64) != (int64_t)n) {
-            fprintf(stderr, "asnix: hash '%s' is not valid base64\n", output_hash);
+        if (ll_base64_decode(hash_body, hash_len, out_raw, 64) != (int64_t)n) {
+            fprintf(stderr, "ll: hash '%s' is not valid base64\n", output_hash);
             exit(1);
         }
     }
@@ -243,7 +243,7 @@ static void decode_output_hash(const char *output_hash, const char *output_hash_
  * assemble the preimage string, hash THAT (the one crypto-dependent step
  * store_path.c deliberately leaves to its caller), then format the final
  * path. Forgetting this second hash and feeding `inner_digest` straight
- * into asnix_make_store_path_from_digest is exactly the bug this
+ * into ll_make_store_path_from_digest is exactly the bug this
  * function exists to make impossible to repeat at a second call site. */
 static void compute_store_path(const char *type, const uint8_t inner_digest[32], const char *name, char *out,
                                 size_t out_cap) {
@@ -259,16 +259,16 @@ static void compute_store_path(const char *type, const uint8_t inner_digest[32],
     /* `type` is "text:" plus one ":"-joined store path per referenced
      * input derivation/source (M74) -- unbounded by any fixed limit
      * this project enforces elsewhere, unlike `name` (capped at 211
-     * bytes, asnix_check_store_path_name) or the hash (always exactly
+     * bytes, ll_check_store_path_name) or the hash (always exactly
      * 71 bytes). A 512-byte fixed buffer overflowed for real stdenv
      * derivations with many direct inputs (found chasing d.nix past
      * M74's own small verification cases) -- size dynamically instead
      * of guessing a bigger constant. */
-    size_t preimage_cap = strlen(type) + strlen(hashstr) + strlen(ASNIX_STORE_DIR) + strlen(name) + 8;
+    size_t preimage_cap = strlen(type) + strlen(hashstr) + strlen(LL_STORE_DIR) + strlen(name) + 8;
     char *preimage = malloc(preimage_cap);
-    size_t n = asnix_store_path_preimage(type, hashstr, name, preimage, preimage_cap);
+    size_t n = ll_store_path_preimage(type, hashstr, name, preimage, preimage_cap);
     if (n == 0) {
-        fprintf(stderr, "asnix: derivation: preimage too long\n");
+        fprintf(stderr, "ll: derivation: preimage too long\n");
         exit(1);
     }
 
@@ -276,8 +276,8 @@ static void compute_store_path(const char *type, const uint8_t inner_digest[32],
     sha256_or_die(preimage, n, outer_digest);
     free(preimage);
 
-    if (asnix_make_store_path_from_digest(outer_digest, name, out, out_cap) == 0) {
-        fprintf(stderr, "asnix: derivation: computed store path too long\n");
+    if (ll_make_store_path_from_digest(outer_digest, name, out, out_cap) == 0) {
+        fprintf(stderr, "ll: derivation: computed store path too long\n");
         exit(1);
     }
 }
@@ -317,7 +317,7 @@ static void compute_store_path(const char *type, const uint8_t inner_digest[32],
  * path matches a fixed-output derivation's own "flat" formula bit-for-
  * bit), not a second, independently-written copy of it. Body
  * unchanged. */
-void asnix_compute_fixed_output_path(const char *output_hash_mode, const uint8_t raw[64], size_t raw_len,
+void ll_compute_fixed_output_path(const char *output_hash_mode, const uint8_t raw[64], size_t raw_len,
                                        const char *algo, size_t algo_len, const char *name, char *out,
                                        size_t out_cap) {
     int is_recursive = output_hash_mode && strcmp(output_hash_mode, "recursive") == 0;
@@ -361,7 +361,7 @@ void asnix_compute_fixed_output_path(const char *output_hash_mode, const uint8_t
  * call-by-need evaluation guarantees for anything actually referenced)
  * never needs the disk fallback at all. This project only implements
  * the cache half -- correct for exactly that common, guaranteed-by-
- * laziness case, which is the only one `asnix_collect_input_refs`
+ * laziness case, which is the only one `ll_collect_input_refs`
  * below can ever actually produce a reference for in the first place
  * (it can only find a reference to a derivation Value that was already
  * forced, which only happens after that derivation was already
@@ -547,7 +547,7 @@ static void input_ref_drvs_index_rehash(InputRefSet *s, size_t new_cap) {
     s->drvs_index_cap = new_cap;
 }
 
-/* perf: `asnix_collect_input_refs` below calls this once per referenced
+/* perf: `ll_collect_input_refs` below calls this once per referenced
  * derivation output, including once per member of a `DrvDeep` closure
  * expansion (potentially hundreds for a real nixpkgs derivation) -- a
  * linear strcmp-pair scan here is O(refs_so_far) per call, O(n^2) total
@@ -916,7 +916,7 @@ static DrvClosureCacheEntry *drv_closure_cache_find_materialized(const char *drv
 /* Builds and caches THIS derivation's own closure entry (`drv_path`'s
  * complete transitive membership), from its DIRECT refs (`refs`, already
  * fully collected -- including any already-expanded `DrvDeep` members, see
- * asnix_collect_input_refs's own PTR-string case below, which folds a
+ * ll_collect_input_refs's own PTR-string case below, which folds a
  * nested `DrvDeep` reference's whole closure into `refs` too, so this
  * function never needs to recurse through context kinds itself, only
  * through the direct-input-drv cache lookups below). Called once, right
@@ -951,7 +951,7 @@ static void cache_own_drv_closure(const char *drv_path, const char *const *outpu
  * `printValueAsJSON` in full (a `__structuredAttrs`-eligible attribute's
  * raw value) -- FALSE for every ordinary (non-structured-attrs)
  * attribute, which real Nix instead feeds through `coerceToString`
- * (`asnix_coerce_to_string_for_derivation`'s own ATTRS case: `__toString`
+ * (`ll_coerce_to_string_for_derivation`'s own ATTRS case: `__toString`
  * then `outPath`, nothing else). Blindly recursing into every field of a
  * non-derivation ATTRS value regardless of this distinction (this
  * function's pre-M83 behavior) over-collects: `lib.cleanSourceWith`'s
@@ -973,42 +973,42 @@ static void cache_own_drv_closure(const char *drv_path, const char *const *outpu
  * `furo-web-npm-deps`/`npm-config-hook` -> `prefetch-npm-deps`, whose
  * `rustPlatform.buildRustPackage` source (`lib.cleanSourceWith { src =
  * ./.; ...}`) hits exactly this shape. */
-static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
-    v = asnix_force_for_print(v);
-    int tag = asnix_tag_of(v);
-    if (tag == ASNIX_TAG_ATTRS) {
+static void ll_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
+    v = ll_force_for_print(v);
+    int tag = ll_tag_of(v);
+    if (tag == LL_TAG_ATTRS) {
         /* perf: the overwhelmingly common case here IS a genuine
          * derivation (every derivation value reachable from a real
          * `outPath`/`drvPath` string coercion has these three fields,
          * see the invariant comment below) -- probe for all three
-         * directly via asnix_bshared_attrs_probe (a bounded multi-leaf
+         * directly via ll_bshared_attrs_probe (a bounded multi-leaf
          * walk, heap.h's UnionHdr, no allocation) instead of fully
          * resolving `v` first. This was exactly the call site M88's own
          * design doc flagged as highest-risk: reached directly from
-         * asnix_prim_derivation on a real mkDerivation attrset, the
+         * ll_prim_derivation on a real mkDerivation attrset, the
          * shape heavy `//`-chaining produces, previously paying a full
          * materialize here just to look up three known keys. Falls
          * through to the full resolve()-based scan below only when the
          * probe can't find all three fields -- the rarer case (not a
          * derivation at all), which genuinely needs to enumerate every
          * entry for the json_mode/__toString/outPath fallbacks. */
-        uint32_t sym_type_fast = asnix_intern("type", 4);
-        uint32_t sym_drvpath_fast = asnix_intern("drvPath", 7);
-        uint32_t sym_outname_fast = asnix_intern("outputName", 10);
+        uint32_t sym_type_fast = ll_intern("type", 4);
+        uint32_t sym_drvpath_fast = ll_intern("drvPath", 7);
+        uint32_t sym_outname_fast = ll_intern("outputName", 10);
         Value type_probe, drvpath_probe, outname_probe;
-        if (asnix_bshared_attrs_probe(v, sym_type_fast, &type_probe) &&
-            asnix_bshared_attrs_probe(v, sym_drvpath_fast, &drvpath_probe) &&
-            asnix_bshared_attrs_probe(v, sym_outname_fast, &outname_probe)) {
-            Value type_val = asnix_force_for_print(type_probe);
-            if (asnix_tag_of(type_val) != ASNIX_TAG_PTR) return;
+        if (ll_bshared_attrs_probe(v, sym_type_fast, &type_probe) &&
+            ll_bshared_attrs_probe(v, sym_drvpath_fast, &drvpath_probe) &&
+            ll_bshared_attrs_probe(v, sym_outname_fast, &outname_probe)) {
+            Value type_val = ll_force_for_print(type_probe);
+            if (ll_tag_of(type_val) != LL_TAG_PTR) return;
             int64_t tlen;
-            const char *tbytes = asnix_ptr_bytes(type_val, &tlen);
+            const char *tbytes = ll_ptr_bytes(type_val, &tlen);
             if (tlen != 10 || memcmp(tbytes, "derivation", 10) != 0) return;
-            Value drvpath_val = asnix_force_for_print(drvpath_probe);
-            Value outname_val = asnix_force_for_print(outname_probe);
+            Value drvpath_val = ll_force_for_print(drvpath_probe);
+            Value outname_val = ll_force_for_print(outname_probe);
             int64_t dlen, olen;
-            const char *dbytes = asnix_ptr_bytes(drvpath_val, &dlen);
-            const char *obytes = asnix_ptr_bytes(outname_val, &olen);
+            const char *dbytes = ll_ptr_bytes(drvpath_val, &dlen);
+            const char *obytes = ll_ptr_bytes(outname_val, &olen);
             char *dpath = dup_cstr(dbytes, (size_t)dlen);
             char *oname = dup_cstr(obytes, (size_t)olen);
             input_ref_add_built(out, dpath, oname);
@@ -1020,22 +1020,22 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
          * Attrs -- resolve to the flat form FIRST so every raw `base`/
          * `count`/`entry` read below (and the `idx_*`/raw re-index pattern
          * right after) operates on one consistent flat array. */
-        v = asnix_bshared_attrs_resolve(v);
+        v = ll_bshared_attrs_resolve(v);
         const char *base = (const char *)(v.raw & ~0x7ULL);
-        int64_t count = *(const int64_t *)(base + ASNIX_ATTRS_OFF_COUNT);
-        uint32_t sym_type = asnix_intern("type", 4);
-        uint32_t sym_drvpath = asnix_intern("drvPath", 7);
-        uint32_t sym_outname = asnix_intern("outputName", 10);
+        int64_t count = *(const int64_t *)(base + LL_ATTRS_OFF_COUNT);
+        uint32_t sym_type = ll_intern("type", 4);
+        uint32_t sym_drvpath = ll_intern("drvPath", 7);
+        uint32_t sym_outname = ll_intern("outputName", 10);
         int64_t idx_type = -1, idx_drvpath = -1, idx_outname = -1;
         for (int64_t i = 0; i < count; i++) {
-            const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
-            uint32_t sym = *(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM);
+            const char *entry = base + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
+            uint32_t sym = *(const uint32_t *)(entry + LL_ATTR_OFF_SYM);
             if (sym == sym_type) idx_type = i;
             else if (sym == sym_drvpath) idx_drvpath = i;
             else if (sym == sym_outname) idx_outname = i;
         }
         /* Every derivation Value reachable from user code has these
-         * three fields (M58's wrapper, ASNIX_DERIVATION_NIX_SOURCE) --
+         * three fields (M58's wrapper, LL_DERIVATION_NIX_SOURCE) --
          * an attrset without all three just isn't a derivation output
          * ITSELF, but (M76) may still have one buried inside its own
          * attribute values (e.g. a `__structuredAttrs`-mode attribute,
@@ -1046,51 +1046,51 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
          * that case (`json_mode`), matching real Nix's own JSON
          * serializer (`printValueAsJSON`), which does the same walk to
          * collect context from a structured-attrs blob. Outside that
-         * (M83, `!json_mode`): mirror `asnix_coerce_to_string_for_
+         * (M83, `!json_mode`): mirror `ll_coerce_to_string_for_
          * derivation`'s own ATTRS handling exactly instead -- `__toString`
          * then `outPath`, nothing else; see this function's own header
          * comment above for why. */
         if (idx_type < 0 || idx_drvpath < 0 || idx_outname < 0) {
             if (json_mode) {
                 for (int64_t i = 0; i < count; i++) {
-                    const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
-                    asnix_collect_input_refs(*(const Value *)(entry + ASNIX_ATTR_OFF_VALUE), out, 1);
+                    const char *entry = base + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
+                    ll_collect_input_refs(*(const Value *)(entry + LL_ATTR_OFF_VALUE), out, 1);
                 }
                 return;
             }
-            uint32_t sym_tostring = asnix_intern("__toString", 10);
-            int64_t idx_ts = asnix_bshared_attrs_find(v, sym_tostring);
+            uint32_t sym_tostring = ll_intern("__toString", 10);
+            int64_t idx_ts = ll_bshared_attrs_find(v, sym_tostring);
             if (idx_ts >= 0) {
-                Value fn = asnix_force_for_print(asnix_bshared_attrs_value(v, idx_ts));
-                Value result = asnix_apply(fn, &v, 1);
-                asnix_collect_input_refs(asnix_force_for_print(result), out, 0);
+                Value fn = ll_force_for_print(ll_bshared_attrs_value(v, idx_ts));
+                Value result = ll_apply(fn, &v, 1);
+                ll_collect_input_refs(ll_force_for_print(result), out, 0);
                 return;
             }
-            uint32_t sym_outpath = asnix_intern("outPath", 7);
-            int64_t idx_op = asnix_bshared_attrs_find(v, sym_outpath);
+            uint32_t sym_outpath = ll_intern("outPath", 7);
+            int64_t idx_op = ll_bshared_attrs_find(v, sym_outpath);
             if (idx_op >= 0) {
-                asnix_collect_input_refs(asnix_bshared_attrs_value(v, idx_op), out, 0);
+                ll_collect_input_refs(ll_bshared_attrs_value(v, idx_op), out, 0);
                 return;
             }
-            /* Neither -- `asnix_coerce_to_string_for_derivation` would
-             * fall through to `asnix_coerce_to_string`, which rejects a
+            /* Neither -- `ll_coerce_to_string_for_derivation` would
+             * fall through to `ll_coerce_to_string`, which rejects a
              * plain ATTRS value outright (fatal error): nothing real
              * coercion could ever reach, so nothing to collect either. */
             return;
         }
-        Value type_val = asnix_force_for_print(
-            *(const Value *)(base + ASNIX_ATTRS_OFF_ENTRIES + idx_type * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_VALUE));
-        if (asnix_tag_of(type_val) != ASNIX_TAG_PTR) return;
+        Value type_val = ll_force_for_print(
+            *(const Value *)(base + LL_ATTRS_OFF_ENTRIES + idx_type * LL_ATTR_SIZE + LL_ATTR_OFF_VALUE));
+        if (ll_tag_of(type_val) != LL_TAG_PTR) return;
         int64_t tlen;
-        const char *tbytes = asnix_ptr_bytes(type_val, &tlen);
+        const char *tbytes = ll_ptr_bytes(type_val, &tlen);
         if (tlen != 10 || memcmp(tbytes, "derivation", 10) != 0) return;
-        Value drvpath_val = asnix_force_for_print(
-            *(const Value *)(base + ASNIX_ATTRS_OFF_ENTRIES + idx_drvpath * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_VALUE));
-        Value outname_val = asnix_force_for_print(
-            *(const Value *)(base + ASNIX_ATTRS_OFF_ENTRIES + idx_outname * ASNIX_ATTR_SIZE + ASNIX_ATTR_OFF_VALUE));
+        Value drvpath_val = ll_force_for_print(
+            *(const Value *)(base + LL_ATTRS_OFF_ENTRIES + idx_drvpath * LL_ATTR_SIZE + LL_ATTR_OFF_VALUE));
+        Value outname_val = ll_force_for_print(
+            *(const Value *)(base + LL_ATTRS_OFF_ENTRIES + idx_outname * LL_ATTR_SIZE + LL_ATTR_OFF_VALUE));
         int64_t dlen, olen;
-        const char *dbytes = asnix_ptr_bytes(drvpath_val, &dlen);
-        const char *obytes = asnix_ptr_bytes(outname_val, &olen);
+        const char *dbytes = ll_ptr_bytes(drvpath_val, &dlen);
+        const char *obytes = ll_ptr_bytes(outname_val, &olen);
         char *dpath = dup_cstr(dbytes, (size_t)dlen);
         char *oname = dup_cstr(obytes, (size_t)olen);
         input_ref_add_built(out, dpath, oname);
@@ -1098,14 +1098,14 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
         free(oname);
         return;
     }
-    if (tag == ASNIX_TAG_LIST) {
+    if (tag == LL_TAG_LIST) {
         const char *base = (const char *)(v.raw & ~0x7ULL);
-        int64_t count = *(const int64_t *)(base + ASNIX_LIST_OFF_COUNT);
-        const Value *elems = (const Value *)(base + ASNIX_LIST_OFF_ELEMS);
-        for (int64_t i = 0; i < count; i++) asnix_collect_input_refs(elems[i], out, json_mode);
+        int64_t count = *(const int64_t *)(base + LL_LIST_OFF_COUNT);
+        const Value *elems = (const Value *)(base + LL_LIST_OFF_ELEMS);
+        for (int64_t i = 0; i < count; i++) ll_collect_input_refs(elems[i], out, json_mode);
         return;
     }
-    /* M76: a plain string (ASNIX_TAG_PTR, neither Path nor Float) may
+    /* M76: a plain string (LL_TAG_PTR, neither Path nor Float) may
      * already carry attached string context -- e.g. the result of an
      * earlier `"${pkg}/bin/x"` interpolation, evaluated long before
      * THIS `derivation {...}` call ever runs, with no structure left
@@ -1114,8 +1114,8 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
      * (nixpkgs) traces back to a string interpolation of a derivation
      * reference, which the structural checks above alone can never
      * see. See string_context.h's own header comment. */
-    if (tag == ASNIX_TAG_PTR && !asnix_value_is_path(v) && !asnix_value_is_float(v)) {
-        const AsnixStringContext *ctx = asnix_string_context_of(v);
+    if (tag == LL_TAG_PTR && !ll_value_is_path(v) && !ll_value_is_float(v)) {
+        const LlStringContext *ctx = ll_string_context_of(v);
         if (!ctx) return;
         for (size_t i = 0; i < ctx->ndrvs; i++) input_ref_add_built(out, ctx->drvs[i].drv_path, ctx->drvs[i].output_name);
         for (size_t i = 0; i < ctx->nsrcs; i++) input_ref_add_src(out, ctx->srcs[i]);
@@ -1156,9 +1156,9 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
         }
         return;
     }
-    if (tag == ASNIX_TAG_PTR && asnix_value_is_path(v)) {
+    if (tag == LL_TAG_PTR && ll_value_is_path(v)) {
         int64_t len;
-        const char *bytes = asnix_ptr_bytes(v, &len);
+        const char *bytes = ll_ptr_bytes(v, &len);
         char *path = dup_cstr(bytes, (size_t)len);
         if (len > 11 && memcmp(bytes, "/nix/store/", 11) == 0) {
             input_ref_add_src(out, path);
@@ -1166,15 +1166,15 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
             /* M75: a Path NOT already under `/nix/store/` still becomes
              * an `inputSrcs` entry -- just the COPIED store path, not
              * the literal filesystem path -- matching
-             * asnix_coerce_to_string_for_derivation's own handling of
+             * ll_coerce_to_string_for_derivation's own handling of
              * the SAME attribute value (value_util.c), which this
              * collector must agree with exactly: the `.drv`'s `env`
              * entry and its `inputSrcs` entry have to name the same
-             * path. asnix_copy_path_to_store's own cache (nar.c) means
+             * path. ll_copy_path_to_store's own cache (nar.c) means
              * computing it here and again during coercion doesn't
              * re-walk/re-hash the file twice. */
             char store_path[300];
-            asnix_copy_path_to_store(path, store_path, sizeof(store_path));
+            ll_copy_path_to_store(path, store_path, sizeof(store_path));
             input_ref_add_src(out, store_path);
         }
         free(path);
@@ -1198,28 +1198,28 @@ static void asnix_collect_input_refs(Value v, InputRefSet *out, int json_mode) {
  * BYTE-IDENTICAL `.drv` files against real `nix-instantiate`, which is
  * only possible if the stored `__json` env value is the RE-DUMPED
  * (sorted keys, shortest-round-trip numbers, last-wins duplicates) form,
- * not the original bytes. Reusing `asnix_json_parse_structured_attrs`
- * (parse) + `asnix_toJSON_cstr` (re-dump, same encoder `__structuredAttrs
+ * not the original bytes. Reusing `ll_json_parse_structured_attrs`
+ * (parse) + `ll_toJSON_cstr` (re-dump, same encoder `__structuredAttrs
  * = true;` mode already uses below) gets exactly that for free. Also
  * doubles as this attribute's OWN validation: a non-JSON `__json` value
  * must fail the whole evaluation (eval-fail-json-attr-not-json.nix),
- * which falls out of `asnix_json_parse_structured_attrs`'s ordinary
+ * which falls out of `ll_json_parse_structured_attrs`'s ordinary
  * fatal-on-malformed-input behavior with no extra code here. */
 static char *normalize_json_attr(const char *raw_json) {
-    Value parsed = asnix_json_parse_structured_attrs(raw_json, (int64_t)strlen(raw_json));
-    char *normalized_tmp = asnix_toJSON_cstr(parsed);
-    char *normalized = asnix_arena_alloc(strlen(normalized_tmp) + 1);
+    Value parsed = ll_json_parse_structured_attrs(raw_json, (int64_t)strlen(raw_json));
+    char *normalized_tmp = ll_toJSON_cstr(parsed);
+    char *normalized = ll_arena_alloc(strlen(normalized_tmp) + 1);
     memcpy(normalized, normalized_tmp, strlen(normalized_tmp) + 1);
     free(normalized_tmp);
     return normalized;
 }
 
-/* perf (M143): `asnix_prim_derivation`'s own `ASNIX_DRV_MAX_INPUT_DRVS`
+/* perf (M143): `ll_prim_derivation`'s own `LL_DRV_MAX_INPUT_DRVS`
  * (1024)-sized scratch arrays below (group_paths/group_outs/group_nouts/
  * group_order/masked_input_drvs/real_input_drvs/masked_hash_hex, plus
  * drv_refs) used to be malloc'd fresh and free'd again at the end of
  * EVERY single call to this function -- one derivation, one round-trip.
- * `group_outs` alone is `1024 * ASNIX_DRV_MAX_OUTPUTS * sizeof(char *)` =
+ * `group_outs` alone is `1024 * LL_DRV_MAX_OUTPUTS * sizeof(char *)` =
  * 131072 bytes, exactly glibc's default `mmap_threshold` (128 KiB), so
  * that one malloc/free pair went through a real `mmap`/`munmap` syscall
  * round-trip on every derivation forced -- and a full nixpkgs eval
@@ -1232,11 +1232,11 @@ static char *normalize_json_attr(const char *raw_json) {
  * churn spread across the whole C tree).
  *
  * This function is genuinely recursive -- forcing one derivation's own
- * attribute values (the per-attribute loop above, `asnix_force_for_print`)
+ * attribute values (the per-attribute loop above, `ll_force_for_print`)
  * can force a nested `derivation {...}` thunk several levels deep in
  * nixpkgs's own dependency graph, which calls this very function again
  * before the outer call ever reaches this scratch-buffer block (see the
- * ASNIX_DRV_MAX_INPUT_DRVS comment below for the historical stack-overflow
+ * LL_DRV_MAX_INPUT_DRVS comment below for the historical stack-overflow
  * this already caused once). So a single global buffer isn't safe. But
  * the recursion is a plain, synchronous call stack -- a call at depth D
  * fully returns before another call at the SAME depth D ever starts --
@@ -1249,7 +1249,7 @@ static char *normalize_json_attr(const char *raw_json) {
  * of times total instead of once per derivation. */
 typedef struct {
     const char **group_paths;
-    const char *(*group_outs)[ASNIX_DRV_MAX_OUTPUTS];
+    const char *(*group_outs)[LL_DRV_MAX_OUTPUTS];
     size_t *group_nouts;
     size_t *group_order;
     AtermInputDrv *masked_input_drvs;
@@ -1274,13 +1274,13 @@ static DrvScratchFrame *drv_scratch_acquire(void) {
     }
     DrvScratchFrame *f = &g_drv_scratch_frames[d];
     if (!f->group_paths) {
-        f->group_paths = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(const char *));
-        f->group_outs = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(*f->group_outs));
-        f->group_nouts = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(size_t));
-        f->group_order = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(size_t));
-        f->masked_input_drvs = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(AtermInputDrv));
-        f->real_input_drvs = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(AtermInputDrv));
-        f->masked_hash_hex = malloc(ASNIX_DRV_MAX_INPUT_DRVS * sizeof(*f->masked_hash_hex));
+        f->group_paths = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(const char *));
+        f->group_outs = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(*f->group_outs));
+        f->group_nouts = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(size_t));
+        f->group_order = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(size_t));
+        f->masked_input_drvs = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(AtermInputDrv));
+        f->real_input_drvs = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(AtermInputDrv));
+        f->masked_hash_hex = malloc(LL_DRV_MAX_INPUT_DRVS * sizeof(*f->masked_hash_hex));
     }
     return f;
 }
@@ -1288,7 +1288,7 @@ static DrvScratchFrame *drv_scratch_acquire(void) {
 static void drv_scratch_release(void) { g_drv_scratch_depth--; }
 
 /* `drv_refs`'s own size (`ngroups + refs.nsrcs`) varies per call since
- * `refs.nsrcs` isn't bounded by ASNIX_DRV_MAX_INPUT_DRVS -- grown (never
+ * `refs.nsrcs` isn't bounded by LL_DRV_MAX_INPUT_DRVS -- grown (never
  * shrunk) the same way, reused across calls at this depth. */
 static const char **drv_scratch_refs(DrvScratchFrame *f, size_t need) {
     if (need > f->drv_refs_cap) {
@@ -1301,11 +1301,11 @@ static const char **drv_scratch_refs(DrvScratchFrame *f, size_t need) {
     return f->drv_refs;
 }
 
-Value asnix_prim_derivation(const Value *args, int64_t argc) {
+Value ll_prim_derivation(const Value *args, int64_t argc) {
     (void)argc;
     Value attrs_val = args[0];
-    if (asnix_tag_of(attrs_val) != ASNIX_TAG_ATTRS) {
-        fprintf(stderr, "asnix: derivation: argument must be an attribute set\n");
+    if (ll_tag_of(attrs_val) != LL_TAG_ATTRS) {
+        fprintf(stderr, "ll: derivation: argument must be an attribute set\n");
         exit(1);
     }
     /* M88: this is THE hash-parity-critical call site this milestone's
@@ -1314,9 +1314,9 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * defaults merged with user overrides) produces in real nixpkgs.
      * Resolve to the flat form once, up front, before any of the three
      * raw scans below ever reads `base`/`count`. */
-    attrs_val = asnix_bshared_attrs_resolve(attrs_val);
+    attrs_val = ll_bshared_attrs_resolve(attrs_val);
     const char *base = (const char *)(attrs_val.raw & ~0x7ULL);
-    int64_t count = *(const int64_t *)(base + ASNIX_ATTRS_OFF_COUNT);
+    int64_t count = *(const int64_t *)(base + LL_ATTRS_OFF_COUNT);
 
     const char *name = NULL;
     const char *system = NULL;
@@ -1324,11 +1324,11 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     const char *output_hash = NULL;
     const char *output_hash_algo = NULL;
     const char *output_hash_mode = NULL;
-    const char *arg_strs[ASNIX_DRV_MAX_ARGS];
+    const char *arg_strs[LL_DRV_MAX_ARGS];
     size_t nargs = 0;
-    AtermEnvVar env[ASNIX_DRV_MAX_ENV];
+    AtermEnvVar env[LL_DRV_MAX_ENV];
     size_t nenv = 0;
-    const char *output_names[ASNIX_DRV_MAX_OUTPUTS];
+    const char *output_names[LL_DRV_MAX_OUTPUTS];
     size_t noutputs = 0;
     int saw_outputs_attr = 0;
 
@@ -1343,17 +1343,17 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * attributes whose handling it changes. */
     int structured_attrs = 0;
     {
-        uint32_t sa_sym = asnix_intern("__structuredAttrs", 17);
+        uint32_t sa_sym = ll_intern("__structuredAttrs", 17);
         for (int64_t i = 0; i < count; i++) {
-            const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
-            uint32_t sym = *(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM);
+            const char *entry = base + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
+            uint32_t sym = *(const uint32_t *)(entry + LL_ATTR_OFF_SYM);
             if (sym != sa_sym) continue;
-            Value raw_val = *(const Value *)(entry + ASNIX_ATTR_OFF_VALUE);
-            Value val = asnix_force_for_print(raw_val);
-            if (asnix_tag_of(val) == ASNIX_TAG_IMM && asnix_imm_subtag(val) == ASNIX_IMM_TRUE) {
+            Value raw_val = *(const Value *)(entry + LL_ATTR_OFF_VALUE);
+            Value val = ll_force_for_print(raw_val);
+            if (ll_tag_of(val) == LL_TAG_IMM && ll_imm_subtag(val) == LL_IMM_TRUE) {
                 structured_attrs = 1;
-            } else if (!(asnix_tag_of(val) == ASNIX_TAG_IMM && asnix_imm_subtag(val) == ASNIX_IMM_FALSE)) {
-                fprintf(stderr, "asnix: derivation: '__structuredAttrs' must be a boolean\n");
+            } else if (!(ll_tag_of(val) == LL_TAG_IMM && ll_imm_subtag(val) == LL_IMM_FALSE)) {
+                fprintf(stderr, "ll: derivation: '__structuredAttrs' must be a boolean\n");
                 exit(1);
             }
             break;
@@ -1375,17 +1375,17 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * both verbatim. */
     int ignore_nulls = 0;
     {
-        uint32_t in_sym = asnix_intern("__ignoreNulls", 13);
+        uint32_t in_sym = ll_intern("__ignoreNulls", 13);
         for (int64_t i = 0; i < count; i++) {
-            const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
-            uint32_t sym = *(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM);
+            const char *entry = base + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
+            uint32_t sym = *(const uint32_t *)(entry + LL_ATTR_OFF_SYM);
             if (sym != in_sym) continue;
-            Value raw_val = *(const Value *)(entry + ASNIX_ATTR_OFF_VALUE);
-            Value val = asnix_force_for_print(raw_val);
-            if (asnix_tag_of(val) == ASNIX_TAG_IMM && asnix_imm_subtag(val) == ASNIX_IMM_TRUE) {
+            Value raw_val = *(const Value *)(entry + LL_ATTR_OFF_VALUE);
+            Value val = ll_force_for_print(raw_val);
+            if (ll_tag_of(val) == LL_TAG_IMM && ll_imm_subtag(val) == LL_IMM_TRUE) {
                 ignore_nulls = 1;
-            } else if (!(asnix_tag_of(val) == ASNIX_TAG_IMM && asnix_imm_subtag(val) == ASNIX_IMM_FALSE)) {
-                fprintf(stderr, "asnix: derivation: '__ignoreNulls' must be a boolean\n");
+            } else if (!(ll_tag_of(val) == LL_TAG_IMM && ll_imm_subtag(val) == LL_IMM_FALSE)) {
+                fprintf(stderr, "ll: derivation: '__ignoreNulls' must be a boolean\n");
                 exit(1);
             }
             break;
@@ -1397,12 +1397,12 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * becoming its own stringified env var -- this is the whole point:
      * an attribute whose value isn't coercible to a plain string (e.g.
      * `env = { foo = "bar"; }`) must flow into the JSON blob rather than
-     * being rejected by `asnix_coerce_to_string`. Collected here as raw
+     * being rejected by `ll_coerce_to_string`. Collected here as raw
      * (sym, forced-value) pairs and turned into one JSON string with
-     * `asnix_toJSON_cstr` (the exact `builtins.toJSON` encoder, reused
+     * `ll_toJSON_cstr` (the exact `builtins.toJSON` encoder, reused
      * rather than writing a second JSON serializer) after the loop. */
-    uint32_t json_syms[ASNIX_DRV_MAX_ENV];
-    Value json_vals[ASNIX_DRV_MAX_ENV];
+    uint32_t json_syms[LL_DRV_MAX_ENV];
+    Value json_vals[LL_DRV_MAX_ENV];
     size_t njson = 0;
 
     /* M74: collected from EVERY attribute's value below, unconditionally
@@ -1414,41 +1414,41 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     input_ref_set_init(&refs);
 
     for (int64_t i = 0; i < count; i++) {
-        const char *entry = base + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
-        uint32_t sym = *(const uint32_t *)(entry + ASNIX_ATTR_OFF_SYM);
-        Value raw_val = *(const Value *)(entry + ASNIX_ATTR_OFF_VALUE);
+        const char *entry = base + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
+        uint32_t sym = *(const uint32_t *)(entry + LL_ATTR_OFF_SYM);
+        Value raw_val = *(const Value *)(entry + LL_ATTR_OFF_VALUE);
         /* attrset binding values are lazy (M6) -- force each one. Safe to
          * call here even though we're already inside an active OP_CALL:
-         * asnix_force_for_print brings its own self-contained dispatch
+         * ll_force_for_print brings its own self-contained dispatch
          * context and properly saves/restores every register it touches
          * (see src/asm/force.S), so it nests like any well-behaved call. */
-        Value val = asnix_force_for_print(raw_val);
+        Value val = ll_force_for_print(raw_val);
 
         size_t keylen;
-        const char *key = asnix_sym_name(sym, &keylen);
+        const char *key = ll_sym_name(sym, &keylen);
 
         /* M76: `__ignoreNulls` itself is always excluded (see this
          * function's own pre-scan comment above); every OTHER
          * null-valued attribute is excluded too, but only when the
          * flag is actually set -- both unconditional-on-the-key /
          * conditional-on-every-other-key splits matching real Nix
-         * exactly. Must come before `asnix_collect_input_refs` too: a
+         * exactly. Must come before `ll_collect_input_refs` too: a
          * skipped attribute contributes nothing to `inputDrvs`/
          * `inputSrcs` either, matching real Nix's own early `continue`
          * (which skips its context-collecting `coerceToString` calls
          * entirely for a dropped attribute). */
         if (keylen == 13 && memcmp(key, "__ignoreNulls", 13) == 0) continue;
-        if (ignore_nulls && asnix_tag_of(val) == ASNIX_TAG_IMM && asnix_imm_subtag(val) == ASNIX_IMM_NULL) continue;
+        if (ignore_nulls && ll_tag_of(val) == LL_TAG_IMM && ll_imm_subtag(val) == LL_IMM_NULL) continue;
 
         /* M83: whether THIS attribute's value is JSON-serialized in full
-         * (`json_mode`, for `asnix_collect_input_refs` below) -- computed
+         * (`json_mode`, for `ll_collect_input_refs` below) -- computed
          * early because the call below has to precede the per-key
          * branching that normally determines this (`is_special`'s own
          * definition, further down, is identical -- duplicated here
          * rather than hoisted because every other reader of `is_special`
          * still wants it computed right next to the code it actually
          * gates). Mirrors exactly which attributes end up in `json_vals`
-         * (raw, unwalked by `asnix_coerce_to_string_for_derivation`)
+         * (raw, unwalked by `ll_coerce_to_string_for_derivation`)
          * versus the generic `else` (plain coercion) below: `args` is
          * always coerced per-element regardless of `__structuredAttrs`
          * (the `continue` right below never reaches the `structured_attrs`
@@ -1462,7 +1462,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
                                (keylen == 14 && memcmp(key, "outputHashMode", 14) == 0);
         int is_args_key = (keylen == 4 && memcmp(key, "args", 4) == 0);
         int json_mode_for_attr = structured_attrs && !is_special_early && !is_args_key;
-        asnix_collect_input_refs(val, &refs, json_mode_for_attr);
+        ll_collect_input_refs(val, &refs, json_mode_for_attr);
 
         /* When the mode is actually active, `__structuredAttrs` itself is
          * never pushed into `env` OR the JSON blob -- matches real Nix's
@@ -1478,26 +1478,26 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         if (keylen == 17 && memcmp(key, "__structuredAttrs", 17) == 0 && structured_attrs) continue;
 
         if (keylen == 4 && memcmp(key, "args", 4) == 0) {
-            if (asnix_tag_of(val) != ASNIX_TAG_LIST) {
-                fprintf(stderr, "asnix: derivation: 'args' must be a list\n");
+            if (ll_tag_of(val) != LL_TAG_LIST) {
+                fprintf(stderr, "ll: derivation: 'args' must be a list\n");
                 exit(1);
             }
             const char *lbase = (const char *)(val.raw & ~0x7ULL);
-            int64_t lcount = *(const int64_t *)(lbase + ASNIX_LIST_OFF_COUNT);
-            const Value *elems = (const Value *)(lbase + ASNIX_LIST_OFF_ELEMS);
+            int64_t lcount = *(const int64_t *)(lbase + LL_LIST_OFF_COUNT);
+            const Value *elems = (const Value *)(lbase + LL_LIST_OFF_ELEMS);
             for (int64_t j = 0; j < lcount; j++) {
-                if (nargs >= ASNIX_DRV_MAX_ARGS) {
-                    fprintf(stderr, "asnix: derivation: too many args (max %d)\n", ASNIX_DRV_MAX_ARGS);
+                if (nargs >= LL_DRV_MAX_ARGS) {
+                    fprintf(stderr, "ll: derivation: too many args (max %d)\n", LL_DRV_MAX_ARGS);
                     exit(1);
                 }
-                Value ev = asnix_force_for_print(elems[j]);
-                Value sv = asnix_coerce_to_string_for_derivation(ev);
-                arg_strs[nargs++] = asnix_string_value_to_cstr(sv);
+                Value ev = ll_force_for_print(elems[j]);
+                Value sv = ll_coerce_to_string_for_derivation(ev);
+                arg_strs[nargs++] = ll_string_value_to_cstr(sv);
             }
             continue;
         }
 
-        /* `outputs` (default ["out"], see ASNIX_DERIVATION_NIX_SOURCE's
+        /* `outputs` (default ["out"], see LL_DERIVATION_NIX_SOURCE's
          * own `outputs ? [ "out" ]` default) is special but, unlike
          * `args`, does NOT `continue`: real Nix's derivationStrict both
          * parses it into the set of output names below AND still coerces
@@ -1507,37 +1507,37 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
          * by the generic build-time setup machinery) -- that part falls
          * through to the generic handling right below unchanged. */
         if (keylen == 7 && memcmp(key, "outputs", 7) == 0) {
-            if (asnix_tag_of(val) != ASNIX_TAG_LIST) {
-                fprintf(stderr, "asnix: derivation: 'outputs' must be a list of strings\n");
+            if (ll_tag_of(val) != LL_TAG_LIST) {
+                fprintf(stderr, "ll: derivation: 'outputs' must be a list of strings\n");
                 exit(1);
             }
             const char *lbase = (const char *)(val.raw & ~0x7ULL);
-            int64_t lcount = *(const int64_t *)(lbase + ASNIX_LIST_OFF_COUNT);
-            const Value *elems = (const Value *)(lbase + ASNIX_LIST_OFF_ELEMS);
+            int64_t lcount = *(const int64_t *)(lbase + LL_LIST_OFF_COUNT);
+            const Value *elems = (const Value *)(lbase + LL_LIST_OFF_ELEMS);
             saw_outputs_attr = 1;
             noutputs = 0;
             for (int64_t j = 0; j < lcount; j++) {
-                Value ev = asnix_force_for_print(elems[j]);
-                Value osv = asnix_coerce_to_string_for_derivation(ev);
-                const char *oname = asnix_string_value_to_cstr(osv);
+                Value ev = ll_force_for_print(elems[j]);
+                Value osv = ll_coerce_to_string_for_derivation(ev);
+                const char *oname = ll_string_value_to_cstr(osv);
                 if (strcmp(oname, "drvPath") == 0) {
-                    fprintf(stderr, "asnix: derivation: invalid derivation output name 'drvPath'\n");
+                    fprintf(stderr, "ll: derivation: invalid derivation output name 'drvPath'\n");
                     exit(1);
                 }
                 for (size_t k = 0; k < noutputs; k++) {
                     if (strcmp(output_names[k], oname) == 0) {
-                        fprintf(stderr, "asnix: derivation: duplicate derivation output '%s'\n", oname);
+                        fprintf(stderr, "ll: derivation: duplicate derivation output '%s'\n", oname);
                         exit(1);
                     }
                 }
-                if (noutputs >= ASNIX_DRV_MAX_OUTPUTS) {
-                    fprintf(stderr, "asnix: derivation: too many outputs (max %d)\n", ASNIX_DRV_MAX_OUTPUTS);
+                if (noutputs >= LL_DRV_MAX_OUTPUTS) {
+                    fprintf(stderr, "ll: derivation: too many outputs (max %d)\n", LL_DRV_MAX_OUTPUTS);
                     exit(1);
                 }
                 output_names[noutputs++] = oname;
             }
             if (noutputs == 0) {
-                fprintf(stderr, "asnix: derivation: derivation cannot have an empty set of outputs\n");
+                fprintf(stderr, "ll: derivation: derivation cannot have an empty set of outputs\n");
                 exit(1);
             }
         }
@@ -1547,15 +1547,15 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
          * below) gets collected for the single `__json` env var -- the
          * raw, already-forced Value, not a string coercion, which is
          * exactly what lets a non-coercible value like a nested attrset
-         * flow through instead of hitting `asnix_coerce_to_string`'s
+         * flow through instead of hitting `ll_coerce_to_string`'s
          * fatal path. Matches real Nix's own unconditional
          * `jsonObject->structuredAttrs.emplace(key, printValueAsJSON(...))`
          * inside its own per-attribute default case (primops.cc) -- every
          * key gets JSON-serialized, `args` being the only generic-path
          * key excluded (handled above, via `continue`, in both modes). */
         if (structured_attrs) {
-            if (njson >= ASNIX_DRV_MAX_ENV) {
-                fprintf(stderr, "asnix: derivation: too many attributes (max %d)\n", ASNIX_DRV_MAX_ENV);
+            if (njson >= LL_DRV_MAX_ENV) {
+                fprintf(stderr, "ll: derivation: too many attributes (max %d)\n", LL_DRV_MAX_ENV);
                 exit(1);
             }
             json_syms[njson] = sym;
@@ -1581,8 +1581,8 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
                          (keylen == 14 && memcmp(key, "outputHashAlgo", 14) == 0) ||
                          (keylen == 14 && memcmp(key, "outputHashMode", 14) == 0);
         if (!structured_attrs || is_special) {
-            Value sv = asnix_coerce_to_string_for_derivation(val);
-            char *valcstr = asnix_string_value_to_cstr(sv);
+            Value sv = ll_coerce_to_string_for_derivation(val);
+            char *valcstr = ll_string_value_to_cstr(sv);
 
             if (keylen == 4 && memcmp(key, "name", 4) == 0) name = valcstr;
             else if (keylen == 6 && memcmp(key, "system", 6) == 0) system = valcstr;
@@ -1592,7 +1592,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
             else if (keylen == 14 && memcmp(key, "outputHashMode", 14) == 0) output_hash_mode = valcstr;
 
             if (!structured_attrs) {
-                char *keycstr = asnix_arena_alloc(keylen + 1);
+                char *keycstr = ll_arena_alloc(keylen + 1);
                 memcpy(keycstr, key, keylen);
                 keycstr[keylen] = '\0';
 
@@ -1606,8 +1606,8 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
                     valcstr = normalize_json_attr(valcstr);
                 }
 
-                if (nenv >= ASNIX_DRV_MAX_ENV) {
-                    fprintf(stderr, "asnix: derivation: too many attributes (max %d)\n", ASNIX_DRV_MAX_ENV);
+                if (nenv >= LL_DRV_MAX_ENV) {
+                    fprintf(stderr, "ll: derivation: too many attributes (max %d)\n", LL_DRV_MAX_ENV);
                     exit(1);
                 }
                 env[nenv].key = keycstr;
@@ -1619,7 +1619,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
 
     /* Structured-attrs mode: fold every collected (sym, value) pair into
      * one attrset and hand it to the exact `builtins.toJSON` encoder
-     * (`asnix_toJSON_cstr`, builtins_compare.c) to get the single `__json`
+     * (`ll_toJSON_cstr`, builtins_compare.c) to get the single `__json`
      * env var's value -- this is the ONE place real Nix's own JSON blob
      * (`drv.structuredAttrs`) and this project's ordinary per-output `env`
      * array meet: `StructuredAttrs::unparse()`'s `("__json", <dump>)` pair
@@ -1629,21 +1629,21 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * serialization time (no behavioral difference for this project,
      * since nothing else reads `env` in between). */
     if (structured_attrs) {
-        Value json_attrs = asnix_bshared_make_attrs(json_syms, json_vals, (int64_t)njson);
-        /* asnix_toJSON_cstr mallocs its result (it's a generic, reusable
+        Value json_attrs = ll_bshared_make_attrs(json_syms, json_vals, (int64_t)njson);
+        /* ll_toJSON_cstr mallocs its result (it's a generic, reusable
          * helper also used by `builtins.toJSON`, which returns an
          * ordinary heap-allocated Value string) -- copied into the arena
          * here and freed immediately after, matching every other env
-         * value in this function (`asnix_string_value_to_cstr`, used for
+         * value in this function (`ll_string_value_to_cstr`, used for
          * every OTHER attribute's value, is arena-allocated too). */
-        char *json_tmp = asnix_toJSON_cstr(json_attrs);
+        char *json_tmp = ll_toJSON_cstr(json_attrs);
         size_t json_len = strlen(json_tmp);
-        char *json_cstr = asnix_arena_alloc(json_len + 1);
+        char *json_cstr = ll_arena_alloc(json_len + 1);
         memcpy(json_cstr, json_tmp, json_len + 1);
         free(json_tmp);
 
-        if (nenv >= ASNIX_DRV_MAX_ENV) {
-            fprintf(stderr, "asnix: derivation: too many attributes (max %d)\n", ASNIX_DRV_MAX_ENV);
+        if (nenv >= LL_DRV_MAX_ENV) {
+            fprintf(stderr, "ll: derivation: too many attributes (max %d)\n", LL_DRV_MAX_ENV);
             exit(1);
         }
         env[nenv].key = "__json";
@@ -1652,10 +1652,10 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     }
 
     if (!name || !system || !builder) {
-        fprintf(stderr, "asnix: derivation: 'name', 'system', and 'builder' are required attributes\n");
+        fprintf(stderr, "ll: derivation: 'name', 'system', and 'builder' are required attributes\n");
         exit(1);
     }
-    asnix_check_store_path_name(name);
+    ll_check_store_path_name(name);
     int has_fixed_hash;
     uint8_t fixed_hash_raw[64];
     size_t fixed_hash_raw_len = 0;
@@ -1665,7 +1665,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
                         &fixed_hash_raw_len, &fixed_hash_algo, &fixed_hash_algo_len);
 
     /* `outputs` defaults to `["out"]` -- same default
-     * ASNIX_DERIVATION_NIX_SOURCE's own `outputs ? [ "out" ]` already
+     * LL_DERIVATION_NIX_SOURCE's own `outputs ? [ "out" ]` already
      * assumes at the Nix level (M58). Fixed-output derivations (an
      * `outputHash` given) are restricted to a single "out" output by
      * real Nix too (~/nix/src/libexpr/primops.cc's
@@ -1678,7 +1678,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         noutputs = 1;
     }
     if (output_hash && (noutputs != 1 || strcmp(output_names[0], "out") != 0)) {
-        fprintf(stderr, "asnix: derivation: multiple outputs are not supported in fixed-output derivations\n");
+        fprintf(stderr, "ll: derivation: multiple outputs are not supported in fixed-output derivations\n");
         exit(1);
     }
 
@@ -1687,15 +1687,15 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * attrset happened to set one itself (real Nix's derivationStrict
      * does the same: the output path it computes always wins). */
     for (size_t o = 0; o < noutputs; o++) {
-        size_t idx = ASNIX_DRV_MAX_ENV;
+        size_t idx = LL_DRV_MAX_ENV;
         for (size_t i = 0; i < nenv; i++)
             if (strcmp(env[i].key, output_names[o]) == 0) {
                 idx = i;
                 break;
             }
-        if (idx == ASNIX_DRV_MAX_ENV) {
-            if (nenv >= ASNIX_DRV_MAX_ENV) {
-                fprintf(stderr, "asnix: derivation: too many attributes (max %d)\n", ASNIX_DRV_MAX_ENV);
+        if (idx == LL_DRV_MAX_ENV) {
+            if (nenv >= LL_DRV_MAX_ENV) {
+                fprintf(stderr, "ll: derivation: too many attributes (max %d)\n", LL_DRV_MAX_ENV);
                 exit(1);
             }
             idx = nenv++;
@@ -1713,14 +1713,14 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * name actually referenced anywhere in this derivation's
      * attributes). `output_names` for a group is the exact list that
      * ends up in BOTH the masked and real passes' `inputDrvs` section
-     * (`asnix_build_derivation_aterm`'s own convention, see aterm.h) --
+     * (`ll_build_derivation_aterm`'s own convention, see aterm.h) --
      * only the group's `drv_path` STRING differs between the two
      * passes (literal for "real", the referenced derivation's own
      * cached masked hash -- hex, no algorithm prefix, exactly real
      * Nix's `drvHash.to_string(Base16, false)` -- for "masked", the
      * actual `hashDerivationModulo` substitution). A small, bounded,
      * linear-scan grouping, same convention as every other small array
-     * in this function (`ASNIX_DRV_MAX_ARGS`/`ENV`/`OUTPUTS` above). 64
+     * in this function (`LL_DRV_MAX_ARGS`/`ENV`/`OUTPUTS` above). 64
      * was too small for real nixpkgs: `stdenv-linux` alone has well
      * over 64 direct input derivations once every setup-hook/wrapper
      * dependency is counted (found chasing d.nix past M74's own small
@@ -1731,8 +1731,8 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * for) a dependency several levels deep in nixpkgs's own
      * derivation graph, and 1024 entries' worth of these arrays on the
      * stack per nested call overflowed the real stack chasing d.nix
-     * past this exact point (`ASNIX_DRV_MAX_INPUT_DRVS` itself now lives
-     * up near `ASNIX_DRV_MAX_ARGS`/`ENV`/`OUTPUTS`, see M143). M143:
+     * past this exact point (`LL_DRV_MAX_INPUT_DRVS` itself now lives
+     * up near `LL_DRV_MAX_ARGS`/`ENV`/`OUTPUTS`, see M143). M143:
      * these arrays (plus `group_order`/`masked_input_drvs`/
      * `real_input_drvs`/`masked_hash_hex`/`drv_refs` further down) are
      * now a depth-indexed REUSED pool (`drv_scratch_acquire`/
@@ -1742,7 +1742,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * SAME depth D), see that function's own header comment. */
     DrvScratchFrame *scratch = drv_scratch_acquire();
     const char **group_paths = scratch->group_paths;
-    const char *(*group_outs)[ASNIX_DRV_MAX_OUTPUTS] = scratch->group_outs;
+    const char *(*group_outs)[LL_DRV_MAX_OUTPUTS] = scratch->group_outs;
     size_t *group_nouts = scratch->group_nouts;
     size_t ngroups = 0;
     for (size_t i = 0; i < refs.ndrvs; i++) {
@@ -1755,18 +1755,18 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
             }
         }
         if (g == ngroups) {
-            if (ngroups >= ASNIX_DRV_MAX_INPUT_DRVS) {
-                fprintf(stderr, "asnix: derivation: too many distinct input derivations (max %d)\n",
-                        ASNIX_DRV_MAX_INPUT_DRVS);
+            if (ngroups >= LL_DRV_MAX_INPUT_DRVS) {
+                fprintf(stderr, "ll: derivation: too many distinct input derivations (max %d)\n",
+                        LL_DRV_MAX_INPUT_DRVS);
                 exit(1);
             }
             group_paths[ngroups] = dp;
             group_nouts[ngroups] = 0;
             ngroups++;
         }
-        if (group_nouts[g] >= ASNIX_DRV_MAX_OUTPUTS) {
-            fprintf(stderr, "asnix: derivation: too many referenced outputs of one input derivation (max %d)\n",
-                    ASNIX_DRV_MAX_OUTPUTS);
+        if (group_nouts[g] >= LL_DRV_MAX_OUTPUTS) {
+            fprintf(stderr, "ll: derivation: too many referenced outputs of one input derivation (max %d)\n",
+                    LL_DRV_MAX_OUTPUTS);
             exit(1);
         }
         group_outs[g][group_nouts[g]++] = refs.drvs[i].output_name;
@@ -1774,7 +1774,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     /* Groups sorted by `drv_path` (an index array, since `group_paths`/
      * `group_outs`/`group_nouts` are three separate parallel arrays);
      * each group's own output-name list sorted too -- both required by
-     * `asnix_build_derivation_aterm`'s own sorting contract. */
+     * `ll_build_derivation_aterm`'s own sorting contract. */
     size_t *group_order = scratch->group_order;
     for (size_t g = 0; g < ngroups; g++) group_order[g] = g;
     for (size_t i = 1; i < ngroups; i++) {
@@ -1813,7 +1813,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
          * fallback. */
         if (!masked_hash_cache_find(group_paths[g], &entry)) {
             fprintf(stderr,
-                    "asnix: derivation: internal error: no cached hash for input derivation '%s' "
+                    "ll: derivation: internal error: no cached hash for input derivation '%s' "
                     "(referenced before it was ever evaluated?)\n",
                     group_paths[g]);
             exit(1);
@@ -1872,7 +1872,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * generalization from M8's single-output version: still exactly one
      * masked ATerm/hash, just with N (name,"") entries in its Outputs
      * section instead of one. */
-    AtermOutput masked_outs[ASNIX_DRV_MAX_OUTPUTS];
+    AtermOutput masked_outs[LL_DRV_MAX_OUTPUTS];
     for (size_t o = 0; o < noutputs; o++) {
         masked_outs[o].name = output_names[o];
         masked_outs[o].path = "";
@@ -1881,7 +1881,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     }
     qsort(masked_outs, noutputs, sizeof(masked_outs[0]), atermoutput_cmp);
 
-    /* M151: `asnix_build_derivation_aterm` runs up to 3 times for this one
+    /* M151: `ll_build_derivation_aterm` runs up to 3 times for this one
      * derivation below (masked/real/cache-hash passes) over the SAME
      * `system`/`builder`/`arg_strs`/`refs.srcs`/`env` arrays each time --
      * only the `outputs`/`input_drvs` sections actually vary between
@@ -1897,9 +1897,9 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * (true for nearly everything except the `outputs`/`input_drvs`
      * sections by construction) gets a plain memcpy instead. Freed once,
      * right after the LAST of the 3 passes below, whichever branch that is. */
-    AtermEscapeCache *aterm_cache = asnix_aterm_escape_cache_new(2 * nenv + nargs + refs.nsrcs + 2 * ngroups + 8);
+    AtermEscapeCache *aterm_cache = ll_aterm_escape_cache_new(2 * nenv + nargs + refs.nsrcs + 2 * ngroups + 8);
 
-    char *masked_aterm = asnix_build_derivation_aterm_cached(masked_outs, noutputs, masked_input_drvs, ngroups,
+    char *masked_aterm = ll_build_derivation_aterm_cached(masked_outs, noutputs, masked_input_drvs, ngroups,
                                                               (const char **)refs.srcs, refs.nsrcs, system, builder,
                                                               arg_strs, nargs, env, nenv, aterm_cache);
     uint8_t masked_digest[32];
@@ -1911,7 +1911,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * component (`outputPathName`) for each -- exactly
      * `store.makeOutputPath(outputName, *drvHash, drvName)` in real
      * Nix's `derivations.cc`. */
-    char out_paths[ASNIX_DRV_MAX_OUTPUTS][300];
+    char out_paths[LL_DRV_MAX_OUTPUTS][300];
     for (size_t o = 0; o < noutputs; o++) {
         char type_str[32 + 7];
         snprintf(type_str, sizeof(type_str), "output:%s", output_names[o]);
@@ -1925,7 +1925,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
 
     /* M73: a fixed-output derivation's "out" path is NOT derived from
      * `masked_digest` at all -- override it with the real formula
-     * (asnix_compute_fixed_output_path, above). Safe to index [0]/output_names[0]
+     * (ll_compute_fixed_output_path, above). Safe to index [0]/output_names[0]
      * directly: `output_hash` (hence `has_fixed_hash`) is only ever
      * accepted together with exactly one output named "out" (the
      * `multiple outputs are not supported in fixed-output derivations`
@@ -1937,7 +1937,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     char fixed_hash_algo_cstr[16]; /* longest: "r:" + "sha256"/"sha512" + NUL */
     char fixed_hash_algo_hex[128 + 1];
     if (has_fixed_hash) {
-        asnix_compute_fixed_output_path(output_hash_mode, fixed_hash_raw, fixed_hash_raw_len, fixed_hash_algo,
+        ll_compute_fixed_output_path(output_hash_mode, fixed_hash_raw, fixed_hash_raw_len, fixed_hash_algo,
                                    fixed_hash_algo_len, name, out_paths[0], sizeof(out_paths[0]));
         for (size_t i = 0; i < nenv; i++)
             if (strcmp(env[i].key, "out") == 0) env[i].value = out_paths[0];
@@ -1948,14 +1948,14 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
          * the whole string, bounded by `algo_len`, NOT NUL-terminated
          * at that boundary) -- copy it into its own small, properly
          * NUL-terminated buffer before handing it to AtermOutput, which
-         * (like every other field asnix_build_derivation_aterm reads)
+         * (like every other field ll_build_derivation_aterm reads)
          * expects a plain C string, not a (pointer,length) pair.
          * "recursive" mode additionally prepends "r:" to the ATerm's
          * hashAlgo field (confirmed directly against a real .drv:
          * `("out",path,"r:sha256",hash)`, not `("out",path,"sha256",
          * hash)`) -- `makeFileIngestionPrefix`'s own "r:"/""  split,
          * used here ONLY for this ATerm-serialization field, NOT for
-         * asnix_compute_fixed_output_path's path-computation formula above
+         * ll_compute_fixed_output_path's path-computation formula above
          * (whose two branches already each handle this distinction
          * their own way: the recursive+sha256 branch bypasses the
          * "fixed:out:..." payload scheme entirely, every other
@@ -1973,7 +1973,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         fixed_hash_algo_hex[2 * fixed_hash_raw_len] = '\0';
     }
 
-    AtermOutput real_outs[ASNIX_DRV_MAX_OUTPUTS];
+    AtermOutput real_outs[LL_DRV_MAX_OUTPUTS];
     for (size_t o = 0; o < noutputs; o++) {
         real_outs[o].name = output_names[o];
         real_outs[o].path = out_paths[o];
@@ -1993,16 +1993,16 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
     }
     qsort(real_outs, noutputs, sizeof(real_outs[0]), atermoutput_cmp);
 
-    char *real_aterm = asnix_build_derivation_aterm_cached(real_outs, noutputs, real_input_drvs, ngroups,
+    char *real_aterm = ll_build_derivation_aterm_cached(real_outs, noutputs, real_input_drvs, ngroups,
                                                             (const char **)refs.srcs, refs.nsrcs, system, builder,
                                                             arg_strs, nargs, env, nenv, aterm_cache);
     /* Debugging aid for the standing d.nix/nixpkgs-hash-parity bug-chase
-     * (M74-M77+): set ASNIX_DEBUG_DRV=<name> to dump this derivation's
+     * (M74-M77+): set LL_DEBUG_DRV=<name> to dump this derivation's
      * own real ATerm text to stderr when its `name` matches, instead of
      * repeatedly adding/removing a one-off fprintf here each session. */
     {
-        const char *dbg = getenv("ASNIX_DEBUG_DRV");
-        if (dbg && strcmp(dbg, name) == 0) fprintf(stderr, "ASNIX_DEBUG_DRV[%s] = %s\n", name, real_aterm);
+        const char *dbg = getenv("LL_DEBUG_DRV");
+        if (dbg && strcmp(dbg, name) == 0) fprintf(stderr, "LL_DEBUG_DRV[%s] = %s\n", name, real_aterm);
     }
     uint8_t real_digest[32];
     sha256_or_die(real_aterm, strlen(real_aterm), real_digest);
@@ -2107,7 +2107,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         sha256_or_die(fixed_hash_payload, (size_t)pn, fixed_cache_hash);
         masked_hash_cache_insert(drv_path, 1, fixed_cache_hash);
     } else {
-        char *cache_aterm = asnix_build_derivation_aterm_cached(real_outs, noutputs, masked_input_drvs, ngroups,
+        char *cache_aterm = ll_build_derivation_aterm_cached(real_outs, noutputs, masked_input_drvs, ngroups,
                                                                   (const char **)refs.srcs, refs.nsrcs, system,
                                                                   builder, arg_strs, nargs, env, nenv, aterm_cache);
         uint8_t cache_digest[32];
@@ -2115,7 +2115,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         free(cache_aterm);
         masked_hash_cache_insert(drv_path, 0, cache_digest);
     }
-    asnix_aterm_escape_cache_free(aterm_cache);
+    ll_aterm_escape_cache_free(aterm_cache);
     drv_scratch_release(); /* M143: pool-owned (group_paths/group_outs/group_nouts/
                              * group_order/masked_input_drvs/real_input_drvs/
                              * masked_hash_hex/drv_refs) -- released, not freed. */
@@ -2138,14 +2138,14 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * one key per declared output name, each a plain string (that
      * output's own outPath) -- NOT a nested attrset, and no separate
      * top-level `outPath`/`type`/`out` keys (M58's wrapper,
-     * ASNIX_DERIVATION_NIX_SOURCE, only ever reads `strict.drvPath` and
+     * LL_DERIVATION_NIX_SOURCE, only ever reads `strict.drvPath` and
      * `strict.${outputName}`, confirmed by re-reading it above; it
      * builds the self-referential "nice" per-output attrsets itself). */
     size_t nkeys = 1 + noutputs;
-    uint32_t syms[1 + ASNIX_DRV_MAX_OUTPUTS];
-    Value vals[1 + ASNIX_DRV_MAX_OUTPUTS];
-    syms[0] = asnix_intern("drvPath", 7);
-    vals[0] = asnix_make_string_value(drv_path, strlen(drv_path));
+    uint32_t syms[1 + LL_DRV_MAX_OUTPUTS];
+    Value vals[1 + LL_DRV_MAX_OUTPUTS];
+    syms[0] = ll_intern("drvPath", 7);
+    vals[0] = ll_make_string_value(drv_path, strlen(drv_path));
     /* M80: `vals[0]` (`drvPath` itself) gets real Nix's `DrvDeep` context
      * element, self-referential (`DrvDeep{drvPath}` pointing at its OWN
      * path) -- confirmed directly against `~/nix/src/libexpr/primops.cc`
@@ -2153,7 +2153,7 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * {NixStringContextElem::DrvDeep{drvPath}})`). This is PURELY
      * introspection metadata (`getContext`/`addDrvOutputDependencies`/
      * `unsafeDiscardOutputDependency`, builtins_m54.c) -- deliberately
-     * NOT read by `asnix_collect_input_refs` below (that function only
+     * NOT read by `ll_collect_input_refs` below (that function only
      * ever consults `ctx->ndrvs`/`ctx->nsrcs`, both still zero here), so
      * a `.drvPath` string used directly as a LATER derivation's
      * attribute value still collects exactly zero input refs, same as
@@ -2163,16 +2163,16 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
      * transitive closure and adding every output of every derivation in
      * it as an input) is a separate, substantially larger feature, not
      * attempted here -- see M80's scope notes in docs/architecture.md. */
-    AsnixStringContext drv_ctx;
-    asnix_ctx_init(&drv_ctx);
-    asnix_ctx_add_deep(&drv_ctx, drv_path);
-    asnix_string_attach_context(vals[0], &drv_ctx);
+    LlStringContext drv_ctx;
+    ll_ctx_init(&drv_ctx);
+    ll_ctx_add_deep(&drv_ctx, drv_path);
+    ll_string_attach_context(vals[0], &drv_ctx);
     for (size_t o = 0; o < noutputs; o++) {
-        syms[1 + o] = asnix_intern(output_names[o], strlen(output_names[o]));
-        vals[1 + o] = asnix_make_string_value(out_paths[o], strlen(out_paths[o]));
+        syms[1 + o] = ll_intern(output_names[o], strlen(output_names[o]));
+        vals[1 + o] = ll_make_string_value(out_paths[o], strlen(out_paths[o]));
         /* M76: this is THE origin point for real string context --
          * `pkg.out`/`pkg.${name}` (hence `"${pkg}/bin/x"`-style
-         * interpolation, and `asnix_coerce_to_string[_for_derivation]`'s
+         * interpolation, and `ll_coerce_to_string[_for_derivation]`'s
          * own `outPath` lookup) ultimately resolve to exactly this
          * string Value. Attaching `Built(drv_path, output_names[o])`
          * here is what lets a LATER derivation's attribute coercion
@@ -2180,10 +2180,10 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
          * this dependency -- see string_context.h's header comment for
          * why this matters (hello.drv's own `builder` attribute reaches
          * `bash` only this way). */
-        AsnixStringContext out_ctx;
-        asnix_ctx_init(&out_ctx);
-        asnix_ctx_add_built(&out_ctx, drv_path, output_names[o]);
-        asnix_string_attach_context(vals[1 + o], &out_ctx);
+        LlStringContext out_ctx;
+        ll_ctx_init(&out_ctx);
+        ll_ctx_add_built(&out_ctx, drv_path, output_names[o]);
+        ll_string_attach_context(vals[1 + o], &out_ctx);
     }
     for (size_t i = 1; i < nkeys; i++) {
         size_t j = i;
@@ -2198,32 +2198,32 @@ Value asnix_prim_derivation(const Value *args, int64_t argc) {
         }
     }
 
-    void *mem = asnix_arena_alloc(8 + nkeys * ASNIX_ATTR_SIZE);
-    *(int64_t *)((char *)mem + ASNIX_ATTRS_OFF_COUNT) = (int64_t)nkeys;
+    void *mem = ll_arena_alloc(8 + nkeys * LL_ATTR_SIZE);
+    *(int64_t *)((char *)mem + LL_ATTRS_OFF_COUNT) = (int64_t)nkeys;
     for (size_t i = 0; i < nkeys; i++) {
-        char *e = (char *)mem + ASNIX_ATTRS_OFF_ENTRIES + i * ASNIX_ATTR_SIZE;
+        char *e = (char *)mem + LL_ATTRS_OFF_ENTRIES + i * LL_ATTR_SIZE;
         /* M103: must be a 4-byte write -- entry's value bytes now start right after sym (no pad),
          * so an 8-byte write here would clobber them. */
-        *(uint32_t *)(e + ASNIX_ATTR_OFF_SYM) = syms[i];
-        *(Value *)(e + ASNIX_ATTR_OFF_VALUE) = vals[i];
+        *(uint32_t *)(e + LL_ATTR_OFF_SYM) = syms[i];
+        *(Value *)(e + LL_ATTR_OFF_VALUE) = vals[i];
     }
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_ATTRS };
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_ATTRS };
 }
 
-Value asnix_make_derivation_strict_primop(void) {
-    return asnix_bshared_make_primop((void *)asnix_prim_derivation, 1);
+Value ll_make_derivation_strict_primop(void) {
+    return ll_bshared_make_primop((void *)ll_prim_derivation, 1);
 }
 
 /* M58: verbatim port of cppnix's `~/nix/src/libexpr/primops/
  * derivation.nix` (its large leading doc comment, lines 1-28 there,
  * dropped -- purely descriptive, no semantic effect), see derivation.h's
- * header comment on asnix_make_derivation_wrapper_value for why this
+ * header comment on ll_make_derivation_wrapper_value for why this
  * exists. References the bare global `derivationStrict` (not
  * `builtins.derivationStrict`), matching the original exactly -- this
- * resolves via the ordinary ASNIX_ROOT_BARE_GLOBALS machinery
+ * resolves via the ordinary LL_ROOT_BARE_GLOBALS machinery
  * (compiler.c/eval_file.c), the same way `derivation` itself already
  * was, not any special injected scope. */
-static const char ASNIX_DERIVATION_NIX_SOURCE[] =
+static const char LL_DERIVATION_NIX_SOURCE[] =
     "drvAttrs@{\n"
     "  outputs ? [ \"out\" ],\n"
     "  ...\n"
@@ -2256,32 +2256,32 @@ static const char ASNIX_DERIVATION_NIX_SOURCE[] =
     "in\n"
     "(builtins.head outputsList).value\n";
 
-#define ASNIX_DERIVATION_TEMP_PATH "/tmp/.asnix-corepkgs-derivation.nix"
+#define LL_DERIVATION_TEMP_PATH "/tmp/.asnix-corepkgs-derivation.nix"
 
 static const char *write_derivation_nix(void) {
-    FILE *f = fopen(ASNIX_DERIVATION_TEMP_PATH, "w");
+    FILE *f = fopen(LL_DERIVATION_TEMP_PATH, "w");
     if (!f) {
-        fprintf(stderr, "asnix: could not write '%s' for the `derivation` wrapper\n", ASNIX_DERIVATION_TEMP_PATH);
+        fprintf(stderr, "ll: could not write '%s' for the `derivation` wrapper\n", LL_DERIVATION_TEMP_PATH);
         exit(1);
     }
-    fwrite(ASNIX_DERIVATION_NIX_SOURCE, 1, sizeof(ASNIX_DERIVATION_NIX_SOURCE) - 1, f);
+    fwrite(LL_DERIVATION_NIX_SOURCE, 1, sizeof(LL_DERIVATION_NIX_SOURCE) - 1, f);
     fclose(f);
-    return ASNIX_DERIVATION_TEMP_PATH;
+    return LL_DERIVATION_TEMP_PATH;
 }
 
-Value asnix_make_derivation_wrapper_value(void) {
+Value ll_make_derivation_wrapper_value(void) {
     static int have_cached = 0;
     static Value cached;
     if (!have_cached) {
-        cached = asnix_eval_file_for_derivation_bootstrap(write_derivation_nix());
+        cached = ll_eval_file_for_derivation_bootstrap(write_derivation_nix());
         have_cached = 1;
     }
     return cached;
 }
 
-const AsnixBuiltinMiscDef ASNIX_DERIVATION_BUILTINS[] = {
-    { "derivation", asnix_make_derivation_wrapper_value },
-    { "derivationStrict", asnix_make_derivation_strict_primop },
+const LlBuiltinMiscDef LL_DERIVATION_BUILTINS[] = {
+    { "derivation", ll_make_derivation_wrapper_value },
+    { "derivationStrict", ll_make_derivation_strict_primop },
 };
-const size_t ASNIX_DERIVATION_BUILTINS_COUNT =
-    sizeof(ASNIX_DERIVATION_BUILTINS) / sizeof(ASNIX_DERIVATION_BUILTINS[0]);
+const size_t LL_DERIVATION_BUILTINS_COUNT =
+    sizeof(LL_DERIVATION_BUILTINS) / sizeof(LL_DERIVATION_BUILTINS[0]);

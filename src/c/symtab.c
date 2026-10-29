@@ -27,7 +27,7 @@ static uint64_t hash_bytes(const char *s, size_t len) {
      * almost no work -- for a 9-byte identifier that's 9 serialized
      * multiplies where iets's own `FxHasher::write` (src/syntax/symbol.rs)
      * needs at most 2. Measured on a real corpus of 1,833,170
-     * `asnix_intern` call arguments captured from a full nixpkgs/ffmpeg
+     * `ll_intern` call arguments captured from a full nixpkgs/ffmpeg
      * eval (avg length 9.12 bytes): ~7.4ns/call -> ~6.0ns/call, ~19%
      * faster, chain-length-bound exactly as predicted. Reads are bounded
      * by `len` the same as the byte-at-a-time version -- never past
@@ -76,7 +76,7 @@ static void table_rehash(size_t new_cap) {
     g_table_cap = new_cap;
 }
 
-uint32_t asnix_intern(const char *name, size_t len) {
+uint32_t ll_intern(const char *name, size_t len) {
     if (g_table_cap == 0) table_rehash(16);
 
     uint64_t h = hash_bytes(name, len);
@@ -101,7 +101,7 @@ uint32_t asnix_intern(const char *name, size_t len) {
     return id;
 }
 
-const char *asnix_sym_name(uint32_t id, size_t *out_len) {
+const char *ll_sym_name(uint32_t id, size_t *out_len) {
     *out_len = g_symbols[id].len;
     return g_symbols[id].name;
 }

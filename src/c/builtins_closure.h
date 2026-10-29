@@ -1,11 +1,11 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_CLOSURE_H
-#define ASNIX_BUILTINS_CLOSURE_H
+#ifndef LL_BUILTINS_CLOSURE_H
+#define LL_BUILTINS_CLOSURE_H
 
 #include <stddef.h>
 
-#include "asnix/value.h"
-#include "builtins_misc.h" /* shared AsnixBuiltinMiscDef/-Builder {name, build()} shape */
+#include "ll/value.h"
+#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
 
 /*
  * builtins.genericClosure -- deliberately cut from the M17 builtins-
@@ -26,7 +26,7 @@
  * it, keeps all four new modules' tables the same shape.
  */
 
-extern const AsnixBuiltinMiscDef ASNIX_CLOSURE_BUILTINS[];
-extern const size_t ASNIX_CLOSURE_BUILTINS_COUNT;
+extern const LlBuiltinMiscDef LL_CLOSURE_BUILTINS[];
+extern const size_t LL_CLOSURE_BUILTINS_COUNT;
 
-#endif /* ASNIX_BUILTINS_CLOSURE_H */
+#endif /* LL_BUILTINS_CLOSURE_H */

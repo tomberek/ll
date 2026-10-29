@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_DAEMON_CLIENT_H
-#define ASNIX_DAEMON_CLIENT_H
+#ifndef LL_DAEMON_CLIENT_H
+#define LL_DAEMON_CLIENT_H
 
 #include <stddef.h>
 
@@ -22,19 +22,19 @@
  * to ask a live daemon "is this store path valid" and get a real answer.
  */
 
-typedef struct AsnixDaemonConn AsnixDaemonConn;
+typedef struct LlDaemonConn LlDaemonConn;
 
 /* Connects to the daemon over its Unix socket (NIX_REMOTE if set, else
  * /nix/var/nix/daemon-socket/socket) and completes the version handshake.
  * Returns NULL (after printing a message to stderr) on any failure --
  * socket connect, magic mismatch, or incompatible protocol major version. */
-AsnixDaemonConn *asnix_daemon_connect(void);
+LlDaemonConn *ll_daemon_connect(void);
 
-void asnix_daemon_close(AsnixDaemonConn *conn);
+void ll_daemon_close(LlDaemonConn *conn);
 
 /* Returns 1 if `path` is a valid store path, 0 if not, -1 on a protocol
  * or I/O error (message already printed to stderr). */
-int asnix_daemon_is_valid_path(AsnixDaemonConn *conn, const char *path);
+int ll_daemon_is_valid_path(LlDaemonConn *conn, const char *path);
 
 /* Adds a .drv's ATerm text to the store via AddToStore (op 7; the older
  * op 8 AddTextToStore is obsolete since protocol 1.25 -- this daemon
@@ -50,7 +50,7 @@ int asnix_daemon_is_valid_path(AsnixDaemonConn *conn, const char *path);
  * against the caller's own locally-computed drv_path as a reproducibility
  * check -- or NULL on a protocol/IO error (message already printed to
  * stderr). */
-char *asnix_daemon_add_text_to_store(AsnixDaemonConn *conn, const char *name, const char *text, size_t text_len);
+char *ll_daemon_add_text_to_store(LlDaemonConn *conn, const char *name, const char *text, size_t text_len);
 
 /* Triggers a build of every output of a .drv already in the store, via
  * BuildPaths (op 9; BuildDerivation=36 sends the whole derivation inline
@@ -64,16 +64,16 @@ char *asnix_daemon_add_text_to_store(AsnixDaemonConn *conn, const char *name, co
  * today, not a bug in this client). The rejection reason is surfaced via
  * the normal STDERR_ERROR sideband and printed to stderr like any other
  * daemon error. */
-int asnix_daemon_build_drv(AsnixDaemonConn *conn, const char *drv_path);
+int ll_daemon_build_drv(LlDaemonConn *conn, const char *drv_path);
 
 /* The daemon's own "is this client trusted" verdict from the handshake
  * (protocol >= 1.35 only; -1 if the daemon's protocol predates that field
  * or the connection failed before reaching it). 1 = trusted, 0 = not
  * trusted, 2 = "not set"/unknown per the daemon's own TrustedFlag enum --
- * useful to check before attempting asnix_daemon_build_drv on an ordinary
+ * useful to check before attempting ll_daemon_build_drv on an ordinary
  * (non-content-addressed) derivation, since an untrusted client will be
  * rejected at that point regardless (see that function's doc comment). */
-int asnix_daemon_trusted(AsnixDaemonConn *conn);
+int ll_daemon_trusted(LlDaemonConn *conn);
 
 /* Sends SetOptions (op 19) -- every real `nix`/Lix client sends this once,
  * right after the handshake, carrying its *own* merged config (CLI flags +
@@ -98,6 +98,6 @@ int asnix_daemon_trusted(AsnixDaemonConn *conn);
  * field order and defaults cross-checked against ~/nix's own
  * RemoteStore::setOptions (remote-store.cc) and its daemon.cc
  * SetOptions handler. Returns 0 on success, -1 on a protocol/IO error. */
-int asnix_daemon_set_options(AsnixDaemonConn *conn, int use_substitutes);
+int ll_daemon_set_options(LlDaemonConn *conn, int use_substitutes);
 
-#endif /* ASNIX_DAEMON_CLIENT_H */
+#endif /* LL_DAEMON_CLIENT_H */

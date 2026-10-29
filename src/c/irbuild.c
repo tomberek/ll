@@ -1,11 +1,11 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irbuild.h"
+#include "ll/irbuild.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/irpass.h"
+#include "ll/arena.h"
+#include "ll/irpass.h"
 
 IrBuilder *ib_new(void) {
     IrBuilder *b = calloc(1, sizeof(IrBuilder));
@@ -16,7 +16,7 @@ size_t ib_len(IrBuilder *b) {
     return b->len;
 }
 
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
+#ifdef LL_IRDUMP_LINE_TRACKING
 /* See irbuild.h's own comments -- compiled in only for irdump's own
  * variant build of this file; a real production build of irbuild.c never
  * defines this macro, so none of the below exists in `asnix`/
@@ -39,24 +39,24 @@ void ib_set_current_src_pos(uint32_t pos) {
 }
 
 /* Pointer-identity side table from a finished IrProgram to the `lines`
- * array its builder recorded -- see irbuild.h's asnix_ib_lookup_program_
+ * array its builder recorded -- see irbuild.h's ll_ib_lookup_program_
  * lines comment for why this is a side table and not a field on
  * IrProgram itself. */
-#define ASNIX_IB_MAX_LINE_PROGRAMS 65536 /* matches irpass.c's ASNIX_IRPASS_MAX_PROGRAM_RANGES precedent */
-static const IrProgram *g_line_programs[ASNIX_IB_MAX_LINE_PROGRAMS];
-static const uint32_t *g_line_program_lines[ASNIX_IB_MAX_LINE_PROGRAMS];
+#define LL_IB_MAX_LINE_PROGRAMS 65536 /* matches irpass.c's LL_IRPASS_MAX_PROGRAM_RANGES precedent */
+static const IrProgram *g_line_programs[LL_IB_MAX_LINE_PROGRAMS];
+static const uint32_t *g_line_program_lines[LL_IB_MAX_LINE_PROGRAMS];
 static size_t g_nline_programs = 0;
 
-const uint32_t *asnix_ib_lookup_program_lines(const IrProgram *prog) {
+const uint32_t *ll_ib_lookup_program_lines(const IrProgram *prog) {
     for (size_t i = 0; i < g_nline_programs; i++) {
         if (g_line_programs[i] == prog) return g_line_program_lines[i];
     }
     return NULL;
 }
-#endif /* ASNIX_IRDUMP_LINE_TRACKING */
+#endif /* LL_IRDUMP_LINE_TRACKING */
 
 /* perf (M132): initial capacity 16->24 for `ops`, 8->24 for `pool` below --
- * measured directly (temporary instrumentation, same ASNIX_LEX_STATS-style
+ * measured directly (temporary instrumentation, same LL_LEX_STATS-style
  * convention M123 used for the lexer's own TokVec fix): across a real
  * nixpkgs eval (`d.nix`, ffmpeg's closure), this file creates 585,631
  * IrBuilders (one per compiled function/thunk/attrset-element/etc.),
@@ -83,7 +83,7 @@ static size_t ib_emit(IrBuilder *b, int op_id, int64_t a, int64_t bval) {
     b->ops[b->len].handler = (void *)(intptr_t)op_id;
     b->ops[b->len].a = a;
     b->ops[b->len].b = bval;
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
+#ifdef LL_IRDUMP_LINE_TRACKING
     if (g_line_tracking_enabled) {
         if (b->len == b->lines_cap) {
             b->lines_cap = b->lines_cap ? b->lines_cap * 2 : 24; /* same growth schedule as `ops` above */
@@ -142,7 +142,7 @@ size_t ib_jmp(IrBuilder *b) {
 }
 
 void ib_patch_delta(IrBuilder *b, size_t site, size_t target_idx) {
-    b->ops[site].a = (int64_t)(target_idx - site) * ASNIX_IROP_SIZE;
+    b->ops[site].a = (int64_t)(target_idx - site) * LL_IROP_SIZE;
 }
 
 size_t ib_let(IrBuilder *b, int64_t nslots) {
@@ -160,7 +160,7 @@ static size_t ib_pool_add(IrBuilder *b, int64_t v) {
 
 size_t ib_lambda(IrBuilder *b, int64_t arity, IrProgram *body_prog, int64_t formals_raw) {
     /* M100: a single IrProgram* pool entry, not a {ops, pool} pair -- see
-     * ir.h's ASNIX_CLOSURE_OFF_PROG comment. */
+     * ir.h's LL_CLOSURE_OFF_PROG comment. */
     size_t pool_idx = ib_pool_add(b, (int64_t)(intptr_t)body_prog);
     ib_pool_add(b, formals_raw); /* always pool_idx+1, see op_lambda.S */
     return ib_emit(b, OP_LAMBDA, arity, (int64_t)pool_idx);
@@ -210,7 +210,7 @@ size_t ib_select_dynamic(IrBuilder *b) {
 
 size_t ib_mk_thunk(IrBuilder *b, IrProgram *body_prog) {
     /* M100: a single IrProgram* pool entry, not a {ops, pool} pair -- see
-     * ir.h's ASNIX_THUNK_OFF_STATE comment (M103: the runtime Thunk cell's
+     * ir.h's LL_THUNK_OFF_STATE comment (M103: the runtime Thunk cell's
      * own prog field is now packed into that same word, not a separate
      * one, but this compile-time IR pool entry is unaffected). */
     size_t pool_idx = ib_pool_add(b, (int64_t)(intptr_t)body_prog);
@@ -380,35 +380,35 @@ size_t ib_has_attr_if(IrBuilder *b, uint32_t sym) {
 }
 
 IrProgram *ib_finish(IrBuilder *b) {
-    /* M118: opt-in bytecode-to-bytecode pass pipeline (asnix/irpass.h) --
+    /* M118: opt-in bytecode-to-bytecode pass pipeline (ll/irpass.h) --
      * a no-op (0 passes registered) in every normal build/run, so this
      * line changes nothing by default; see that header's own comment.
      * `&b->pool`/`&b->pool_len`/`&b->pool_cap` (strconcat-fold
      * extension): threaded through by pointer so a registered pass can
      * both read an existing pool entry's Value and append a freshly-built
-     * one (asnix_irpass_pool_append) -- this IS the live builder's own
+     * one (ll_irpass_pool_append) -- this IS the live builder's own
      * pool, still growable at this point (ib_finish's own pool-shrinking
      * realloc below runs AFTER this call).
      *
-     * asnix_irpass_begin_program() brackets this call so the framework's
+     * ll_irpass_begin_program() brackets this call so the framework's
      * own firing-location log can tell THIS program's firings apart from
      * every other program's (irpass.h's own comment) -- a no-op write to
      * one static size_t either way, cheap enough to leave unconditional
      * rather than gating it behind "any passes registered" here too. */
-    asnix_irpass_begin_program();
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
-    /* Lets asnix_irpass_remove's existing shift logic keep `b->lines`
+    ll_irpass_begin_program();
+#ifdef LL_IRDUMP_LINE_TRACKING
+    /* Lets ll_irpass_remove's existing shift logic keep `b->lines`
      * aligned with `ops` across a pass's removal, exactly the way it
      * already keeps the firing log and jump targets aligned. Cleared
      * again right after, so a later, unrelated ib_finish call (irdump
      * re-entering lex_parse_compile_dump for its own nested child
      * programs) never sees a stale pointer. Entirely absent from a real
      * production build -- see irbuild.h's own comment. */
-    asnix_irpass_set_line_array(g_line_tracking_enabled ? b->lines : NULL);
+    ll_irpass_set_line_array(g_line_tracking_enabled ? b->lines : NULL);
 #endif
-    asnix_irpass_run(b->ops, &b->len, &b->pool, &b->pool_len, &b->pool_cap);
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
-    asnix_irpass_set_line_array(NULL);
+    ll_irpass_run(b->ops, &b->len, &b->pool, &b->pool_len, &b->pool_cap);
+#ifdef LL_IRDUMP_LINE_TRACKING
+    ll_irpass_set_line_array(NULL);
 #endif
     ir_link(b->ops, b->len);
     /* M86 perf: ops/pool are handed to `prog`, which lives for the rest
@@ -438,8 +438,8 @@ IrProgram *ib_finish(IrBuilder *b) {
      * `pool` straight to an IrProgram that lives for the rest of the
      * process -- grep irbuild.c/ir.h, there is no free_program()).
      * That "never freed" destination is exactly what arena.h's bump
-     * allocator (asnix/arena.h) is for: route the final trimmed copy
-     * through `asnix_arena_alloc` (a handful of instructions, no size-class
+     * allocator (ll/arena.h) is for: route the final trimmed copy
+     * through `ll_arena_alloc` (a handful of instructions, no size-class
      * lookup, no free-list) instead of a general-purpose allocator's
      * realloc, then `free()` the old oversized scratch buffer (a plain
      * free, simpler than realloc's implicit alloc+copy+free). Final size
@@ -450,14 +450,14 @@ IrProgram *ib_finish(IrBuilder *b) {
      * either, so there is nothing to move to the arena there. */
     if (b->len > 0 && b->len < b->cap) {
         size_t bytes = b->len * sizeof(IrOp);
-        IrOp *shrunk = asnix_arena_alloc(bytes);
+        IrOp *shrunk = ll_arena_alloc(bytes);
         memcpy(shrunk, b->ops, bytes);
         free(b->ops);
         b->ops = shrunk;
     }
     if (b->pool_len > 0 && b->pool_len < b->pool_cap) {
         size_t bytes = b->pool_len * sizeof(int64_t);
-        int64_t *shrunk = asnix_arena_alloc(bytes);
+        int64_t *shrunk = ll_arena_alloc(bytes);
         memcpy(shrunk, b->pool, bytes);
         free(b->pool);
         b->pool = shrunk;
@@ -465,16 +465,16 @@ IrProgram *ib_finish(IrBuilder *b) {
     IrProgram *prog = calloc(1, sizeof(IrProgram));
     prog->ops = b->ops;
     prog->pool = b->pool;
-    asnix_irpass_mark_program(prog); /* tags this program's own slice of the firing log -- see irpass.h */
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
+    ll_irpass_mark_program(prog); /* tags this program's own slice of the firing log -- see irpass.h */
+#ifdef LL_IRDUMP_LINE_TRACKING
     /* Register (prog, lines) in the side table irdump looks up by pointer
-     * identity (asnix_ib_lookup_program_lines, irbuild.h). Deliberately
+     * identity (ll_ib_lookup_program_lines, irbuild.h). Deliberately
      * not routed through the arena shrink-to-fit above: this is a
      * one-shot debug CLI tool's own scratch memory, not a cost a real
      * long-running eval ever pays (this whole block is absent from a
      * real production build), so there is no permanent-footprint reason
      * to bother. */
-    if (g_line_tracking_enabled && b->lines && g_nline_programs < ASNIX_IB_MAX_LINE_PROGRAMS) {
+    if (g_line_tracking_enabled && b->lines && g_nline_programs < LL_IB_MAX_LINE_PROGRAMS) {
         g_line_programs[g_nline_programs] = prog;
         g_line_program_lines[g_nline_programs] = b->lines;
         g_nline_programs++;

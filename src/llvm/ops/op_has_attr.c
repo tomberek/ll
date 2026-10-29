@@ -6,7 +6,7 @@
  * non-attrset target is NEVER fatal (just FALSE, or the else-branch
  * for the _IF form), and a present-but-unforced entry is NEVER forced
  * -- this only asks "is the key there", never "what is its value".
- * asnix_bshared_attrs_probe already handles both a flat Attrs and a
+ * ll_bshared_attrs_probe already handles both a flat Attrs and a
  * lazy `//` UnionHdr internally (same helper op_select.c's OP_SELECT
  * uses), so no separate resolve call is needed here, matching the
  * asm's own direct tag-check-then-probe shape. */
@@ -15,13 +15,13 @@
 
 LL_OP_ATTR Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
-    if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
+    if ((attrs.raw & LL_TAG_MASK) != LL_TAG_ATTRS) {
         vs[-1] = ll_false();
         LL_NEXT(ip, env, vs, pool, rs);
     }
     uint32_t sym = (uint32_t)ip->a;
     Value out;
-    int found = asnix_bshared_attrs_probe(attrs, sym, &out);
+    int found = ll_bshared_attrs_probe(attrs, sym, &out);
     vs[-1] = found ? ll_true() : ll_false();
     LL_NEXT(ip, env, vs, pool, rs);
 }
@@ -29,13 +29,13 @@ LL_OP_ATTR Value ll_op_has_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
 LL_OP_ATTR Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     vs--;
-    if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
+    if ((attrs.raw & LL_TAG_MASK) != LL_TAG_ATTRS) {
         ip = (IrOp *)((char *)ip + ip->a);
         LL_GOTO(ip, env, vs, pool, rs);
     }
     uint32_t sym = (uint32_t)ip->b;
     Value out;
-    int found = asnix_bshared_attrs_probe(attrs, sym, &out);
+    int found = ll_bshared_attrs_probe(attrs, sym, &out);
     if (found) {
         ip++;
     } else {
@@ -47,7 +47,7 @@ LL_OP_ATTR Value ll_op_has_attr_if(IrOp *ip, Env *env, Value *vs, int64_t *pool,
 LL_OP_ATTR Value ll_op_has_attr_dynamic(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1], target = vs[-2];
     vs -= 2;
-    int found = asnix_bshared_has_attr_dynamic(target, name);
+    int found = ll_bshared_has_attr_dynamic(target, name);
     vs[0] = found ? ll_true() : ll_false();
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);

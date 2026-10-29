@@ -20,7 +20,7 @@
  * splicing rules), integers (decimal/0x/0o/0b, underscore separators,
  * leading +/-), floats and inf/nan (M51, see classify_bare_token/
  * parse_float_token below -- asnix now has a real float Value kind, see
- * include/asnix/value.h/heap.h, so this is no longer a "no honest way to
+ * include/ll/value.h/heap.h, so this is no longer a "no honest way to
  * represent it" case the way it was before that milestone), booleans,
  * and TOML date/time literals -- which real Nix's own fromTOML represents
  * as `{ _type = "timestamp"; value = "<text>"; }` (confirmed directly
@@ -45,13 +45,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/value.h"
+#include "ll/value.h"
 #include "builtins_shared.h"
 #include "symtab.h"
 #include "value_util.h"
 
 static void toml_fatal(const char *msg) {
-    fprintf(stderr, "asnix: fromTOML: %s\n", msg);
+    fprintf(stderr, "ll: fromTOML: %s\n", msg);
     exit(1);
 }
 
@@ -260,7 +260,7 @@ static Value finalize_tnode(TNode *t) {
                 syms[i] = t->entries[i].sym;
                 vals[i] = finalize_tnode(t->entries[i].child);
             }
-            out = asnix_bshared_make_attrs(syms, vals, (int64_t)n);
+            out = ll_bshared_make_attrs(syms, vals, (int64_t)n);
             free(syms);
             free(vals);
             break;
@@ -269,13 +269,13 @@ static Value finalize_tnode(TNode *t) {
             size_t n = t->n_items;
             Value *vals = malloc((n ? n : 1) * sizeof(Value));
             for (size_t i = 0; i < n; i++) vals[i] = finalize_tnode(t->items[i]);
-            out = asnix_bshared_make_list(vals, (int64_t)n);
+            out = ll_bshared_make_list(vals, (int64_t)n);
             free(vals);
             break;
         }
         default:
             toml_fatal("internal error: bad TNode kind");
-            out = asnix_make_imm(ASNIX_IMM_NULL);
+            out = ll_make_imm(LL_IMM_NULL);
             break;
     }
     return out;
@@ -514,7 +514,7 @@ static void parse_key_path(Parser *p, uint32_t **syms_out, size_t *n_out) {
             cap *= 2;
             syms = realloc(syms, cap * sizeof(uint32_t));
         }
-        syms[n++] = asnix_intern(buf, len);
+        syms[n++] = ll_intern(buf, len);
         free(buf);
         skip_ws(p);
         if (p_cur(p) == '.') {
@@ -659,11 +659,11 @@ static size_t normalize_time(const char *s, size_t n, char *out) {
  * future milestone needs to special-case a SPECIFIC date shape once
  * proven that real Nix still accepts it. */
 static Value make_timestamp_value(const char *text, size_t len) {
-    uint32_t sym_type = asnix_intern("_type", 5);
-    uint32_t sym_value = asnix_intern("value", 5);
+    uint32_t sym_type = ll_intern("_type", 5);
+    uint32_t sym_value = ll_intern("value", 5);
     uint32_t syms[2] = { sym_type, sym_value };
-    Value vals[2] = { asnix_make_string_value("timestamp", 9), asnix_make_string_value(text, len) };
-    return asnix_bshared_make_attrs(syms, vals, 2);
+    Value vals[2] = { ll_make_string_value("timestamp", 9), ll_make_string_value(text, len) };
+    return ll_bshared_make_attrs(syms, vals, 2);
 }
 
 static Value classify_date_or_time(const char *tok, size_t n) {
@@ -688,7 +688,7 @@ static Value classify_date_or_time(const char *tok, size_t n) {
     }
     (void)o;
     toml_fatal("Dates and times are not supported");
-    return asnix_make_imm(ASNIX_IMM_NULL); /* unreachable -- toml_fatal always exit()s */
+    return ll_make_imm(LL_IMM_NULL); /* unreachable -- toml_fatal always exit()s */
 }
 
 /* M56: `_` digit separators must be single and strictly between two
@@ -729,7 +729,7 @@ static Value parse_decimal_or_prefixed_int(const char *digits, size_t n, int bas
      * buf` means nothing was consumed at all. */
     if (endptr == buf) toml_fatal("invalid TOML value");
     if (neg) val = -val;
-    return asnix_make_int((int64_t)val);
+    return ll_make_int((int64_t)val);
 }
 
 /* M51: a TOML float, `inf`, or `nan` bare token (`rem`/`rem_n` already has
@@ -753,12 +753,12 @@ static Value parse_float_token(const char *rem, size_t rem_n, int neg) {
         buf[o++] = rem[i];
     }
     buf[o] = '\0';
-    return asnix_make_float_value(strtod(buf, NULL));
+    return ll_make_float_value(strtod(buf, NULL));
 }
 
 static Value classify_bare_token(const char *tok, size_t n) {
-    if (n == 4 && memcmp(tok, "true", 4) == 0) return asnix_make_imm(ASNIX_IMM_TRUE);
-    if (n == 5 && memcmp(tok, "false", 5) == 0) return asnix_make_imm(ASNIX_IMM_FALSE);
+    if (n == 4 && memcmp(tok, "true", 4) == 0) return ll_make_imm(LL_IMM_TRUE);
+    if (n == 5 && memcmp(tok, "false", 5) == 0) return ll_make_imm(LL_IMM_FALSE);
 
     if (looks_like_date_or_time(tok, n)) return classify_date_or_time(tok, n);
 
@@ -821,7 +821,7 @@ static Value parse_array(Parser *p) {
     if (p_cur(p) == ']') {
         p->i++;
         free(items);
-        return asnix_bshared_make_list(NULL, 0);
+        return ll_bshared_make_list(NULL, 0);
     }
     for (;;) {
         Value v = parse_value(p);
@@ -846,7 +846,7 @@ static Value parse_array(Parser *p) {
         }
         toml_fatal("expected ',' or ']' in TOML array");
     }
-    Value out = asnix_bshared_make_list(items, (int64_t)n);
+    Value out = ll_bshared_make_list(items, (int64_t)n);
     free(items);
     return out;
 }
@@ -895,7 +895,7 @@ static Value parse_value(Parser *p) {
     if (c == '"' || c == '\'') {
         size_t len;
         char *buf = parse_toml_string(p, &len);
-        Value v = asnix_make_string_value(buf, len);
+        Value v = ll_make_string_value(buf, len);
         free(buf);
         return v;
     }
@@ -931,7 +931,7 @@ static Value parse_value(Parser *p) {
     return classify_bare_token(p->s + start, len);
 }
 
-Value asnix_toml_parse(const char *text, size_t len) {
+Value ll_toml_parse(const char *text, size_t len) {
     Parser p = { text, len, 0 };
     TNode *root = tnode_new(TN_TABLE);
     TNode *cur_table = root;

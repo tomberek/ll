@@ -10,7 +10,7 @@ typedef struct {
     size_t len, cap;
 } Buf;
 
-/* M174: `asnix_build_derivation_aterm_cached` used to start every single
+/* M174: `ll_build_derivation_aterm_cached` used to start every single
  * call from a fresh `Buf b = { 0 }` (NULL, zero-capacity), growing it by
  * doubling via `realloc` as bytes were appended, then handing the final
  * `b.buf` straight to the caller to `free()`. derivation.c calls this up
@@ -48,7 +48,7 @@ typedef struct {
  * `free()` it immediately -- none holds on to it past the next call
  * into this function, confirmed by reading every call site, but the
  * contract is honored unconditionally regardless) -- so the final
- * `asnix_build_derivation_aterm_cached` step below copies the finished
+ * `ll_build_derivation_aterm_cached` step below copies the finished
  * text out of `g_aterm_buf` into a fresh, exactly-sized `malloc`
  * (ONE allocation, sized precisely, instead of ~12 doubling reallocs
  * worth of copy-on-grow churn) and returns THAT, leaving `g_aterm_buf`
@@ -185,7 +185,7 @@ static size_t find_escape_aterm(const unsigned char *s, size_t len) {
 #endif
 
 /* M151: per-derivation escape cache, keyed by SOURCE POINTER (see aterm.h's
- * own comment on `AtermEscapeCache`/`asnix_build_derivation_aterm_cached`
+ * own comment on `AtermEscapeCache`/`ll_build_derivation_aterm_cached`
  * for why pointer identity, not content, is both correct and exactly what
  * `derivation.c`'s 3-passes-per-derivation caller needs). Plain open-
  * addressing table, linear probe, power-of-two capacity -- the per-
@@ -220,7 +220,7 @@ static size_t aterm_ptr_hash(const char *p) {
     return (size_t)x;
 }
 
-AtermEscapeCache *asnix_aterm_escape_cache_new(size_t hint) {
+AtermEscapeCache *ll_aterm_escape_cache_new(size_t hint) {
     size_t cap = 64;
     while (cap < hint * 2) cap *= 2;
     AtermEscapeCache *c = malloc(sizeof(*c));
@@ -230,7 +230,7 @@ AtermEscapeCache *asnix_aterm_escape_cache_new(size_t hint) {
     return c;
 }
 
-void asnix_aterm_escape_cache_free(AtermEscapeCache *c) {
+void ll_aterm_escape_cache_free(AtermEscapeCache *c) {
     if (!c) return;
     for (size_t i = 0; i < c->cap; i++) free(c->slots[i].val);
     free(c->slots);
@@ -255,7 +255,7 @@ static int aterm_cache_lookup(AtermEscapeCache *c, const char *s, char **out_val
  * build (derivation.c's caller creates one cache, uses it for exactly the
  * masked/real/cache-hash passes of ONE derivation, then frees it) -- the
  * entry count is known in advance well enough (the `hint` passed to
- * `asnix_aterm_escape_cache_new`) that growing is a rare safety net, not
+ * `ll_aterm_escape_cache_new`) that growing is a rare safety net, not
  * the common case; still handled correctly (rehash into a fresh, doubled
  * table) rather than assumed away. */
 static void aterm_cache_grow(AtermEscapeCache *c) {
@@ -341,7 +341,7 @@ static void buf_put_escaped(Buf *b, const char *s, AtermEscapeCache *cache) {
     }
 }
 
-char *asnix_build_derivation_aterm_cached(const AtermOutput *outputs, size_t noutputs,
+char *ll_build_derivation_aterm_cached(const AtermOutput *outputs, size_t noutputs,
                                            const AtermInputDrv *input_drvs, size_t ninput_drvs,
                                            const char **input_srcs, size_t ninput_srcs, const char *system,
                                            const char *builder, const char **args, size_t nargs,
@@ -423,10 +423,10 @@ char *asnix_build_derivation_aterm_cached(const AtermOutput *outputs, size_t nou
     return out;
 }
 
-char *asnix_build_derivation_aterm(const AtermOutput *outputs, size_t noutputs,
+char *ll_build_derivation_aterm(const AtermOutput *outputs, size_t noutputs,
                                     const AtermInputDrv *input_drvs, size_t ninput_drvs, const char **input_srcs,
                                     size_t ninput_srcs, const char *system, const char *builder, const char **args,
                                     size_t nargs, const AtermEnvVar *env, size_t nenv) {
-    return asnix_build_derivation_aterm_cached(outputs, noutputs, input_drvs, ninput_drvs, input_srcs, ninput_srcs,
+    return ll_build_derivation_aterm_cached(outputs, noutputs, input_drvs, ninput_drvs, input_srcs, ninput_srcs,
                                                 system, builder, args, nargs, env, nenv, NULL);
 }

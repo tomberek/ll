@@ -6,7 +6,7 @@
 LL_OP_ATTR Value ll_op_eq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
-    int eq = asnix_bshared_value_eq_op(lhs, rhs);
+    int eq = ll_bshared_value_eq_op(lhs, rhs);
     if (!eq) {
         ip = (IrOp *)((char *)ip + ip->a);
     } else {
@@ -18,7 +18,7 @@ LL_OP_ATTR Value ll_op_eq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFr
 LL_OP_ATTR Value ll_op_neq_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
-    int eq = asnix_bshared_value_eq_op(lhs, rhs);
+    int eq = ll_bshared_value_eq_op(lhs, rhs);
     if (eq) {
         ip = (IrOp *)((char *)ip + ip->a);
     } else {
@@ -31,12 +31,12 @@ LL_OP_ATTR Value ll_op_lt_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFr
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int take_then;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         take_then = (l < r);
     } else {
-        Value res = asnix_cmp_lt_values(lhs, rhs);
+        Value res = ll_cmp_lt_values(lhs, rhs);
         take_then = (res.raw == ll_true().raw);
     }
     if (take_then) {
@@ -51,12 +51,12 @@ LL_OP_ATTR Value ll_op_ge_if(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFr
     Value rhs = vs[-1], lhs = vs[-2];
     vs -= 2;
     int take_then;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         take_then = (l >= r);
     } else {
-        Value res = asnix_cmp_ge_values(lhs, rhs);
+        Value res = ll_cmp_ge_values(lhs, rhs);
         take_then = (res.raw == ll_true().raw);
     }
     if (take_then) {

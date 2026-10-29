@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "derivation.h" /* M80: asnix_compute_fixed_output_path, shared with builtins.path's formula */
+#include "derivation.h" /* M80: ll_compute_fixed_output_path, shared with builtins.path's formula */
 #include "hash_shim.h"
 #include "store_path.h"
 
@@ -58,7 +58,7 @@ static void nb_cstr(NarBuf *b, const char *s) {
     nb_str(b, s, strlen(s));
 }
 
-#define ASNIX_NAR_MAX_DEPTH 256
+#define LL_NAR_MAX_DEPTH 256
 
 static int name_cmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
@@ -75,15 +75,15 @@ static const char *nar_file_type_name(mode_t mode) {
     return "unknown";
 }
 
-static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filter, void *filter_ctx) {
-    if (depth >= ASNIX_NAR_MAX_DEPTH) {
-        fprintf(stderr, "asnix: path '%s' exceeds maximum NAR directory depth of %d\n", path, ASNIX_NAR_MAX_DEPTH);
+static void nar_dump(NarBuf *b, const char *path, int depth, LlNarFilter filter, void *filter_ctx) {
+    if (depth >= LL_NAR_MAX_DEPTH) {
+        fprintf(stderr, "ll: path '%s' exceeds maximum NAR directory depth of %d\n", path, LL_NAR_MAX_DEPTH);
         exit(1);
     }
 
     struct stat st;
     if (lstat(path, &st) != 0) {
-        fprintf(stderr, "asnix: cannot stat '%s' while copying it to the store\n", path);
+        fprintf(stderr, "ll: cannot stat '%s' while copying it to the store\n", path);
         exit(1);
     }
 
@@ -99,7 +99,7 @@ static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filt
         nb_cstr(b, "contents");
         FILE *f = fopen(path, "rb");
         if (!f) {
-            fprintf(stderr, "asnix: cannot open '%s' while copying it to the store\n", path);
+            fprintf(stderr, "ll: cannot open '%s' while copying it to the store\n", path);
             exit(1);
         }
         uint64_t size = (uint64_t)st.st_size;
@@ -125,7 +125,7 @@ static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filt
 
         DIR *d = opendir(path);
         if (!d) {
-            fprintf(stderr, "asnix: cannot read directory '%s' while copying it to the store\n", path);
+            fprintf(stderr, "ll: cannot read directory '%s' while copying it to the store\n", path);
             exit(1);
         }
         char **names = NULL;
@@ -145,7 +145,7 @@ static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filt
         for (size_t i = 0; i < nnames; i++) {
             char child[4096];
             snprintf(child, sizeof(child), "%s/%s", path, names[i]);
-            /* M80: `filter` (NULL from `asnix_copy_path_to_store`'s own
+            /* M80: `filter` (NULL from `ll_copy_path_to_store`'s own
              * call below -- behaviorally IDENTICAL to this function's
              * pre-M80 self, every "entry"/"node" pair still emitted
              * unconditionally) decides whether this child (and, if it's
@@ -155,7 +155,7 @@ static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filt
             if (filter) {
                 struct stat cst;
                 if (lstat(child, &cst) != 0) {
-                    fprintf(stderr, "asnix: cannot stat '%s' while copying it to the store\n", child);
+                    fprintf(stderr, "ll: cannot stat '%s' while copying it to the store\n", child);
                     exit(1);
                 }
                 if (!filter(filter_ctx, child, nar_file_type_name(cst.st_mode))) {
@@ -180,13 +180,13 @@ static void nar_dump(NarBuf *b, const char *path, int depth, AsnixNarFilter filt
         char target[4096];
         ssize_t n = readlink(path, target, sizeof(target) - 1);
         if (n < 0) {
-            fprintf(stderr, "asnix: cannot read symlink '%s' while copying it to the store\n", path);
+            fprintf(stderr, "ll: cannot read symlink '%s' while copying it to the store\n", path);
             exit(1);
         }
         target[n] = '\0';
         nb_cstr(b, target);
     } else {
-        fprintf(stderr, "asnix: file '%s' has an unsupported type for copying to the store\n", path);
+        fprintf(stderr, "ll: file '%s' has an unsupported type for copying to the store\n", path);
         exit(1);
     }
 
@@ -202,7 +202,7 @@ static size_t g_copy_cache_count = 0, g_copy_cache_cap = 0;
 
 /* perf: open-addressing dedup index parallel to g_copy_cache, same shape
  * as derivation.c's input_ref_add_src/InputRefSet.srcs_index fix (which
- * itself cites this exact anti-pattern) -- asnix_copy_path_to_store is
+ * itself cites this exact anti-pattern) -- ll_copy_path_to_store is
  * called once per Path-coerced value across a whole eval (M80's
  * `builtins.path`-shaped fixed-output formula plus every bare Path
  * string-context element), so a linear strcmp scan here was O(n) per
@@ -277,11 +277,11 @@ static void copy_cache_insert(const char *path, const char *result) {
     g_copy_cache_count++;
 }
 
-const char *asnix_copy_path_to_store_cache_lookup(const char *path) {
+const char *ll_copy_path_to_store_cache_lookup(const char *path) {
     return copy_cache_find(path);
 }
 
-void asnix_copy_path_to_store(const char *path, char *out, size_t out_cap) {
+void ll_copy_path_to_store(const char *path, char *out, size_t out_cap) {
     const char *cached = copy_cache_find(path);
     if (cached) {
         snprintf(out, out_cap, "%s", cached);
@@ -293,8 +293,8 @@ void asnix_copy_path_to_store(const char *path, char *out, size_t out_cap) {
     nar_dump(&b, path, 0, NULL, NULL);
 
     uint8_t nar_hash[32];
-    if (asnix_hash_sha256(b.buf, b.len, nar_hash) != 0) {
-        fprintf(stderr, "asnix: failed to load libcrypto -- enter the flake devShell\n");
+    if (ll_hash_sha256(b.buf, b.len, nar_hash) != 0) {
+        fprintf(stderr, "ll: failed to load libcrypto -- enter the flake devShell\n");
         exit(1);
     }
     free(b.buf);
@@ -317,29 +317,29 @@ void asnix_copy_path_to_store(const char *path, char *out, size_t out_cap) {
     }
     hashstr[7 + 64] = '\0';
 
-    size_t preimage_cap = strlen("source") + strlen(hashstr) + strlen(ASNIX_STORE_DIR) + strlen(name) + 8;
+    size_t preimage_cap = strlen("source") + strlen(hashstr) + strlen(LL_STORE_DIR) + strlen(name) + 8;
     char *preimage = malloc(preimage_cap);
-    size_t n = asnix_store_path_preimage("source", hashstr, name, preimage, preimage_cap);
+    size_t n = ll_store_path_preimage("source", hashstr, name, preimage, preimage_cap);
     if (n == 0) {
-        fprintf(stderr, "asnix: preimage too long copying '%s' to the store\n", path);
+        fprintf(stderr, "ll: preimage too long copying '%s' to the store\n", path);
         exit(1);
     }
     uint8_t outer_digest[32];
-    if (asnix_hash_sha256(preimage, n, outer_digest) != 0) {
-        fprintf(stderr, "asnix: failed to load libcrypto -- enter the flake devShell\n");
+    if (ll_hash_sha256(preimage, n, outer_digest) != 0) {
+        fprintf(stderr, "ll: failed to load libcrypto -- enter the flake devShell\n");
         exit(1);
     }
     free(preimage);
 
-    if (asnix_make_store_path_from_digest(outer_digest, name, out, out_cap) == 0) {
-        fprintf(stderr, "asnix: computed store path too long copying '%s' to the store\n", path);
+    if (ll_make_store_path_from_digest(outer_digest, name, out, out_cap) == 0) {
+        fprintf(stderr, "ll: computed store path too long copying '%s' to the store\n", path);
         exit(1);
     }
 
     copy_cache_insert(path, out);
 }
 
-void asnix_copy_path_to_store_ext(const char *path, const char *name, int recursive, AsnixNarFilter filter,
+void ll_copy_path_to_store_ext(const char *path, const char *name, int recursive, LlNarFilter filter,
                                    void *filter_ctx, const uint8_t expected_sha256[32], char *out, size_t out_cap) {
     const char *slash = strrchr(path, '/');
     const char *effective_name = name ? name : (slash ? slash + 1 : path);
@@ -349,8 +349,8 @@ void asnix_copy_path_to_store_ext(const char *path, const char *name, int recurs
         NarBuf b = { 0 };
         nb_cstr(&b, "nix-archive-1");
         nar_dump(&b, path, 0, filter, filter_ctx);
-        if (asnix_hash_sha256(b.buf, b.len, content_digest) != 0) {
-            fprintf(stderr, "asnix: failed to load libcrypto -- enter the flake devShell\n");
+        if (ll_hash_sha256(b.buf, b.len, content_digest) != 0) {
+            fprintf(stderr, "ll: failed to load libcrypto -- enter the flake devShell\n");
             exit(1);
         }
         free(b.buf);
@@ -361,44 +361,44 @@ void asnix_copy_path_to_store_ext(const char *path, const char *name, int recurs
          * recurse into). */
         struct stat st;
         if (lstat(path, &st) != 0) {
-            fprintf(stderr, "asnix: path '%s' does not exist\n", path);
+            fprintf(stderr, "ll: path '%s' does not exist\n", path);
             exit(1);
         }
         if (!S_ISREG(st.st_mode)) {
-            fprintf(stderr, "asnix: path '%s' is not a regular file (required for a non-recursive hash)\n", path);
+            fprintf(stderr, "ll: path '%s' is not a regular file (required for a non-recursive hash)\n", path);
             exit(1);
         }
         FILE *f = fopen(path, "rb");
         if (!f) {
-            fprintf(stderr, "asnix: cannot open '%s'\n", path);
+            fprintf(stderr, "ll: cannot open '%s'\n", path);
             exit(1);
         }
         char *buf = malloc((size_t)st.st_size ? (size_t)st.st_size : 1);
         size_t got = fread(buf, 1, (size_t)st.st_size, f);
         fclose(f);
-        if (asnix_hash_sha256(buf, got, content_digest) != 0) {
-            fprintf(stderr, "asnix: failed to load libcrypto -- enter the flake devShell\n");
+        if (ll_hash_sha256(buf, got, content_digest) != 0) {
+            fprintf(stderr, "ll: failed to load libcrypto -- enter the flake devShell\n");
             exit(1);
         }
         free(buf);
     }
 
     if (expected_sha256 && memcmp(expected_sha256, content_digest, 32) != 0) {
-        fprintf(stderr, "asnix: hash mismatch copying '%s' to the store (sha256 does not match the pinned value)\n",
+        fprintf(stderr, "ll: hash mismatch copying '%s' to the store (sha256 does not match the pinned value)\n",
                 path);
         exit(1);
     }
 
-    asnix_compute_fixed_output_path(recursive ? "recursive" : "flat", content_digest, 32, "sha256", 6,
+    ll_compute_fixed_output_path(recursive ? "recursive" : "flat", content_digest, 32, "sha256", 6,
                                      effective_name, out, out_cap);
 }
 
 /* M82: see nar.h's own comment. */
-int asnix_hash_path_nar_sha256(const char *path, AsnixNarFilter filter, void *filter_ctx, uint8_t out[32]) {
+int ll_hash_path_nar_sha256(const char *path, LlNarFilter filter, void *filter_ctx, uint8_t out[32]) {
     NarBuf b = { 0 };
     nb_cstr(&b, "nix-archive-1");
     nar_dump(&b, path, 0, filter, filter_ctx);
-    int rc = asnix_hash_sha256(b.buf, b.len, out);
+    int rc = ll_hash_sha256(b.buf, b.len, out);
     free(b.buf);
     return rc;
 }

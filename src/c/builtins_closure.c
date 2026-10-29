@@ -35,9 +35,9 @@
  *     Boolean; values of that type are incomparable", because the
  *     dedup set's ordering comparator is consulted on every insertion
  *     attempt regardless of value equality. This implementation still
- *     dedups by *equality* (asnix_bshared_value_eq), but now gates every
+ *     dedups by *equality* (ll_bshared_value_eq), but now gates every
  *     such comparison on `value_key_comparable` below first (same
- *     int/string/list scope `asnix_bshared_value_lt`, M57a, supports --
+ *     int/string/list scope `ll_bshared_value_lt`, M57a, supports --
  *     bool/null/attrs/function keys, or a mismatched pair like int-vs-
  *     string, are rejected) so a key-comparability violation is still
  *     caught and still fatal, just via an equality-based dedup loop
@@ -49,8 +49,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/heap.h"
-#include "asnix/ir.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
 #include "builtins_shared.h"
 #include "symtab.h"
 #include "value_util.h"
@@ -68,7 +68,7 @@ static void vv_push(ValueVec *v, Value x) {
     v->data[v->len++] = x;
 }
 
-/* Same type scope as asnix_bshared_value_lt (M57a): int-vs-int,
+/* Same type scope as ll_bshared_value_lt (M57a): int-vs-int,
  * string-vs-string, list-vs-list (checked shallowly here -- a `key`
  * made of lists-of-incomparable-elements will still get caught, just
  * one level later, by this same check on the next insertion attempt
@@ -87,7 +87,7 @@ static void vv_push(ValueVec *v, Value x) {
  * items, almost all of them DISTINCT keys (module file paths), which is
  * the worst case for the old O(n) linear `seen_keys` scan below: ~n^2/2
  * comparisons with almost no early-exit hits, measured directly via
- * callgrind at ~7.96 million asnix_bshared_value_eq calls from this one
+ * callgrind at ~7.96 million ll_bshared_value_eq calls from this one
  * call site alone (confirmed by temporarily instrumenting with an
  * fprintf before writing the fix). Replaced the O(n) linear scan with
  * an open-addressing hash set (closure_key_hash below) keyed on the
@@ -106,31 +106,31 @@ static void vv_push(ValueVec *v, Value x) {
 typedef enum { KC_INT, KC_STR, KC_LIST, KC_FLOAT, KC_OTHER } KeyClass;
 
 /* M-closure-hash-float-fix: value_key_comparable's ORIGINAL check (now
- * removed above) classified a Float -- tagged ASNIX_TAG_PTR same as a
+ * removed above) classified a Float -- tagged LL_TAG_PTR same as a
  * string, distinguished only by an internal marker (see value_util.h's
- * own asnix_value_is_float comment) -- into the SAME "comparable" bucket
- * as a real string, simply because it never excluded `asnix_value_is_
- * float` the way it excluded `asnix_value_is_path`. That was harmless in
+ * own ll_value_is_float comment) -- into the SAME "comparable" bucket
+ * as a real string, simply because it never excluded `ll_value_is_
+ * float` the way it excluded `ll_value_is_path`. That was harmless in
  * the original code because the actual EQUALITY check was always a
- * separate, correct call to asnix_bshared_value_eq (which checks
+ * separate, correct call to ll_bshared_value_eq (which checks
  * is_float first and does a real numeric double compare). This hash-set
  * replacement would NOT be harmless if it inherited the same
  * misclassification: closure_key_hash's STR case hashes raw PTR bytes,
  * and two numerically-equal doubles are not always byte-identical (0.0
  * and -0.0 differ only in the sign bit) -- hashing them as opaque bytes
  * would put them in different buckets and the hash set would never even
- * call asnix_bshared_value_eq to notice they're equal, silently failing
+ * call ll_bshared_value_eq to notice they're equal, silently failing
  * to dedupe a case the original O(n) scan handled correctly. Giving
  * Float its own class with a hash that normalizes -0.0 to +0.0 (see
  * closure_key_hash below) closes that gap -- same observable dedup
  * behavior as the original scan for every key type, not just the ones
  * exercised by this session's own test corpus. */
 static KeyClass key_class(Value v) {
-    int t = asnix_tag_of(v);
-    if (t == ASNIX_TAG_INT) return KC_INT;
-    if (t == ASNIX_TAG_PTR && asnix_value_is_float(v)) return KC_FLOAT;
-    if (t == ASNIX_TAG_PTR && !asnix_value_is_path(v)) return KC_STR;
-    if (t == ASNIX_TAG_LIST) return KC_LIST;
+    int t = ll_tag_of(v);
+    if (t == LL_TAG_INT) return KC_INT;
+    if (t == LL_TAG_PTR && ll_value_is_float(v)) return KC_FLOAT;
+    if (t == LL_TAG_PTR && !ll_value_is_path(v)) return KC_STR;
+    if (t == LL_TAG_LIST) return KC_LIST;
     return KC_OTHER;
 }
 
@@ -141,9 +141,9 @@ static KeyClass key_class(Value v) {
  * "never comparable" behavior, which is why two `{key = true;}` items
  * still throw -- see the long comment above prim_genericClosure). Note
  * KC_INT and KC_FLOAT are NOT mutually comparable here even though
- * asnix_bshared_value_eq itself allows numeric int/float equality --
+ * ll_bshared_value_eq itself allows numeric int/float equality --
  * this matches value_key_comparable's own original behavior exactly
- * (its first check requires BOTH sides tagged ASNIX_TAG_INT, so an
+ * (its first check requires BOTH sides tagged LL_TAG_INT, so an
  * int key mixed with a float key already threw "cannot compare" before
  * this fix existed; not something this fix changes either way). */
 static int classes_comparable(KeyClass a, KeyClass b) {
@@ -152,30 +152,30 @@ static int classes_comparable(KeyClass a, KeyClass b) {
 }
 
 /* FNV-1a-style mix, folded recursively over a LIST key's elements (each
- * forced first, exactly like asnix_bshared_value_eq's own LIST case
+ * forced first, exactly like ll_bshared_value_eq's own LIST case
  * forces each element via its recursive call -- so two keys that are
- * equal per asnix_bshared_value_eq always hash equal here too, which is
+ * equal per ll_bshared_value_eq always hash equal here too, which is
  * the only correctness requirement a hash-set dedup has). Only ever
  * called on a key whose class is KC_INT/KC_STR/KC_LIST/KC_FLOAT
  * (KC_OTHER keys are never hashed -- see prim_genericClosure below). */
 static uint64_t closure_key_hash(Value v) {
     uint64_t h = 1469598103934665603ULL;
-    int t = asnix_tag_of(v);
-    if (t == ASNIX_TAG_INT) {
-        h ^= (uint64_t)asnix_int_value(v);
+    int t = ll_tag_of(v);
+    if (t == LL_TAG_INT) {
+        h ^= (uint64_t)ll_int_value(v);
         h *= 0x100000001b3ULL;
         return h;
     }
-    if (asnix_value_is_float(v)) {
+    if (ll_value_is_float(v)) {
         /* Normalize -0.0 to +0.0 before hashing -- the one case where
-         * two IEEE754 doubles compare equal (asnix_bshared_value_eq's
+         * two IEEE754 doubles compare equal (ll_bshared_value_eq's
          * own `da == db`) but have different bit patterns. Every other
          * finite value, and NaN (which is never equal to anything, even
          * itself, so a hash collision there is harmless -- value_eq
          * still correctly says "not equal" on probe), already hashes
          * consistently with its own equality notion without special
          * casing. */
-        double d = asnix_float_value(v);
+        double d = ll_float_value(v);
         if (d == 0.0) d = 0.0; /* collapses -0.0 to +0.0; +0.0 is a no-op */
         uint64_t bits;
         memcpy(&bits, &d, sizeof(bits));
@@ -183,22 +183,22 @@ static uint64_t closure_key_hash(Value v) {
         h *= 0x100000001b3ULL;
         return h;
     }
-    if (t == ASNIX_TAG_LIST) {
-        int64_t n = asnix_bshared_list_count(v);
-        const Value *elems = asnix_bshared_list_elems(v);
+    if (t == LL_TAG_LIST) {
+        int64_t n = ll_bshared_list_count(v);
+        const Value *elems = ll_bshared_list_elems(v);
         h ^= (uint64_t)n;
         h *= 0x100000001b3ULL;
         for (int64_t i = 0; i < n; i++) {
-            uint64_t eh = closure_key_hash(asnix_force_for_print(elems[i]));
+            uint64_t eh = closure_key_hash(ll_force_for_print(elems[i]));
             h ^= eh;
             h *= 0x100000001b3ULL;
         }
         return h;
     }
-    /* KC_STR (plain ASNIX_TAG_PTR, non-path) -- same byte source
-     * asnix_bshared_value_eq's own PTR-vs-PTR case memcmp's. */
+    /* KC_STR (plain LL_TAG_PTR, non-path) -- same byte source
+     * ll_bshared_value_eq's own PTR-vs-PTR case memcmp's. */
     int64_t len;
-    const char *bytes = asnix_ptr_bytes(v, &len);
+    const char *bytes = ll_ptr_bytes(v, &len);
     for (int64_t i = 0; i < len; i++) {
         h ^= (uint8_t)bytes[i];
         h *= 0x100000001b3ULL;
@@ -246,7 +246,7 @@ static void seen_set_grow(ClosureSeenSet *s) {
     free(old);
 }
 
-/* Returns 1 if an equal key is already present (per asnix_bshared_value_eq);
+/* Returns 1 if an equal key is already present (per ll_bshared_value_eq);
  * otherwise inserts `key` and returns 0. Keeps the load factor <= 0.75. */
 static int seen_set_probe_or_insert(ClosureSeenSet *s, Value key) {
     if (s->count * 4 >= s->cap * 3) seen_set_grow(s);
@@ -254,7 +254,7 @@ static int seen_set_probe_or_insert(ClosureSeenSet *s, Value key) {
     size_t mask = s->cap - 1;
     size_t i = (size_t)h & mask;
     while (s->slots[i].used) {
-        if (s->slots[i].hash == h && asnix_bshared_value_eq(s->slots[i].key, key)) return 1;
+        if (s->slots[i].hash == h && ll_bshared_value_eq(s->slots[i].key, key)) return 1;
         i = (i + 1) & mask;
     }
     s->slots[i].used = 1;
@@ -267,50 +267,50 @@ static int seen_set_probe_or_insert(ClosureSeenSet *s, Value key) {
 static Value prim_genericClosure(const Value *args, int64_t argc) {
     (void)argc;
     Value input = args[0];
-    ASNIX_REQUIRE_ATTRS(input, "genericClosure");
+    LL_REQUIRE_ATTRS(input, "genericClosure");
 
-    uint32_t sym_startSet = asnix_intern("startSet", 8);
-    uint32_t sym_operator = asnix_intern("operator", 8);
-    uint32_t sym_key = asnix_intern("key", 3);
+    uint32_t sym_startSet = ll_intern("startSet", 8);
+    uint32_t sym_operator = ll_intern("operator", 8);
+    uint32_t sym_key = ll_intern("key", 3);
 
-    int64_t ss_idx = asnix_bshared_attrs_find(input, sym_startSet);
-    if (ss_idx < 0) asnix_bshared_fatal("genericClosure", "attribute 'startSet' is missing");
-    Value start_set = asnix_force_for_print(asnix_bshared_attrs_value(input, ss_idx));
-    ASNIX_REQUIRE_LIST(start_set, "genericClosure");
+    int64_t ss_idx = ll_bshared_attrs_find(input, sym_startSet);
+    if (ss_idx < 0) ll_bshared_fatal("genericClosure", "attribute 'startSet' is missing");
+    Value start_set = ll_force_for_print(ll_bshared_attrs_value(input, ss_idx));
+    LL_REQUIRE_LIST(start_set, "genericClosure");
 
-    int64_t op_idx = asnix_bshared_attrs_find(input, sym_operator);
-    if (op_idx < 0) asnix_bshared_fatal("genericClosure", "attribute 'operator' is missing");
-    Value operator_fn = asnix_force_for_print(asnix_bshared_attrs_value(input, op_idx));
+    int64_t op_idx = ll_bshared_attrs_find(input, sym_operator);
+    if (op_idx < 0) ll_bshared_fatal("genericClosure", "attribute 'operator' is missing");
+    Value operator_fn = ll_force_for_print(ll_bshared_attrs_value(input, op_idx));
 
     ValueVec queue = {0}, result = {0};
     ClosureSeenSet seen;
     seen_set_init(&seen);
     int have_class = 0;
     KeyClass class0 = KC_OTHER;
-    int64_t n0 = asnix_bshared_list_count(start_set);
-    const Value *elems0 = asnix_bshared_list_elems(start_set);
+    int64_t n0 = ll_bshared_list_count(start_set);
+    const Value *elems0 = ll_bshared_list_elems(start_set);
     for (int64_t i = 0; i < n0; i++) vv_push(&queue, elems0[i]);
 
     size_t head = 0;
     while (head < queue.len) {
         /* Lazy list elements (M23's `map`, etc.) -- force before checking
          * the tag, same class of fix M23's own concatLists needed. */
-        Value item = asnix_force_for_print(queue.data[head++]);
-        if (asnix_tag_of(item) != ASNIX_TAG_ATTRS) {
-            asnix_bshared_fatal("genericClosure", "a work-set element is not an attrset");
+        Value item = ll_force_for_print(queue.data[head++]);
+        if (ll_tag_of(item) != LL_TAG_ATTRS) {
+            ll_bshared_fatal("genericClosure", "a work-set element is not an attrset");
         }
-        int64_t k_idx = asnix_bshared_attrs_find(item, sym_key);
+        int64_t k_idx = ll_bshared_attrs_find(item, sym_key);
         if (k_idx < 0) {
-            asnix_bshared_fatal("genericClosure", "a work-set element is missing the 'key' attribute");
+            ll_bshared_fatal("genericClosure", "a work-set element is missing the 'key' attribute");
         }
-        Value key = asnix_force_for_print(asnix_bshared_attrs_value(item, k_idx));
+        Value key = ll_force_for_print(ll_bshared_attrs_value(item, k_idx));
 
         KeyClass kc = key_class(key);
         if (!have_class) {
             have_class = 1;
             class0 = kc;
         } else if (!classes_comparable(class0, kc)) {
-            asnix_bshared_fatal("genericClosure", "cannot compare two 'key' values (incompatible or uncomparable types)");
+            ll_bshared_fatal("genericClosure", "cannot compare two 'key' values (incompatible or uncomparable types)");
         }
         /* A KC_OTHER key is only ever reachable here on its very first
          * occurrence (any second key -- even another KC_OTHER one --
@@ -322,26 +322,26 @@ static Value prim_genericClosure(const Value *args, int64_t argc) {
         if (already_seen) continue;
         vv_push(&result, item);
 
-        Value next = asnix_apply(operator_fn, &item, 1);
-        if (asnix_tag_of(next) != ASNIX_TAG_LIST) {
-            asnix_bshared_fatal("genericClosure", "'operator' did not return a list");
+        Value next = ll_apply(operator_fn, &item, 1);
+        if (ll_tag_of(next) != LL_TAG_LIST) {
+            ll_bshared_fatal("genericClosure", "'operator' did not return a list");
         }
-        int64_t ncount = asnix_bshared_list_count(next);
-        const Value *nelems = asnix_bshared_list_elems(next);
+        int64_t ncount = ll_bshared_list_count(next);
+        const Value *nelems = ll_bshared_list_elems(next);
         for (int64_t i = 0; i < ncount; i++) vv_push(&queue, nelems[i]);
     }
 
-    Value out = asnix_bshared_make_list(result.data, (int64_t)result.len);
+    Value out = ll_bshared_make_list(result.data, (int64_t)result.len);
     free(queue.data);
     free(seen.slots);
     free(result.data);
     return out;
 }
 
-static Value build_genericClosure(void) { return asnix_bshared_make_primop((void *)prim_genericClosure, 1); }
+static Value build_genericClosure(void) { return ll_bshared_make_primop((void *)prim_genericClosure, 1); }
 
-const AsnixBuiltinMiscDef ASNIX_CLOSURE_BUILTINS[] = {
+const LlBuiltinMiscDef LL_CLOSURE_BUILTINS[] = {
     { "genericClosure", build_genericClosure },
 };
 
-const size_t ASNIX_CLOSURE_BUILTINS_COUNT = sizeof(ASNIX_CLOSURE_BUILTINS) / sizeof(ASNIX_CLOSURE_BUILTINS[0]);
+const size_t LL_CLOSURE_BUILTINS_COUNT = sizeof(LL_CLOSURE_BUILTINS) / sizeof(LL_CLOSURE_BUILTINS[0]);

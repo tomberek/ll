@@ -9,7 +9,7 @@
  * (`else if allowBuiltinFetchGit then fetchGit {...} else missingHash`)
  * -- and this codebase COMPILES an entire imported file's whole AST
  * up front (compiler.c's `compile_expr`, called once per file from
- * `asnix_eval_file`), including both arms of every `if`, not just the
+ * `ll_eval_file`), including both arms of every `if`, not just the
  * one that ends up running. compiler.c's AST_VAR case resolves every
  * free variable against the static scope chain *at compile time*
  * (confirmed: that's a direct port of real Nix's own `bindVars`, which
@@ -46,8 +46,8 @@
  * git-object-store implementation in this codebase and building one
  * would be wildly disproportionate to this feature's actual payoff here.
  * The fetched tree is then run through M75/M80's existing NAR-hash
- * store-copy machinery (`nar.c`'s `asnix_copy_path_to_store_ext`/the new
- * `asnix_hash_path_nar_sha256`, nar.h) -- the exact same formula a
+ * store-copy machinery (`nar.c`'s `ll_copy_path_to_store_ext`/the new
+ * `ll_hash_path_nar_sha256`, nar.h) -- the exact same formula a
  * fixed-output derivation or `builtins.path` already uses, not a
  * separately-derived one, so `outPath`/`narHash` here are genuinely
  * real, byte-for-byte-verifiable store paths/hashes, not placeholders.
@@ -126,7 +126,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "asnix/ir.h" /* asnix_force_for_print */
+#include "ll/ir.h" /* ll_force_for_print */
 #include "base64.h"
 #include "builtins_shared.h"
 #include "nar.h"
@@ -135,7 +135,7 @@
 #include "value_util.h"
 
 static _Noreturn void fg_fatal(const char *msg) {
-    fprintf(stderr, "asnix: fetchGit: %s\n", msg);
+    fprintf(stderr, "ll: fetchGit: %s\n", msg);
     exit(1);
 }
 
@@ -188,10 +188,10 @@ static int fg_run_capture(const char *cmd, char *out, size_t out_cap) {
 }
 
 static char *fg_dup_string_attr(Value v, const char *who) {
-    v = asnix_force_for_print(v);
+    v = ll_force_for_print(v);
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(v, &bytes, &len, who);
+    ll_bshared_string_bytes(v, &bytes, &len, who);
     char *s = malloc((size_t)len + 1);
     memcpy(s, bytes, (size_t)len);
     s[len] = '\0';
@@ -199,18 +199,18 @@ static char *fg_dup_string_attr(Value v, const char *who) {
 }
 
 static int fg_bool_attr(Value v, const char *who) {
-    v = asnix_force_for_print(v);
-    if (asnix_tag_of(v) != ASNIX_TAG_IMM
-        || (asnix_imm_subtag(v) != ASNIX_IMM_TRUE && asnix_imm_subtag(v) != ASNIX_IMM_FALSE)) {
-        fprintf(stderr, "asnix: fetchGit: '%s' must be a boolean\n", who);
+    v = ll_force_for_print(v);
+    if (ll_tag_of(v) != LL_TAG_IMM
+        || (ll_imm_subtag(v) != LL_IMM_TRUE && ll_imm_subtag(v) != LL_IMM_FALSE)) {
+        fprintf(stderr, "ll: fetchGit: '%s' must be a boolean\n", who);
         exit(1);
     }
-    return asnix_imm_subtag(v) == ASNIX_IMM_TRUE;
+    return ll_imm_subtag(v) == LL_IMM_TRUE;
 }
 
-Value asnix_prim_fetchGit(const Value *args, int64_t argc) {
+Value ll_prim_fetchGit(const Value *args, int64_t argc) {
     (void)argc;
-    Value arg = asnix_force_for_print(args[0]);
+    Value arg = ll_force_for_print(args[0]);
 
     char *url = NULL;
     char *ref = NULL;
@@ -218,13 +218,13 @@ Value asnix_prim_fetchGit(const Value *args, int64_t argc) {
     int shallow = 0;
     int submodules = 0;
 
-    if (asnix_tag_of(arg) == ASNIX_TAG_ATTRS) {
-        int64_t n = asnix_bshared_attrs_count(arg);
+    if (ll_tag_of(arg) == LL_TAG_ATTRS) {
+        int64_t n = ll_bshared_attrs_count(arg);
         for (int64_t i = 0; i < n; i++) {
-            uint32_t sym = asnix_bshared_attrs_sym(arg, i);
+            uint32_t sym = ll_bshared_attrs_sym(arg, i);
             size_t klen;
-            const char *kname = asnix_sym_name(sym, &klen);
-            Value val = asnix_bshared_attrs_value(arg, i);
+            const char *kname = ll_sym_name(sym, &klen);
+            Value val = ll_bshared_attrs_value(arg, i);
             if (klen == 3 && memcmp(kname, "url", 3) == 0) {
                 url = fg_dup_string_attr(val, "url");
             } else if (klen == 3 && memcmp(kname, "ref", 3) == 0) {
@@ -345,16 +345,16 @@ Value asnix_prim_fetchGit(const Value *args, int64_t argc) {
     short_rev[sl] = '\0';
 
     uint8_t digest[32];
-    if (asnix_hash_path_nar_sha256(workdir, NULL, NULL, digest) != 0)
+    if (ll_hash_path_nar_sha256(workdir, NULL, NULL, digest) != 0)
         fg_fatal("failed to load libcrypto -- enter the flake devShell");
-    size_t b64len = asnix_base64_encoded_length(32);
+    size_t b64len = ll_base64_encoded_length(32);
     char narhash_b64[64];
-    asnix_base64_encode(digest, 32, narhash_b64);
+    ll_base64_encode(digest, 32, narhash_b64);
     char narhash_str[80];
     snprintf(narhash_str, sizeof(narhash_str), "sha256-%.*s", (int)b64len, narhash_b64);
 
     char out_path[300];
-    asnix_copy_path_to_store_ext(workdir, "source", 1, NULL, NULL, NULL, out_path, sizeof(out_path));
+    ll_copy_path_to_store_ext(workdir, "source", 1, NULL, NULL, NULL, out_path, sizeof(out_path));
 
     /* Best-effort cleanup -- a leaked /tmp scratch dir on failure is
      * harmless (every fatal path above already exit()s first). */
@@ -373,37 +373,37 @@ Value asnix_prim_fetchGit(const Value *args, int64_t argc) {
     free(ref);
     free(rev);
 
-    Value out_path_str = asnix_make_string_value(out_path, strlen(out_path));
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    asnix_ctx_add_opaque(&ctx, out_path);
-    asnix_string_attach_context(out_path_str, &ctx);
+    Value out_path_str = ll_make_string_value(out_path, strlen(out_path));
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    ll_ctx_add_opaque(&ctx, out_path);
+    ll_string_attach_context(out_path_str, &ctx);
 
     uint32_t syms[8];
     Value vals[8];
     int64_t k = 0;
-    syms[k] = asnix_intern("outPath", 7);
+    syms[k] = ll_intern("outPath", 7);
     vals[k++] = out_path_str;
-    syms[k] = asnix_intern("narHash", 7);
-    vals[k++] = asnix_make_string_value(narhash_str, strlen(narhash_str));
-    syms[k] = asnix_intern("rev", 3);
-    vals[k++] = asnix_make_string_value(resolved_rev, strlen(resolved_rev));
-    syms[k] = asnix_intern("shortRev", 8);
-    vals[k++] = asnix_make_string_value(short_rev, strlen(short_rev));
-    syms[k] = asnix_intern("revCount", 8);
-    vals[k++] = asnix_make_int(rev_count);
-    syms[k] = asnix_intern("submodules", 10);
-    vals[k++] = submodules ? ASNIX_TRUE : ASNIX_FALSE;
+    syms[k] = ll_intern("narHash", 7);
+    vals[k++] = ll_make_string_value(narhash_str, strlen(narhash_str));
+    syms[k] = ll_intern("rev", 3);
+    vals[k++] = ll_make_string_value(resolved_rev, strlen(resolved_rev));
+    syms[k] = ll_intern("shortRev", 8);
+    vals[k++] = ll_make_string_value(short_rev, strlen(short_rev));
+    syms[k] = ll_intern("revCount", 8);
+    vals[k++] = ll_make_int(rev_count);
+    syms[k] = ll_intern("submodules", 10);
+    vals[k++] = submodules ? LL_TRUE : LL_FALSE;
     if (have_last_modified) {
-        syms[k] = asnix_intern("lastModified", 12);
-        vals[k++] = asnix_make_int(last_modified);
-        syms[k] = asnix_intern("lastModifiedDate", 16);
-        vals[k++] = asnix_make_string_value(last_modified_date, strlen(last_modified_date));
+        syms[k] = ll_intern("lastModified", 12);
+        vals[k++] = ll_make_int(last_modified);
+        syms[k] = ll_intern("lastModifiedDate", 16);
+        vals[k++] = ll_make_string_value(last_modified_date, strlen(last_modified_date));
     }
 
-    return asnix_bshared_make_attrs(syms, vals, k);
+    return ll_bshared_make_attrs(syms, vals, k);
 }
 
-Value asnix_make_fetchGit_primop(void) {
-    return asnix_bshared_make_primop((void *)asnix_prim_fetchGit, 1);
+Value ll_make_fetchGit_primop(void) {
+    return ll_bshared_make_primop((void *)ll_prim_fetchGit, 1);
 }

@@ -1,13 +1,13 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
 /* Per-depth scratch-buffer cache backing src/asm/force.S's
- * asnix_force_for_print -- see include/asnix/force_scratch.h's header
+ * ll_force_for_print -- see include/ll/force_scratch.h's header
  * comment for why this exists and why indexing by depth (rather than a
  * single cached slot) is both correct and necessary in practice. */
-#include "asnix/force_scratch.h"
+#include "ll/force_scratch.h"
 
 #include <stdlib.h>
 
-#include "asnix/arena.h"
+#include "ll/arena.h"
 
 typedef struct {
     void *valstack;
@@ -33,22 +33,22 @@ static void ensure_cap(size_t depth) {
     g_cap = new_cap;
 }
 
-void *asnix_force_scratch_valstack(int64_t depth) {
+void *ll_force_scratch_valstack(int64_t depth) {
     ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_slots[depth];
-    if (!slot->valstack) slot->valstack = asnix_arena_alloc(ASNIX_FORCE_VALSTACK_BYTES);
+    if (!slot->valstack) slot->valstack = ll_arena_alloc(LL_FORCE_VALSTACK_BYTES);
     return slot->valstack;
 }
 
-void *asnix_force_scratch_retstack(int64_t depth) {
+void *ll_force_scratch_retstack(int64_t depth) {
     ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_slots[depth];
-    if (!slot->retstack) slot->retstack = asnix_arena_alloc(ASNIX_FORCE_RETSTACK_BYTES);
+    if (!slot->retstack) slot->retstack = ll_arena_alloc(LL_FORCE_RETSTACK_BYTES);
     return slot->retstack;
 }
 
-/* Independent per-depth cache for src/asm/apply.S's asnix_apply -- see
- * force_scratch.h's own comment on asnix_apply_scratch_valstack for why
+/* Independent per-depth cache for src/asm/apply.S's ll_apply -- see
+ * force_scratch.h's own comment on ll_apply_scratch_valstack for why
  * this exists and why it's a second, separate cache rather than reusing
  * g_slots above. */
 static ForceScratchSlot *g_apply_slots = NULL;
@@ -66,22 +66,22 @@ static void apply_ensure_cap(size_t depth) {
     g_apply_cap = new_cap;
 }
 
-void *asnix_apply_scratch_valstack(int64_t depth) {
+void *ll_apply_scratch_valstack(int64_t depth) {
     apply_ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_apply_slots[depth];
-    if (!slot->valstack) slot->valstack = asnix_arena_alloc(ASNIX_FORCE_VALSTACK_BYTES);
+    if (!slot->valstack) slot->valstack = ll_arena_alloc(LL_FORCE_VALSTACK_BYTES);
     return slot->valstack;
 }
 
-void *asnix_apply_scratch_retstack(int64_t depth) {
+void *ll_apply_scratch_retstack(int64_t depth) {
     apply_ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_apply_slots[depth];
-    if (!slot->retstack) slot->retstack = asnix_arena_alloc(ASNIX_FORCE_RETSTACK_BYTES);
+    if (!slot->retstack) slot->retstack = ll_arena_alloc(LL_FORCE_RETSTACK_BYTES);
     return slot->retstack;
 }
 
-/* Independent per-depth cache for src/asm/dispatch.S's asnix_eval -- see
- * force_scratch.h's own comment on asnix_eval_scratch_valstack for why. */
+/* Independent per-depth cache for src/asm/dispatch.S's ll_eval -- see
+ * force_scratch.h's own comment on ll_eval_scratch_valstack for why. */
 static ForceScratchSlot *g_eval_slots = NULL;
 static size_t g_eval_cap = 0;
 
@@ -97,16 +97,16 @@ static void eval_ensure_cap(size_t depth) {
     g_eval_cap = new_cap;
 }
 
-void *asnix_eval_scratch_valstack(int64_t depth) {
+void *ll_eval_scratch_valstack(int64_t depth) {
     eval_ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_eval_slots[depth];
-    if (!slot->valstack) slot->valstack = asnix_arena_alloc(ASNIX_EVAL_VALSTACK_BYTES);
+    if (!slot->valstack) slot->valstack = ll_arena_alloc(LL_EVAL_VALSTACK_BYTES);
     return slot->valstack;
 }
 
-void *asnix_eval_scratch_retstack(int64_t depth) {
+void *ll_eval_scratch_retstack(int64_t depth) {
     eval_ensure_cap((size_t)depth);
     ForceScratchSlot *slot = &g_eval_slots[depth];
-    if (!slot->retstack) slot->retstack = asnix_arena_alloc(ASNIX_EVAL_RETSTACK_BYTES);
+    if (!slot->retstack) slot->retstack = ll_arena_alloc(LL_EVAL_RETSTACK_BYTES);
     return slot->retstack;
 }

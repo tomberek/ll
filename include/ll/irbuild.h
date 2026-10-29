@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_TEST_IRBUILD_H
-#define ASNIX_TEST_IRBUILD_H
+#ifndef LL_TEST_IRBUILD_H
+#define LL_TEST_IRBUILD_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include "asnix/ir.h"
+#include "ll/ir.h"
 
 /* IR-stream builder shared by the M3 test fixtures (tests/ir) and the real
  * M4 compiler (src/c/compiler.c) -- "append an IrOp, track patch sites" is
@@ -15,11 +15,11 @@ typedef struct {
     size_t len, cap;
     int64_t *pool;
     size_t pool_len, pool_cap;
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
+#ifdef LL_IRDUMP_LINE_TRACKING
     /* Source-position debug tracking: parallel to `ops`, one entry per
      * emitted op. Compiled into this struct ONLY in irdump's own variant
      * build (see Makefile) -- a real production `asnix`/`libasnix.a`
-     * build never defines ASNIX_IRDUMP_LINE_TRACKING, so IrBuilder there
+     * build never defines LL_IRDUMP_LINE_TRACKING, so IrBuilder there
      * is byte-identical in layout to before this feature existed. */
     uint32_t *lines;
     size_t lines_cap;
@@ -29,7 +29,7 @@ typedef struct {
 IrBuilder *ib_new(void);
 size_t ib_len(IrBuilder *b);
 
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
+#ifdef LL_IRDUMP_LINE_TRACKING
 /* Debug-only source-line tracking for irdump's "which Nix construct fired
  * this optimizer pass" feature. Compiled in ONLY for irdump's own variant
  * build of these files (ast.c/parser.c/compiler.c/irbuild.c/irpass.c --
@@ -53,7 +53,7 @@ void ib_set_current_src_pos(uint32_t pos);
  * per real eval) never carries this debug-only pointer's permanent 8-byte
  * cost even in the irdump variant build. irdump.c is the only real
  * caller. */
-const uint32_t *asnix_ib_lookup_program_lines(const IrProgram *prog);
+const uint32_t *ll_ib_lookup_program_lines(const IrProgram *prog);
 #else
 /* Plain production build: these become unconditional no-ops so compiler.c
  * (shared source between both build variants) doesn't need its own
@@ -86,14 +86,14 @@ size_t ib_jmp(IrBuilder *b);  /* ditto */
 void ib_patch_delta(IrBuilder *b, size_t site, size_t target_idx);
 size_t ib_let(IrBuilder *b, int64_t nslots);
 /* body_prog must come from this same translation's ib_finish() -- its
- * `pool` travels with the resulting closure (M100: via ASNIX_CLOSURE_OFF_PROG
+ * `pool` travels with the resulting closure (M100: via LL_CLOSURE_OFF_PROG
  * in ir.h, a single IrProgram* rather than separate body/pool fields) so a
  * lambda body containing its own nested OP_LAMBDA resolves against the
  * right constant pool at call time, not the caller's.
  * `formals_raw`: this closure's pre-built `builtins.functionArgs` result
  * Value.raw (M37) -- the caller must build it (a real `{name:
  * hasDefault}` attrset for a lambda-pattern, or any empty-attrset Value
- * otherwise) and pass it through here; see ASNIX_CLOSURE_OFF_FORMALS,
+ * otherwise) and pass it through here; see LL_CLOSURE_OFF_FORMALS,
  * ir.h. */
 size_t ib_lambda(IrBuilder *b, int64_t arity, IrProgram *body_prog, int64_t formals_raw);
 size_t ib_call(IrBuilder *b, int64_t argc);
@@ -184,7 +184,7 @@ size_t ib_path_concat(IrBuilder *b, int64_t count);
 
 /* `with`: pops the with-expr thunk (pushed by a preceding ib_mk_thunk, same
  * convention as ib_let) into a new with-tagged 1-slot Env frame -- see
- * ASNIX_ENV_WITH_TAG in env.h and op_with.S. */
+ * LL_ENV_WITH_TAG in env.h and op_with.S. */
 size_t ib_with(IrBuilder *b);
 /* Emits with a placeholder delta (operand `a`, patched via ib_patch_delta,
  * same convention as ib_if/ib_jmp) and the fixed symbol id `sym` (operand
@@ -247,7 +247,7 @@ size_t ib_ge_if(IrBuilder *b);
 size_t ib_has_attr_if(IrBuilder *b, uint32_t sym);
 
 /* Finalizes the builder: runs ir_link() over the accumulated ops in place
- * and returns an IrProgram ready for asnix_eval(). */
+ * and returns an IrProgram ready for ll_eval(). */
 IrProgram *ib_finish(IrBuilder *b);
 
-#endif /* ASNIX_TEST_IRBUILD_H */
+#endif /* LL_TEST_IRBUILD_H */

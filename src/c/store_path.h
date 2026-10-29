@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_STORE_PATH_H
-#define ASNIX_STORE_PATH_H
+#ifndef LL_STORE_PATH_H
+#define LL_STORE_PATH_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,19 +24,19 @@
  *   path     = storeDir + "/" + base32(compressed) + "-" + name
  */
 
-#define ASNIX_STORE_DIR "/nix/store"
+#define LL_STORE_DIR "/nix/store"
 
 /* Assembles "type:hashWithAlgoPrefix:storeDir:name" into `out` (size
  * `out_cap`, NUL-terminated). Returns the length written (not counting
  * the NUL), or 0 if it wouldn't fit. */
-size_t asnix_store_path_preimage(const char *type, const char *hash_with_algo, const char *name, char *out,
+size_t ll_store_path_preimage(const char *type, const char *hash_with_algo, const char *name, char *out,
                                   size_t out_cap);
 
 /* Given a 32-byte SHA-256 digest of a preimage string (see above),
  * writes the full store path "/nix/store/<32-char-base32>-<name>" into
  * `out` (NUL-terminated). Returns the length written (not counting the
  * NUL), or 0 if it wouldn't fit. */
-size_t asnix_make_store_path_from_digest(const uint8_t digest[32], const char *name, char *out, size_t out_cap);
+size_t ll_make_store_path_from_digest(const uint8_t digest[32], const char *name, char *out, size_t out_cap);
 
 /* Validates a store path `name` component against real Nix's own rules
  * (ported from ~/nix/src/libstore/path.cc's `checkName`): non-empty, at
@@ -50,6 +50,6 @@ size_t asnix_make_store_path_from_digest(const uint8_t digest[32], const char *n
  * accepting e.g. spaces/slashes/empty names that real Nix rejects
  * (numtide/nix-conformance's several eval-fail-drv-name-... cases and
  * eval-fail-derivation-name.nix all expect this to be a hard error). */
-void asnix_check_store_path_name(const char *name);
+void ll_check_store_path_name(const char *name);
 
-#endif /* ASNIX_STORE_PATH_H */
+#endif /* LL_STORE_PATH_H */

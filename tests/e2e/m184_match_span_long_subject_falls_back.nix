@@ -1,4 +1,4 @@
-# M184's fast path is gated on `slen <= ASNIX_REGEX_CUSTOM_MAX_SPAN`
+# M184's fast path is gated on `slen <= LL_REGEX_CUSTOM_MAX_SPAN`
 # (2000, the pre-existing M68 recursion-safety cap) -- a subject longer
 # than that must keep using the unmodified glibc-regexec path
 # regardless of how many times this exact pattern has already been

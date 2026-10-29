@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BYTECODE_CACHE_H
-#define ASNIX_BYTECODE_CACHE_H
+#ifndef LL_BYTECODE_CACHE_H
+#define LL_BYTECODE_CACHE_H
 
 #include <stdint.h>
 
-#include "asnix/ir.h"
+#include "ll/ir.h"
 
 typedef struct Ast Ast; /* ast.h's own tag -- forward-declared so this header
                           * doesn't need a full #include "ast.h" */
@@ -17,7 +17,7 @@ typedef struct Ast Ast; /* ast.h's own tag -- forward-declared so this header
  * path+content; freshness against the CURRENT content at that path is
  * validated separately via a cheap mtime+size check, with a content-
  * hash fallback -- see bytecode_cache.c's own header-format comment and
- * asnix_bytecode_cache_lookup_fast's doc comment below for the full
+ * ll_bytecode_cache_lookup_fast's doc comment below for the full
  * reasoning and the exact tradeoff accepted). Two identical-content
  * files at different paths still never share an entry (different
  * filenames, since the key is the path). See bytecode.h/.c for the
@@ -27,13 +27,13 @@ typedef struct Ast Ast; /* ast.h's own tag -- forward-declared so this header
  * asnix's own bytecode shape -- see that doc for why the two differ).
  *
  * Entirely opt-in: every function here is a no-op (always a cache miss,
- * never writes) unless the ASNIX_BYTECODE_CACHE=1 environment variable
+ * never writes) unless the LL_BYTECODE_CACHE=1 environment variable
  * is set. Any anomaly at any point (missing/unwritable directory,
  * truncated/corrupt file, bad magic/version, a deserialize failure) is
  * treated as a plain cache miss -- never fatal, never surfaced to the
  * caller beyond "use the normal compile path instead." */
 
-/* ASNIX_BYTECODE_CACHE_STATS=1 (alongside ASNIX_BYTECODE_CACHE=1) prints
+/* LL_BYTECODE_CACHE_STATS=1 (alongside LL_BYTECODE_CACHE=1) prints
  * a one-line "N hits (F fast-path, V content-verified), M misses, K
  * stores (P% hit rate)" summary to stderr at process exit -- the cache
  * is otherwise completely silent by design (a miss, a corrupt entry,
@@ -42,22 +42,22 @@ typedef struct Ast Ast; /* ast.h's own tag -- forward-declared so this header
  * benefiting from it, and -- since M102 -- whether it's benefiting from
  * the CHEAP (fast) path or paying the content-hash (verify) fallback. */
 
-/* True iff ASNIX_BYTECODE_CACHE=1 is set. Checked once and cached. */
-int asnix_bytecode_cache_enabled(void);
+/* True iff LL_BYTECODE_CACHE=1 is set. Checked once and cached. */
+int ll_bytecode_cache_enabled(void);
 
 /* M102 (Finding 1): the cache key is now (resolved path) alone for the
  * purpose of LOCATING an entry on disk -- freshness is validated
  * separately, cheaply, using mtime+size BEFORE ever reading the source
  * file. See bytecode_cache.c's own header-format comment for exactly
  * what's stored in an entry and why. This split replaces the single
- * old `asnix_bytecode_cache_lookup(path, source, source_len)` (which
+ * old `ll_bytecode_cache_lookup(path, source, source_len)` (which
  * had to read+hash the ENTIRE source file on every call, hit or miss,
  * to even compute the lookup key -- measured 1,059 source opens + 1,056
  * cache-entry opens on ffmpeg's real 1056-file closure in warm-cache
  * mode, MORE opens than the 2,444 syscalls of not caching at all) with
  * two explicit steps:
  *
- *   1. asnix_bytecode_cache_lookup_fast -- `mtime_sec`/`mtime_nsec`/
+ *   1. ll_bytecode_cache_lookup_fast -- `mtime_sec`/`mtime_nsec`/
  *      `size` are whatever the caller's OWN path-resolution stat call
  *      already produced (eval_file.c's resolve_file_path, itself built
  *      on M83's follow_symlink_chain) -- no new syscall in the common
@@ -69,7 +69,7 @@ int asnix_bytecode_cache_enabled(void);
  *      (mtime/size drifted -- caller should try step 2 below) or 0 if
  *      there's no entry at all (a plain miss, nothing more to check).
  *
- *   2. asnix_bytecode_cache_lookup_verify -- only useful when step 1
+ *   2. ll_bytecode_cache_lookup_verify -- only useful when step 1
  *      set `*out_entry_exists`. Needs the actual source bytes (which
  *      the caller must now read, exactly like an ordinary cache miss
  *      would anyway) to compute a real content hash and compare it
@@ -78,7 +78,7 @@ int asnix_bytecode_cache_enabled(void);
  *      (e.g. `touch(1)`, or a checkout tool that doesn't preserve
  *      mtimes) from "genuinely different file." On a content match it
  *      also re-stores the entry with the fresh mtime/size (atomically,
- *      via the same write-temp-then-rename path asnix_bytecode_cache_store
+ *      via the same write-temp-then-rename path ll_bytecode_cache_store
  *      uses) so the FAST path starts working again for this path next
  *      time -- a one-time cost, not a recurring one, as long as the
  *      file doesn't keep changing mtime without changing content.
@@ -96,30 +96,30 @@ int asnix_bytecode_cache_enabled(void);
  * rejected as not worth it for an opt-in, off-by-default developer-
  * convenience cache -- see bytecode_cache.c's own header-format comment
  * for the full reasoning. */
-IrProgram *asnix_bytecode_cache_lookup_fast(const char *resolved_path, int64_t mtime_sec, int64_t mtime_nsec,
+IrProgram *ll_bytecode_cache_lookup_fast(const char *resolved_path, int64_t mtime_sec, int64_t mtime_nsec,
                                              int64_t size, int *out_entry_exists);
-IrProgram *asnix_bytecode_cache_lookup_verify(const char *resolved_path, const char *source, size_t source_len,
+IrProgram *ll_bytecode_cache_lookup_verify(const char *resolved_path, const char *source, size_t source_len,
                                                int64_t mtime_sec, int64_t mtime_nsec, int64_t size);
 
 /* Writes `prog` to the cache under the same (path-hashed) key the two
  * lookup functions above would look it up with, recording `mtime_sec`/
  * `mtime_nsec`/`size` (the caller's own already-available stat info --
- * see asnix_bytecode_cache_lookup_fast's comment) and a fresh content
+ * see ll_bytecode_cache_lookup_fast's comment) and a fresh content
  * hash of `source`/`source_len` into the entry's header, so later runs
  * can validate freshness via either path. No-op if the cache is
  * disabled. Best-effort: any failure (serialize refuses an unsupported
  * construct, disk error, lock contention) is silently ignored -- a
  * missing/stale cache entry is always safe, just slower, never wrong. */
-void asnix_bytecode_cache_store(const char *resolved_path, const char *source, size_t source_len, int64_t mtime_sec,
+void ll_bytecode_cache_store(const char *resolved_path, const char *source, size_t source_len, int64_t mtime_sec,
                                  int64_t mtime_nsec, int64_t size, IrProgram *prog);
 
-/* M92: opt-in background prefetch -- ASNIX_BYTECODE_PRODUCER=1 (on top
- * of ASNIX_BYTECODE_CACHE=1, which it requires) scans a freshly parsed
+/* M92: opt-in background prefetch -- LL_BYTECODE_PRODUCER=1 (on top
+ * of LL_BYTECODE_CACHE=1, which it requires) scans a freshly parsed
  * AST for statically-literal `import "<path>"`-shaped call targets not
  * already cached, and fork()s one child process per discovery to
  * compile-and-cache each in the background while the parent continues
  * evaluating. Deliberately a forked PROCESS, not a pthread: the global
- * arena (asnix_arena, src/asm/arena.S) and symbol table (symtab.c) have
+ * arena (ll_arena, src/asm/arena.S) and symbol table (symtab.c) have
  * no synchronization at all, and retrofitting that safely was judged
  * out of scope for this pass (see docs/architecture.md's M92 notes) --
  * fork()'s copy-on-write address-space duplication gives the same
@@ -128,14 +128,14 @@ void asnix_bytecode_cache_store(const char *resolved_path, const char *source, s
  * and child's compile-time allocators racing, since after fork() they
  * are simply two independent processes that happen to share no mutable
  * state at all. The child writes its result to the same on-disk cache
- * asnix_bytecode_cache_store would, then exits; the parent only ever
- * reads that cache through the ordinary asnix_bytecode_cache_lookup
+ * ll_bytecode_cache_store would, then exits; the parent only ever
+ * reads that cache through the ordinary ll_bytecode_cache_lookup
  * path, so there is no cross-process pointer handoff of any kind.
  * No-op (does nothing, returns immediately) unless both env vars are
  * set. Safe to call on every parsed file; internally no-ops on anything
  * that isn't a plain, already-cached-checked, statically-resolvable
  * import target. */
-void asnix_bytecode_prefetch_imports(Ast *root, const char *base_dir);
+void ll_bytecode_prefetch_imports(Ast *root, const char *base_dir);
 
 /* Waits for (reaps) any outstanding prefetch children this process
  * started whose target path matches `resolved_path` -- called right
@@ -147,6 +147,6 @@ void asnix_bytecode_prefetch_imports(Ast *root, const char *base_dir);
  * proceeds with its own normal cache-miss fallback exactly as if no
  * prefetch had ever been attempted. No-op if prefetching is disabled or
  * no outstanding child matches. */
-void asnix_bytecode_prefetch_wait(const char *resolved_path);
+void ll_bytecode_prefetch_wait(const char *resolved_path);
 
-#endif /* ASNIX_BYTECODE_CACHE_H */
+#endif /* LL_BYTECODE_CACHE_H */

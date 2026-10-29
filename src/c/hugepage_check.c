@@ -58,14 +58,14 @@ static uint64_t huge_free_bytes(void) {
 }
 
 /* 1 GiB, matching iets's own HUGE_FREE_MIN exactly. */
-#define ASNIX_HUGE_FREE_MIN (1ULL << 30)
+#define LL_HUGE_FREE_MIN (1ULL << 30)
 
 /* -1 = not yet checked, 0 = checked, not safe, 1 = checked, safe. */
 static int g_hugepage_state = -1;
 
-int asnix_huge_pages_available(void) {
+int ll_huge_pages_available(void) {
     if (g_hugepage_state < 0) {
-        g_hugepage_state = (huge_free_bytes() >= ASNIX_HUGE_FREE_MIN) ? 1 : 0;
+        g_hugepage_state = (huge_free_bytes() >= LL_HUGE_FREE_MIN) ? 1 : 0;
     }
     return g_hugepage_state;
 }

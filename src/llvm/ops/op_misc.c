@@ -11,17 +11,17 @@
 #include "builtins_shared.h"
 #include "attrs_update.h"
 #include "tryeval.h"
-#include "value_util.h" /* asnix_formalsmap_make_desc/_pack */
+#include "value_util.h" /* ll_formalsmap_make_desc/_pack */
 #include "env_helpers.h" /* ll_env_frame_exit, to reach the arg frame */
 #include "../ll_resolve.h" /* ll_resolve_indirection, to unwrap the arg slot */
 
-/* asnix_resolve_search_path_value (compiler.c) is non-static (asm calls
+/* ll_resolve_search_path_value (compiler.c) is non-static (asm calls
  * it directly via `call` with no header -- see op_resolve_search_path.S)
  * but, unlike every other vendored helper this file uses, it has no
  * prototype in any src/c header -- compiler.h only declares
- * asnix_compile/asnix_compile_scoped. Declared here instead of adding
+ * ll_compile/ll_compile_scoped. Declared here instead of adding
  * a new header dependency for one function. */
-extern Value asnix_resolve_search_path_value(Value name_val);
+extern Value ll_resolve_search_path_value(Value name_val);
 
 /* OP_CHECK_FORMALS: a = required_count, b = pool_idx -- see
  * op_check_formals.S's long header comment for the exact pool layout:
@@ -35,7 +35,7 @@ extern Value asnix_resolve_search_path_value(Value name_val);
  * Pops the Attrs (fatal if not one -- same inline message asnix's own
  * .Lcf_type_error uses); pushes nothing back (net pop 1, push 0).
  * Unlike the asm's hand-rolled binary searches, phase 1 just reuses
- * asnix_bshared_attrs_find (builtins_shared.c), which already resolves
+ * ll_bshared_attrs_find (builtins_shared.c), which already resolves
  * a lazy `//` union header internally (M88) and binary-searches --
  * exactly what the asm's own two-step "resolve then search" dance did
  * by hand. Phase 2 (the allowed-field check) binary-searches the pool's
@@ -44,9 +44,9 @@ extern Value asnix_resolve_search_path_value(Value name_val);
 LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value attrs = vs[-1];
     vs--;
-    if ((attrs.raw & ASNIX_TAG_MASK) != ASNIX_TAG_ATTRS) {
-        static const char msg[] = "asnix: lambda pattern argument is not a set, aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+    if ((attrs.raw & LL_TAG_MASK) != LL_TAG_ATTRS) {
+        static const char msg[] = "ll: lambda pattern argument is not a set, aborting\n";
+        ll_fatal(msg, sizeof(msg) - 1);
     }
 
     int64_t required_count = ip->a;
@@ -54,17 +54,17 @@ LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *poo
 
     for (int64_t i = 0; i < required_count; i++) {
         uint32_t sym = (uint32_t)pool[pool_idx + 1 + i];
-        if (asnix_bshared_attrs_find(attrs, sym) < 0) {
-            asnix_bshared_cf_missing_fatal(sym); /* _Noreturn */
+        if (ll_bshared_attrs_find(attrs, sym) < 0) {
+            ll_bshared_cf_missing_fatal(sym); /* _Noreturn */
         }
     }
 
     int64_t total_count = pool[pool_idx];
     if (total_count != -1) {
         int64_t allowed_base = pool_idx + 1 + required_count;
-        int64_t n = asnix_bshared_attrs_count(attrs);
+        int64_t n = ll_bshared_attrs_count(attrs);
         for (int64_t j = 0; j < n; j++) {
-            uint32_t sym = asnix_bshared_attrs_sym(attrs, j);
+            uint32_t sym = ll_bshared_attrs_sym(attrs, j);
             int64_t lo = 0, hi = total_count;
             while (lo < hi) {
                 int64_t mid = lo + (hi - lo) / 2;
@@ -77,7 +77,7 @@ LL_OP_ATTR Value ll_op_check_formals(IrOp *ip, Env *env, Value *vs, int64_t *poo
                     hi = mid;
                 }
             }
-            asnix_bshared_cf_extra_fatal(sym); /* _Noreturn */
+            ll_bshared_cf_extra_fatal(sym); /* _Noreturn */
         found:;
         }
     }
@@ -113,15 +113,15 @@ LL_OP_ATTR Value ll_op_mk_formalsmap(IrOp *ip, Env *env, Value *vs, int64_t *poo
      * cached ground value straight out of its `env` field. */
     Value arg = argframe->values[0];
     arg = ll_resolve_indirection(arg);
-    if ((arg.raw & ASNIX_TAG_MASK) == ASNIX_TAG_THUNK) {
+    if ((arg.raw & LL_TAG_MASK) == LL_TAG_THUNK) {
         Thunk *t = (Thunk *)ll_untag(arg);
         arg.raw = t->env;
     }
 
-    void *desc = asnix_formalsmap_make_desc(arg, &pool[pool_idx], env);
+    void *desc = ll_formalsmap_make_desc(arg, &pool[pool_idx], env);
     for (int64_t i = 0; i < nf; i++) {
         if (pool[pool_idx + i] == -1) continue; /* this formal uses the ordinary thunk path instead */
-        env->values[i] = asnix_formalsmap_pack(desc, i);
+        env->values[i] = ll_formalsmap_pack(desc, i);
     }
 
     LL_NEXT(ip, env, vs, pool, rs);
@@ -129,10 +129,10 @@ LL_OP_ATTR Value ll_op_mk_formalsmap(IrOp *ip, Env *env, Value *vs, int64_t *poo
 
 /* OP_ASSERT_FAIL: b = pool index of a {msg ptr, msg len} pair
  * (compiler.c-built, names the failed condition). Unconditionally
- * raises -- routed through asnix_tryeval_raise_or_fatal (tryeval.c), not
- * asnix_fatal directly, so an active `builtins.tryEval` can catch a
+ * raises -- routed through ll_tryeval_raise_or_fatal (tryeval.c), not
+ * ll_fatal directly, so an active `builtins.tryEval` can catch a
  * failed `assert` exactly like `throw` (M30); falls back to exactly
- * asnix_fatal's own write+exit(1) behavior when no tryEval is active.
+ * ll_fatal's own write+exit(1) behavior when no tryEval is active.
  * No VALSTACK effect at all other than the abort -- never returns, so
  * there is no LL_NEXT/LL_GOTO here (same precedent as op_select.S's
  * _Noreturn-terminated branches, just for the whole handler this time). */
@@ -143,7 +143,7 @@ LL_OP_ATTR Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool,
     int64_t pool_idx = ip->b;
     const char *msg = (const char *)(intptr_t)pool[pool_idx];
     size_t len = (size_t)pool[pool_idx + 1];
-    asnix_tryeval_raise_or_fatal(msg, len); /* _Noreturn */
+    ll_tryeval_raise_or_fatal(msg, len); /* _Noreturn */
 }
 
 /* OP_INSERT_DYNAMIC_ATTR: no operands. Pops value, then name, then attrs
@@ -152,7 +152,7 @@ LL_OP_ATTR Value ll_op_assert_fail(IrOp *ip, Env *env, Value *vs, int64_t *pool,
  * value thunk -- confirmed against op_insert_dynamic_attr.S's own
  * `16(%r12)`=value/`8(%r12)`=name/`(%r12)`=attrs loads). Interning,
  * the string-type check, the duplicate-key fatal, and the sorted-
- * insert are all handled by asnix_attrs_insert_dynamic itself
+ * insert are all handled by ll_attrs_insert_dynamic itself
  * (attrs_update.c) -- pushes its result (net pop 3, push 1). */
 LL_OP_ATTR Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value value = vs[-1];
@@ -160,7 +160,7 @@ LL_OP_ATTR Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_
     Value attrs = vs[-3];
     vs -= 3;
 
-    Value result = asnix_attrs_insert_dynamic(attrs, name, value);
+    Value result = ll_attrs_insert_dynamic(attrs, name, value);
 
     vs[0] = result;
     vs++;
@@ -175,7 +175,7 @@ LL_OP_ATTR Value ll_op_insert_dynamic_attr(IrOp *ip, Env *env, Value *vs, int64_
  * this one pops NOTHING off VALSTACK -- its inputs are the CURRENT
  * Env's own slots (already filled in by the OP_FRAME_SET loop
  * compiler.c emitted just before this op), not values pushed by the
- * compiler. asnix_bshared_rec_overrides_merge does the real work
+ * compiler. ll_bshared_rec_overrides_merge does the real work
  * (forcing the `__overrides` slot, merging, and overwriting matched
  * Env slots in place) and returns the one finished Attrs Value this
  * pushes. */
@@ -183,7 +183,7 @@ LL_OP_ATTR Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_
     int64_t n = ip->a;
     const int64_t *meta = &pool[ip->b];
 
-    Value result = asnix_bshared_rec_overrides_merge(env, n, meta);
+    Value result = ll_bshared_rec_overrides_merge(env, n, meta);
 
     ll_check_valstack(vs);
     vs[0] = result;
@@ -196,15 +196,15 @@ LL_OP_ATTR Value ll_op_rec_overrides_merge(IrOp *ip, Env *env, Value *vs, int64_
  * case -- no runtime type check needed here, matching the asm, which
  * passes the popped Value straight through with no tag check of its
  * own). Pushes the resolved, canonicalized Path -- or
- * asnix_resolve_search_path_value itself never returns at all (a lookup
- * miss routes through asnix_tryeval_raise_or_fatal, same catchable
+ * ll_resolve_search_path_value itself never returns at all (a lookup
+ * miss routes through ll_tryeval_raise_or_fatal, same catchable
  * mechanism `throw`/a failed `assert` use), in which case the push below
  * never runs. */
 LL_OP_ATTR Value ll_op_resolve_search_path(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value name = vs[-1];
     vs--;
 
-    Value result = asnix_resolve_search_path_value(name);
+    Value result = ll_resolve_search_path_value(name);
 
     vs[0] = result;
     vs++;

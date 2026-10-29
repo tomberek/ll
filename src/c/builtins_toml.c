@@ -17,11 +17,11 @@ static Value prim_fromTOML(const Value *args, int64_t argc) {
     (void)argc;
     const char *bytes;
     int64_t len;
-    asnix_bshared_string_bytes(args[0], &bytes, &len, "fromTOML");
-    return asnix_toml_parse(bytes, (size_t)len);
+    ll_bshared_string_bytes(args[0], &bytes, &len, "fromTOML");
+    return ll_toml_parse(bytes, (size_t)len);
 }
 
-static Value build_fromTOML(void) { return asnix_bshared_make_primop((void *)prim_fromTOML, 1); }
+static Value build_fromTOML(void) { return ll_bshared_make_primop((void *)prim_fromTOML, 1); }
 
 /* `fromTOML` is one of real Nix's bare root-scope globals -- confirmed
  * directly against `nix-instantiate --eval` (`fromTOML "a = 1"` works
@@ -36,7 +36,7 @@ static Value build_fromTOML(void) { return asnix_bshared_make_primop((void *)pri
  * rule behind M18's "small set of bare globals" research, which had
  * been incomplete (missed `fromTOML`, found needed evaluating real
  * nixpkgs: `lib/trivial.nix` calls bare `fromTOML` directly). See
- * builtins.h's `asnix_make_import_primop` comment for the full list as
+ * builtins.h's `ll_make_import_primop` comment for the full list as
  * currently understood; `fetchTarball`/`fetchGit`/`fetchMercurial`/
  * `fetchTree`/`scopedImport`/`placeholder`/`derivationStrict`/`break`
  * are also real (per the same source) -- at the time this comment was
@@ -46,10 +46,10 @@ static Value build_fromTOML(void) { return asnix_bshared_make_primop((void *)pri
  * by M82 (builtins_fetchgit.c) once nixpkgs's own rust-toolchain
  * dependency chain actually referenced it -- `fetchTarball`/
  * `fetchMercurial`/`fetchTree`/`break` remain real gaps. */
-Value asnix_make_fromTOML_primop(void) { return asnix_bshared_make_primop((void *)prim_fromTOML, 1); }
+Value ll_make_fromTOML_primop(void) { return ll_bshared_make_primop((void *)prim_fromTOML, 1); }
 
-const AsnixBuiltinMiscDef ASNIX_TOML_BUILTINS[] = {
+const LlBuiltinMiscDef LL_TOML_BUILTINS[] = {
     { "fromTOML", build_fromTOML },
 };
 
-const size_t ASNIX_TOML_BUILTINS_COUNT = sizeof(ASNIX_TOML_BUILTINS) / sizeof(ASNIX_TOML_BUILTINS[0]);
+const size_t LL_TOML_BUILTINS_COUNT = sizeof(LL_TOML_BUILTINS) / sizeof(LL_TOML_BUILTINS[0]);

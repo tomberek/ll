@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_LEXER_H
-#define ASNIX_LEXER_H
+#ifndef LL_LEXER_H
+#define LL_LEXER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -60,7 +60,7 @@ typedef enum {
                   * not the first of a '//' pair either (see lexer.c's main loop). */
     /* Strings: "..." and ''...'' no longer lex to one flat TOK_STRING --
      * "${" inside either kind re-enters normal expression lexing until the
-     * matching "}" (TOK_RBRACE, reused -- see asnix_lex's mode-stack
+     * matching "}" (TOK_RBRACE, reused -- see ll_lex's mode-stack
      * comment), then resumes string-content lexing. A string literal is
      * now a TOK_STR_START/TOK_ISTR_START, zero or more of (TOK_STR_PART |
      * TOK_DOLLAR_LBRACE ... TOK_RBRACE), and a matching TOK_STR_END/
@@ -70,7 +70,7 @@ typedef enum {
                         * NOT yet applied -- start/end span the exact source bytes between
                         * the opening quote/prior interpolation and the next boundary, as
                         * a plain offset into `src` (never a decoded copy, unlike pre-M141).
-                        * See asnix_decode_dquote_span's own comment for where/when the
+                        * See ll_decode_dquote_span's own comment for where/when the
                         * escape decode actually happens. */
     TOK_STR_END,       /* '"' closing a double-quoted string */
     TOK_ISTR_START,     /* "''" opening an indented string */
@@ -86,7 +86,7 @@ typedef enum {
                          * kind tag instead needs no extra Token field at all). */
     TOK_ISTR_ESC,       /* M141: exactly one `''$` / `'''` / `''\<c>` escape unit's RAW
                          * source span (3 or 4 bytes, start/end into `src`) -- decoded on
-                         * demand by asnix_decode_istr_esc. Never counts toward
+                         * demand by ll_decode_istr_esc. Never counts toward
                          * indentation (see TOK_ISTR_PART above). Deliberate, documented
                          * scope note vs. the pre-M141 lexer: two or more of these back to
                          * back used to be merged into a single accumulated token (an
@@ -149,8 +149,8 @@ typedef enum {
  * literal's actual numeric value, a string/indented-string chunk's escape
  * decoding, and a path literal's `is_home`/`is_search` classification are
  * all now computed exactly once, on demand, by the PARSER at the point it
- * builds the Ast node that needs them (see asnix_decode_float_literal/
- * asnix_decode_dquote_span/asnix_decode_istr_esc below, and parser.c's own
+ * builds the Ast node that needs them (see ll_decode_float_literal/
+ * ll_decode_dquote_span/ll_decode_istr_esc below, and parser.c's own
  * call sites) -- never eagerly at lex time, and never more than once per
  * literal occurrence (same total decode work as before, just relocated).
  * `end` doubles as "the token's own end position" for every kind that has
@@ -166,7 +166,7 @@ typedef struct {
 
 /* Tokenizes the whole source in one pass into a malloc'd array terminated
  * by a TOK_EOF entry (*out_count includes that terminator). Dead code as
- * of M135 (every real caller goes through asnix_parse's internal Lexer
+ * of M135 (every real caller goes through ll_parse's internal Lexer
  * instead -- see below), kept as a still-correct, still-tested-by-
  * construction (same per-token scanning core every lexer_next() call
  * ultimately runs) standalone entry point, matching this project's own
@@ -175,7 +175,7 @@ typedef struct {
  * API. Aborts the process with a message on an unrecognized character --
  * this is a from-scratch minimal-subset lexer, not a full Nix lexer (see
  * docs/architecture.md M4 scope notes). */
-Token *asnix_lex(const char *src, size_t *out_count);
+Token *ll_lex(const char *src, size_t *out_count);
 
 /* M141: decodes a TOK_FLOAT's raw [start,end) span via strtod, matching
  * real Nix's own lexer.l exactly ("errno = 0; strtod(yytext, 0); if
@@ -189,7 +189,7 @@ Token *asnix_lex(const char *src, size_t *out_count);
  * always stops at exactly the same byte the lexer already decided ends
  * the token, without needing a malloc'd, NUL-terminated, length-bounded
  * copy the way the pre-M141 lexer-time decode did. */
-double asnix_decode_float_literal(const char *src, uint32_t start, uint32_t end);
+double ll_decode_float_literal(const char *src, uint32_t start, uint32_t end);
 
 /* M141: decodes a TOK_STR_PART's raw [start,end) span (escapes NOT yet
  * applied) into a freshly malloc'd buffer, applying exactly the same
@@ -204,14 +204,14 @@ double asnix_decode_float_literal(const char *src, uint32_t start, uint32_t end)
  * upper bound, don't bother reallocing down" convention parser.c's own
  * strip_indentation already uses for the exact same reason. *out_len
  * receives the real decoded length (may be less than end-start). */
-char *asnix_decode_dquote_span(const char *src, uint32_t start, uint32_t end, size_t *out_len);
+char *ll_decode_dquote_span(const char *src, uint32_t start, uint32_t end, size_t *out_len);
 
 /* M141: decodes one TOK_ISTR_ESC raw span (exactly one `''$` / `'''` /
  * `''\<c>` escape unit) into `out` (caller-provided, >= 2 bytes) --
  * *out_len is always 1 (`''$` -> "$", `''\<c>` -> one decoded byte) or 2
  * (`'''` -> "''"). Mirrors lexer.c's pre-M141 istr_append_escape exactly,
  * just evaluated later, from the raw span instead of while lexing. */
-void asnix_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t *out_len);
+void ll_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t *out_len);
 
 /* M175: a true pull-based lexer, replacing M135's LexCursor/TokVec
  * (array-backed, grown via push_tok) design entirely -- see
@@ -239,7 +239,7 @@ typedef struct Lexer Lexer;
 
 Lexer *lexer_new(const char *src);
 
-/* Marker-reparse addition (parser.c's asnix_parse_subexpr, bytecode.c's
+/* Marker-reparse addition (parser.c's ll_parse_subexpr, bytecode.c's
  * PTAG_OP_LAZY_MARKER): same as lexer_new, except an unmatched '}' found
  * with nothing left on this Lexer's OWN mode stack to pop is treated as
  * an ordinary (if slightly fictitious) TOK_RBRACE instead of a fatal
@@ -248,7 +248,7 @@ Lexer *lexer_new(const char *src);
  * any) it never saw opened, and the one-token-of-lookahead this file's
  * own cur()/peek2() convention always needs can legitimately overread
  * into that enclosing construct's own closer, which the caller
- * (asnix_parse_subexpr) always discards unconsumed anyway. An ordinary
+ * (ll_parse_subexpr) always discards unconsumed anyway. An ordinary
  * lexer_new() Lexer has no such excuse -- its mode stack only ever grows
  * from tokens IT ITSELF produced, so the same situation there is a real,
  * fatal syntax error, unchanged from before this addition. */
@@ -274,4 +274,4 @@ typedef struct {
 LexerSave lexer_save(Lexer *lx);
 void lexer_restore(Lexer *lx, LexerSave save);
 
-#endif /* ASNIX_LEXER_H */
+#endif /* LL_LEXER_H */

@@ -3,11 +3,11 @@
 
 static const char ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-size_t asnix_base64_encoded_length(size_t n) {
+size_t ll_base64_encoded_length(size_t n) {
     return (n + 2) / 3 * 4;
 }
 
-void asnix_base64_encode(const uint8_t *data, size_t len, char *out) {
+void ll_base64_encode(const uint8_t *data, size_t len, char *out) {
     size_t oi = 0;
     unsigned int acc = 0, nbits = 0;
     for (size_t i = 0; i < len; i++) {
@@ -31,7 +31,7 @@ static int base64_char_value(char c) {
     return -1;
 }
 
-int64_t asnix_base64_decode(const char *s, size_t len, uint8_t *out, size_t out_cap) {
+int64_t ll_base64_decode(const char *s, size_t len, uint8_t *out, size_t out_cap) {
     size_t oi = 0;
     unsigned int acc = 0, nbits = 0;
     for (size_t i = 0; i < len; i++) {

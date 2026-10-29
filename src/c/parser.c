@@ -320,7 +320,7 @@ static BTNode *btvec_find(BTVec *v, const char *name, size_t name_len) {
 }
 
 static void fatal_dup_attr(const char *name, size_t name_len) {
-    fprintf(stderr, "asnix: attribute '%.*s' already defined, aborting\n", (int)name_len, name);
+    fprintf(stderr, "ll: attribute '%.*s' already defined, aborting\n", (int)name_len, name);
     exit(1);
 }
 
@@ -438,7 +438,7 @@ static AstBinding finalize_bt_node(BTNode *node) {
         bindingvec_push(&out, finalize_bt_node(&node->children.items[i]));
     }
     VEC_TRIM(out, AstBinding);
-    Ast *attrs = asnix_ast_new(AST_ATTRSET);
+    Ast *attrs = ll_ast_new(AST_ATTRSET);
     attrs->as.attrset.bindings = out.items;
     attrs->as.attrset.count = out.len;
     attrs->as.attrset.is_rec = node->rec;
@@ -628,11 +628,11 @@ typedef struct {
     Token tok;  /* cur() */
     Token next; /* peek2() */
     const char *src; /* M80: the buffer every Token.pos/.start points into -- see
-                       * curpos_line_col below, parser.h's own asnix_parse comment. */
+                       * curpos_line_col below, parser.h's own ll_parse comment. */
     const char *curpos_base; /* Marker-reparse addition: the TRUE file-start pointer for
                        * `__curPos`'s line/column (curpos_line_col below) -- equal to `src`
-                       * for an ordinary asnix_parse() call (whose Lexer starts right at the
-                       * real file start, so the two coincide), but asnix_parse_subexpr's
+                       * for an ordinary ll_parse() call (whose Lexer starts right at the
+                       * real file start, so the two coincide), but ll_parse_subexpr's
                        * Lexer starts partway into the real file (at some byte offset into the
                        * SAME underlying buffer) while `__curPos`'s line/col must still be
                        * reported relative to the real file start, not the sub-parse's own
@@ -665,7 +665,7 @@ static void curpos_line_col(const char *src, const char *at, int *out_line, int 
  * kinds whose span IS its final text verbatim (identifiers, keywords,
  * path/URI/search-path literals -- never TOK_STR_PART/TOK_ISTR_PART/
  * TOK_ISTR_ESC, which need a real decode step instead, see
- * asnix_decode_dquote_span/asnix_decode_istr_esc's own call sites below). */
+ * ll_decode_dquote_span/ll_decode_istr_esc's own call sites below). */
 static const char *tok_text(Parser *p, Token t) { return p->src + t.start; }
 static size_t tok_len(Token t) { return (size_t)(t.end - t.start); }
 
@@ -696,7 +696,7 @@ static void advance(Parser *p) {
 }
 static Token expect(Parser *p, TokKind kind, const char *what) {
     if (cur(p).kind != kind) {
-        fprintf(stderr, "asnix: parse error: expected %s\n", what);
+        fprintf(stderr, "ll: parse error: expected %s\n", what);
         exit(1);
     }
     Token t = cur(p);
@@ -879,7 +879,7 @@ static Ast *build_dynamic_chain_value(AttrSeg *segs, size_t start, size_t count,
     if (count == 0) return value;
     AttrSeg seg = segs[start];
     Ast *inner = build_dynamic_chain_value(segs, start + 1, count - 1, value);
-    Ast *attrs = asnix_ast_new(AST_ATTRSET);
+    Ast *attrs = ll_ast_new(AST_ATTRSET);
     attrs->as.attrset.is_rec = 0;
     if (seg.is_dynamic) {
         attrs->as.attrset.bindings = NULL;
@@ -916,15 +916,15 @@ static int g_inherit_hidden_counter = 0;
  * LazyThunkDescriptor comment): when a deferred attrset-field value gets
  * cached as an unresolved stub, bytecode.c needs a real source byte
  * offset to reparse `value` from in a FRESH process (Ast->src_pos is
- * normally only populated under ASNIX_IRDUMP_LINE_TRACKING -- a debug-
+ * normally only populated under LL_IRDUMP_LINE_TRACKING -- a debug-
  * only build variant, never set in production -- so it's always 0 here
  * otherwise). Declared `extern` rather than pulling in the whole of
  * compiler.h, to avoid adding an include-order dependency to this file
  * for one flag. */
-extern int asnix_lazy_thunk_enabled;
+extern int ll_lazy_thunk_enabled;
 
 /* Lazy-thunk-compile experiment, ported from asnix (see ast.h's own
- * comment on asnix_ast_enter_retained): wraps the real
+ * comment on ll_ast_enter_retained): wraps the real
  * parse_binding_stmt_inner below so every Ast node it builds for ANY
  * binding -- attrset-literal OR `let` -- is redirected into the
  * permanently-retained arena instead of the normal per-file resettable
@@ -937,9 +937,9 @@ extern int asnix_lazy_thunk_enabled;
 static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_out);
 
 static void parse_binding_stmt(Parser *p, BTVec *out, DynBindingVec *dyn_out) {
-    int prev = asnix_ast_enter_retained();
+    int prev = ll_ast_enter_retained();
     parse_binding_stmt_inner(p, out, dyn_out);
-    asnix_ast_leave_retained(prev);
+    ll_ast_leave_retained(prev);
 }
 
 static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_out) {
@@ -976,14 +976,14 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
              * case, not the plain-string case, so `inherit (x) "or";`
              * still works -- see parse_attr_segment's own comment). */
             if (name.is_dynamic) {
-                fprintf(stderr, "asnix: parse error: dynamic attributes not allowed in inherit\n");
+                fprintf(stderr, "ll: parse error: dynamic attributes not allowed in inherit\n");
                 exit(1);
             }
             attrsegvec_push(name);
         }
         /* M128 follow-up: commit now, right as collection ends -- nothing
          * between here and this clause's own final `free` below recurses
-         * into the parser (btvec_push/asnix_ast_new/insert_attrpath are
+         * into the parser (btvec_push/ll_ast_new/insert_attrpath are
          * pure tree-manipulation, see SCRATCH_VEC's own safety argument). */
         size_t names_count;
         AttrSeg *names_items = attrsegvec_commit(names_mark, &names_count);
@@ -1039,7 +1039,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
                 .name = hidden_name, .name_len = (size_t)hlen,
                 .is_leaf = 1, .leaf_value = src_expr, .is_inherit = 0, .is_hidden = 1 };
             btvec_push(out, hidden_node);
-            Ast *v = asnix_ast_new_at(AST_VAR, cur(p).start);
+            Ast *v = ll_ast_new_at(AST_VAR, cur(p).start);
             v->as.var.name = hidden_name;
             v->as.var.name_len = (size_t)hlen;
             hidden_var = v;
@@ -1064,7 +1064,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
                  * blackhole (confirmed via numtide/nix-conformance's own
                  * eval-okay-inherit-from.nix, whose `rec {}` block has
                  * exactly this shape). */
-                Ast *sel = asnix_ast_new_at(AST_SELECT, cur(p).start);
+                Ast *sel = ll_ast_new_at(AST_SELECT, cur(p).start);
                 sel->as.select.target = hidden_var ? hidden_var : src_expr;
                 sel->as.select.attr = name.attr;
                 sel->as.select.attr_len = name.attr_len;
@@ -1072,7 +1072,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
                 sel->as.select.default_ = NULL;
                 value = sel;
             } else {
-                Ast *v = asnix_ast_new_at(AST_VAR, cur(p).start);
+                Ast *v = ll_ast_new_at(AST_VAR, cur(p).start);
                 v->as.var.name = name.attr;
                 v->as.var.name_len = name.attr_len;
                 value = v;
@@ -1146,7 +1146,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
      * default 0 ("no known span"), which bytecode.c treats as "fall back
      * to the old refuse-to-cache behavior for this stub" -- see that
      * file's PTAG_OP_LAZY_MARKER comment. */
-    if (asnix_lazy_thunk_enabled) value->src_pos = value_src_pos;
+    if (ll_lazy_thunk_enabled) value->src_pos = value_src_pos;
     expect(p, TOK_SEMI, "';'");
 
     size_t segs_count;
@@ -1160,7 +1160,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
         insert_attrpath(out, segs_items, segs_count, 0, value, 0);
     } else if (first_dyn == 0) {
         if (!dyn_out) {
-            fprintf(stderr, "asnix: parse error: dynamic attributes not allowed in let\n");
+            fprintf(stderr, "ll: parse error: dynamic attributes not allowed in let\n");
             exit(1);
         }
         Ast *inner = build_dynamic_chain_value(segs_items, 1, segs_count - 1, value);
@@ -1185,7 +1185,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
  * chunk alone becomes a Path constant and the rest becomes a runtime
  * OP_PATH_CONCAT chain. */
 static Ast *parse_path_literal_interp(Parser *p, Token t) {
-    Ast *n = asnix_ast_new_at(AST_PATH, cur(p).start);
+    Ast *n = ll_ast_new_at(AST_PATH, cur(p).start);
     n->as.path.text = tok_text(p, t);
     n->as.path.len = tok_len(t);
     n->as.path.is_search = 0;
@@ -1203,7 +1203,7 @@ static Ast *parse_path_literal_interp(Parser *p, Token t) {
             expect(p, TOK_RBRACE, "'}' closing a path interpolation");
             partvec_push((AstStringPart){ .is_expr = 1, .expr = e });
         } else {
-            fprintf(stderr, "asnix: parse error: malformed path literal\n");
+            fprintf(stderr, "ll: parse error: malformed path literal\n");
             exit(1);
         }
     }
@@ -1227,11 +1227,11 @@ static Ast *parse_dquote_string(Parser *p) {
         if (cur(p).kind == TOK_STR_PART) {
             /* M141: TOK_STR_PART is now a raw (escapes-not-yet-applied) span --
              * decode exactly once, right here, at the point this AstStringPart
-             * is actually built (see asnix_decode_dquote_span's own comment,
+             * is actually built (see ll_decode_dquote_span's own comment,
              * lexer.h). */
             Token t = cur(p);
             size_t dlen;
-            char *dtext = asnix_decode_dquote_span(p->src, t.start, t.end, &dlen);
+            char *dtext = ll_decode_dquote_span(p->src, t.start, t.end, &dlen);
             partvec_push((AstStringPart){ .is_expr = 0, .text = dtext, .text_len = dlen });
             advance(p);
         } else if (cur(p).kind == TOK_DOLLAR_LBRACE) {
@@ -1240,14 +1240,14 @@ static Ast *parse_dquote_string(Parser *p) {
             expect(p, TOK_RBRACE, "'}' closing a string interpolation");
             partvec_push((AstStringPart){ .is_expr = 1, .expr = e });
         } else {
-            fprintf(stderr, "asnix: parse error: malformed string literal\n");
+            fprintf(stderr, "ll: parse error: malformed string literal\n");
             exit(1);
         }
     }
     advance(p); /* TOK_STR_END */
     size_t parts_count;
     AstStringPart *parts_items = partvec_commit(parts_mark, &parts_count);
-    Ast *n = asnix_ast_new_at(AST_STRING, cur(p).start);
+    Ast *n = ll_ast_new_at(AST_STRING, cur(p).start);
     n->as.string.parts = parts_items;
     n->as.string.count = parts_count;
     return n;
@@ -1286,7 +1286,7 @@ static Ast *parse_indented_string(Parser *p) {
             Token t = cur(p);
             char decoded[2];
             size_t dlen;
-            asnix_decode_istr_esc(p->src, t.start, decoded, &dlen);
+            ll_decode_istr_esc(p->src, t.start, decoded, &dlen);
             char *owned = malloc(dlen);
             memcpy(owned, decoded, dlen);
             rawind_push((RawIndPart){ .is_expr = 0, .text = owned, .text_len = dlen, .has_indentation = 0 });
@@ -1297,7 +1297,7 @@ static Ast *parse_indented_string(Parser *p) {
             expect(p, TOK_RBRACE, "'}' closing a string interpolation");
             rawind_push((RawIndPart){ .is_expr = 1, .expr = e });
         } else {
-            fprintf(stderr, "asnix: parse error: malformed indented string literal\n");
+            fprintf(stderr, "ll: parse error: malformed indented string literal\n");
             exit(1);
         }
     }
@@ -1309,7 +1309,7 @@ static Ast *parse_indented_string(Parser *p) {
     AstStringPart *parts = strip_indentation(raw_items, raw_count, &count);
     free(raw_items);
 
-    Ast *n = asnix_ast_new_at(AST_STRING, cur(p).start);
+    Ast *n = ll_ast_new_at(AST_STRING, cur(p).start);
     n->as.string.parts = parts;
     n->as.string.count = count;
     return n;
@@ -1320,7 +1320,7 @@ static Ast *parse_atom(Parser *p) {
     switch (t.kind) {
         case TOK_INT: {
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_INT, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_INT, cur(p).start);
             /* M141: decoded on demand, straight from the raw source span --
              * see lexer.h's own Token comment for why strtoll here is safe
              * unbounded (the lexer's own digit-run scan already found the
@@ -1330,25 +1330,25 @@ static Ast *parse_atom(Parser *p) {
         }
         case TOK_FLOAT: {
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_FLOAT, cur(p).start);
-            n->as.float_val = asnix_decode_float_literal(p->src, t.start, t.end);
+            Ast *n = ll_ast_new_at(AST_FLOAT, cur(p).start);
+            n->as.float_val = ll_decode_float_literal(p->src, t.start, t.end);
             return n;
         }
         case TOK_TRUE: {
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_BOOL, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_BOOL, cur(p).start);
             n->as.bool_val = 1;
             return n;
         }
         case TOK_FALSE: {
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_BOOL, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_BOOL, cur(p).start);
             n->as.bool_val = 0;
             return n;
         }
         case TOK_NULL: {
             advance(p);
-            return asnix_ast_new_at(AST_NULL, cur(p).start);
+            return ll_ast_new_at(AST_NULL, cur(p).start);
         }
         case TOK_STR_START:
             return parse_dquote_string(p);
@@ -1368,12 +1368,12 @@ static Ast *parse_atom(Parser *p) {
              * rather than a lexically-rebindable identifier. */
             if (t.kind == TOK_IDENT && tok_len(t) == 8 && memcmp(tok_text(p, t), "__curPos", 8) == 0) {
                 advance(p);
-                Ast *n = asnix_ast_new_at(AST_CURPOS, cur(p).start);
+                Ast *n = ll_ast_new_at(AST_CURPOS, cur(p).start);
                 curpos_line_col(p->curpos_base, p->src + t.start, &n->as.curpos.line, &n->as.curpos.column);
                 return n;
             }
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_VAR, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_VAR, cur(p).start);
             n->as.var.name = tok_text(p, t);
             n->as.var.name_len = tok_len(t);
             return n;
@@ -1384,14 +1384,14 @@ static Ast *parse_atom(Parser *p) {
              * TOK_DOLLAR_LBRACE when this chunk is the first (possibly
              * only) part of a path literal that continues into
              * interpolation (`./${foo}`, `~/${foo}`, ...) -- see
-             * lexer.c's at_dollar_brace checks in asnix_lex's main loop.
+             * lexer.c's at_dollar_brace checks in ll_lex's main loop.
              * A bare "${" can't otherwise appear here at all (it's not
              * valid Nix syntax outside a string/path literal), so this
              * peek is unambiguous. */
             if (cur(p).kind == TOK_DOLLAR_LBRACE) {
                 return parse_path_literal_interp(p, t);
             }
-            Ast *n = asnix_ast_new_at(AST_PATH, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_PATH, cur(p).start);
             n->as.path.text = tok_text(p, t);
             n->as.path.len = tok_len(t);
             n->as.path.is_search = 0;
@@ -1407,7 +1407,7 @@ static Ast *parse_atom(Parser *p) {
              * ever produces). See lexer.c's try_scan_uri for the
              * grammar/precedence rationale. */
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_STRING, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_STRING, cur(p).start);
             AstStringPart *parts = malloc(sizeof(AstStringPart));
             parts[0].is_expr = 0;
             parts[0].text = tok_text(p, t);
@@ -1419,7 +1419,7 @@ static Ast *parse_atom(Parser *p) {
         }
         case TOK_SEARCH_PATH: {
             advance(p);
-            Ast *n = asnix_ast_new_at(AST_PATH, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_PATH, cur(p).start);
             n->as.path.text = tok_text(p, t);
             n->as.path.len = tok_len(t);
             n->as.path.is_search = 1;
@@ -1441,7 +1441,7 @@ static Ast *parse_atom(Parser *p) {
             advance(p); /* ']' */
             size_t elems_count;
             Ast **elems_items = astvec_commit(elems_mark, &elems_count);
-            Ast *n = asnix_ast_new_at(AST_LIST, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_LIST, cur(p).start);
             n->as.list.elems = elems_items;
             n->as.list.count = elems_count;
             return n;
@@ -1456,20 +1456,20 @@ static Ast *parse_atom(Parser *p) {
              * finalize_bt_vec/merge_bt_dyn_into build wrapper Ast nodes
              * AFTER the loop (e.g. a dynamic-attr merge) that also
              * become part of a deferred field's body. */
-            int lt_prev_lbrace = asnix_ast_enter_retained();
+            int lt_prev_lbrace = ll_ast_enter_retained();
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
             finalize_bt_vec(&bt, &bindings);
             VEC_TRIM(bindings, AstBinding);
-            Ast *n = asnix_ast_new_at(AST_ATTRSET, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_ATTRSET, cur(p).start);
             n->as.attrset.bindings = bindings.items;
             n->as.attrset.count = bindings.len;
             n->as.attrset.is_rec = 0;
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
-            asnix_ast_leave_retained(lt_prev_lbrace);
+            ll_ast_leave_retained(lt_prev_lbrace);
             return n;
         }
         case TOK_REC: {
@@ -1477,24 +1477,24 @@ static Ast *parse_atom(Parser *p) {
             expect(p, TOK_LBRACE, "'{'");
             BTVec bt = { 0 };
             DynBindingVec dyn = { 0 };
-            int lt_prev_rec = asnix_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
+            int lt_prev_rec = ll_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
             finalize_bt_vec(&bt, &bindings);
             VEC_TRIM(bindings, AstBinding);
-            Ast *n = asnix_ast_new_at(AST_ATTRSET, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_ATTRSET, cur(p).start);
             n->as.attrset.bindings = bindings.items;
             n->as.attrset.count = bindings.len;
             n->as.attrset.is_rec = 1;
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
-            asnix_ast_leave_retained(lt_prev_rec);
+            ll_ast_leave_retained(lt_prev_rec);
             return n;
         }
         default:
-            fprintf(stderr, "asnix: parse error: unexpected token\n");
+            fprintf(stderr, "ll: parse error: unexpected token\n");
             exit(1);
     }
 }
@@ -1504,7 +1504,7 @@ static Ast *parse_select(Parser *p) {
     int had_select = 0;
     while (cur(p).kind == TOK_DOT) {
         advance(p);
-        Ast *n = asnix_ast_new_at(AST_SELECT, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_SELECT, cur(p).start);
         n->as.select.target = e;
         n->as.select.default_ = NULL;
         /* Dynamic attribute name, `.${expr}` or an interpolated quoted
@@ -1570,7 +1570,7 @@ static Ast *parse_app(Parser *p) {
     Ast *fn = parse_select(p);
     while (starts_atom(cur(p).kind)) {
         Ast *arg = parse_select(p);
-        Ast *app = asnix_ast_new_at(AST_APP, cur(p).start);
+        Ast *app = ll_ast_new_at(AST_APP, cur(p).start);
         app->as.app.fn = fn;
         app->as.app.arg = arg;
         fn = app;
@@ -1597,9 +1597,9 @@ static Ast *parse_negate(Parser *p) {
     if (cur(p).kind == TOK_MINUS) {
         advance(p);
         Ast *operand = parse_negate(p); /* right-recurse: allows `--x`, harmless */
-        Ast *zero = asnix_ast_new_at(AST_INT, cur(p).start);
+        Ast *zero = ll_ast_new_at(AST_INT, cur(p).start);
         zero->as.int_val = 0;
-        Ast *n = asnix_ast_new_at(AST_BINOP, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_BINOP, cur(p).start);
         n->as.binop.op = '-';
         n->as.binop.lhs = zero;
         n->as.binop.rhs = operand;
@@ -1621,7 +1621,7 @@ static Ast *parse_negate(Parser *p) {
     if (cur(p).kind == TOK_BANG) {
         advance(p);
         Ast *operand = parse_binop(p, PREC_ADD);
-        Ast *n = asnix_ast_new_at(AST_NOT, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_NOT, cur(p).start);
         n->as.not1.operand = operand;
         return n;
     }
@@ -1655,17 +1655,17 @@ static Ast *parse_has_attr(Parser *p) {
          * intermediate value that exists but isn't an attrset, and a
          * fully-present chain -- all graceful (`false`), none fatal. */
         AttrSeg seg = parse_attr_segment(p, "an attribute name");
-        Ast *n = asnix_ast_new_at(AST_HAS_ATTR, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_HAS_ATTR, cur(p).start);
         n->as.has_attr.target = e;
         set_has_attr_segment(n, seg);
         Ast *result = n;
         Ast *running_target = e;
         while (cur(p).kind == TOK_DOT) {
             advance(p);
-            Ast *sel = asnix_ast_new_at(AST_SELECT, cur(p).start);
+            Ast *sel = ll_ast_new_at(AST_SELECT, cur(p).start);
             sel->as.select.target = running_target;
             set_select_segment(sel, seg);   /* the segment just checked above */
-            Ast *empty_attrs = asnix_ast_new_at(AST_ATTRSET, cur(p).start);
+            Ast *empty_attrs = ll_ast_new_at(AST_ATTRSET, cur(p).start);
             empty_attrs->as.attrset.bindings = NULL;
             empty_attrs->as.attrset.count = 0;
             empty_attrs->as.attrset.is_rec = 0;
@@ -1675,11 +1675,11 @@ static Ast *parse_has_attr(Parser *p) {
             running_target = sel; /* == the previous target's `.attr or {}` */
 
             seg = parse_attr_segment(p, "an attribute name");
-            Ast *next_check = asnix_ast_new_at(AST_HAS_ATTR, cur(p).start);
+            Ast *next_check = ll_ast_new_at(AST_HAS_ATTR, cur(p).start);
             next_check->as.has_attr.target = running_target;
             set_has_attr_segment(next_check, seg);
 
-            Ast *and_node = asnix_ast_new_at(AST_AND, cur(p).start);
+            Ast *and_node = ll_ast_new_at(AST_AND, cur(p).start);
             and_node->as.logic.lhs = result;
             and_node->as.logic.rhs = next_check;
             result = and_node;
@@ -1733,7 +1733,7 @@ static Ast *parse_has_attr(Parser *p) {
  * Measured via `perf record -g` on a real nixpkgs closure: these 9
  * functions showed up together at nearly identical cumulative cost (they
  * fire in lockstep on virtually every parse), consistent with
- * `asnix_lex`/`compile_expr`-adjacent lex+parse+compile work eating a
+ * `ll_lex`/`compile_expr`-adjacent lex+parse+compile work eating a
  * disproportionate, not-yet-addressed share of total cycles relative to
  * a comparable evaluator's own single-function precedence-climbing
  * parser (iets, ~/gnix/iets/src/eval/parser*.rs's `parse_op(min_bp)`).
@@ -1796,13 +1796,13 @@ static const BinOpInfo *lookup_binop(TokKind k) {
 static Ast *make_binop_node(const BinOpInfo *info, Ast *lhs, Ast *rhs) {
     switch (info->kind) {
         case BINOP_K_AND: {
-            Ast *n = asnix_ast_new(AST_AND);
+            Ast *n = ll_ast_new(AST_AND);
             n->as.logic.lhs = lhs;
             n->as.logic.rhs = rhs;
             return n;
         }
         case BINOP_K_OR: {
-            Ast *n = asnix_ast_new(AST_OR);
+            Ast *n = ll_ast_new(AST_OR);
             n->as.logic.lhs = lhs;
             n->as.logic.rhs = rhs;
             return n;
@@ -1814,16 +1814,16 @@ static Ast *make_binop_node(const BinOpInfo *info, Ast *lhs, Ast *rhs) {
              * circuiting (b is never evaluated when a is false) for free
              * by reusing the already-correct AST_OR/AST_NOT compilation,
              * no new AST node or IR op needed. */
-            Ast *not_lhs = asnix_ast_new(AST_NOT);
+            Ast *not_lhs = ll_ast_new(AST_NOT);
             not_lhs->as.not1.operand = lhs;
-            Ast *n = asnix_ast_new(AST_OR);
+            Ast *n = ll_ast_new(AST_OR);
             n->as.logic.lhs = not_lhs;
             n->as.logic.rhs = rhs;
             return n;
         }
         case BINOP_K_BINOP:
         default: {
-            Ast *n = asnix_ast_new(AST_BINOP);
+            Ast *n = ll_ast_new(AST_BINOP);
             n->as.binop.op = info->op;
             n->as.binop.lhs = lhs;
             n->as.binop.rhs = rhs;
@@ -1852,7 +1852,7 @@ static Ast *parse_binop_primary(Parser *p) {
     if (cur(p).kind == TOK_BANG) {
         advance(p);
         Ast *operand = parse_binop(p, PREC_ADD);
-        Ast *n = asnix_ast_new_at(AST_NOT, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_NOT, cur(p).start);
         n->as.not1.operand = operand;
         return n;
     }
@@ -1926,7 +1926,7 @@ static Ast *parse_let_bindings(Parser *p) {
      * fixtures or numtide/nix-conformance exercises), kept purely as a
      * loud-not-silent guard. */
     if (bt.dyn.len > 0) {
-        fprintf(stderr, "asnix: parse error: dynamic attributes not allowed in let\n");
+        fprintf(stderr, "ll: parse error: dynamic attributes not allowed in let\n");
         exit(1);
     }
     BindingVec bindings = { 0 };
@@ -1936,12 +1936,12 @@ static Ast *parse_let_bindings(Parser *p) {
      * AST_ATTRSET wrapper node actually gets allocated, strictly AFTER
      * the while-loop above has already returned, so the per-binding
      * toggle inside parse_binding_stmt cannot reach it on its own. */
-    int lt_prev_let_finalize = asnix_ast_enter_retained();
+    int lt_prev_let_finalize = ll_ast_enter_retained();
     finalize_bt_vec(&bt, &bindings);
-    asnix_ast_leave_retained(lt_prev_let_finalize);
+    ll_ast_leave_retained(lt_prev_let_finalize);
     VEC_TRIM(bindings, AstBinding);
 
-    Ast *n = asnix_ast_new_at(AST_LET, cur(p).start);
+    Ast *n = ll_ast_new_at(AST_LET, cur(p).start);
     n->as.let1.bindings = bindings.items;
     n->as.let1.count = bindings.len;
     n->as.let1.body = body;
@@ -2039,21 +2039,21 @@ static Ast *parse_expr(Parser *p) {
             advance(p); /* '{' */
             BTVec bt = { 0 };
             DynBindingVec dyn = { 0 };
-            int lt_prev_letbrace = asnix_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
+            int lt_prev_letbrace = ll_ast_enter_retained(); /* see TOK_LBRACE's own comment above */
             while (cur(p).kind != TOK_RBRACE) parse_binding_stmt(p, &bt, &dyn);
             advance(p); /* '}' */
             BindingVec bindings = { 0 };
             finalize_bt_vec(&bt, &bindings);
             VEC_TRIM(bindings, AstBinding);
-            Ast *attrs = asnix_ast_new_at(AST_ATTRSET, cur(p).start);
+            Ast *attrs = ll_ast_new_at(AST_ATTRSET, cur(p).start);
             attrs->as.attrset.bindings = bindings.items;
             attrs->as.attrset.count = bindings.len;
             attrs->as.attrset.is_rec = 1;
             merge_bt_dyn_into(&bt, &dyn); /* M67 */
             attrs->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             attrs->as.attrset.dyn_count = dyn.len;
-            asnix_ast_leave_retained(lt_prev_letbrace);
-            Ast *n = asnix_ast_new_at(AST_SELECT, cur(p).start);
+            ll_ast_leave_retained(lt_prev_letbrace);
+            Ast *n = ll_ast_new_at(AST_SELECT, cur(p).start);
             n->as.select.target = attrs;
             n->as.select.attr = "body";
             n->as.select.attr_len = 4;
@@ -2068,7 +2068,7 @@ static Ast *parse_expr(Parser *p) {
         Ast *attrs = parse_expr(p);
         expect(p, TOK_SEMI, "';'");
         Ast *body = parse_expr(p); /* recursing here is what lets further let/if/with/lambda follow */
-        Ast *n = asnix_ast_new_at(AST_WITH, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_WITH, cur(p).start);
         n->as.with1.attrs = attrs;
         n->as.with1.body = body;
         return n;
@@ -2080,7 +2080,7 @@ static Ast *parse_expr(Parser *p) {
         Ast *then_ = parse_expr(p);
         expect(p, TOK_ELSE, "'else'");
         Ast *else_ = parse_expr(p);
-        Ast *n = asnix_ast_new_at(AST_IF, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_IF, cur(p).start);
         n->as.if1.cond = cond;
         n->as.if1.then_ = then_;
         n->as.if1.else_ = else_;
@@ -2091,7 +2091,7 @@ static Ast *parse_expr(Parser *p) {
         advance(p);
         advance(p); /* ':' */
         Ast *body = parse_expr(p); /* recursing here is what makes `a: b: body` curry */
-        Ast *n = asnix_ast_new_at(AST_LAMBDA, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_LAMBDA, cur(p).start);
         n->as.lambda.param = tok_text(p, param);
         n->as.lambda.param_len = tok_len(param);
         n->as.lambda.body = body;
@@ -2106,7 +2106,7 @@ static Ast *parse_expr(Parser *p) {
         size_t span_len = (size_t)(semi_tok.start - start_tok.start);
         while (span_len > 0 && isspace((unsigned char)p->src[start_tok.start + span_len - 1])) span_len--;
         Ast *body = parse_expr(p);
-        Ast *n = asnix_ast_new_at(AST_ASSERT, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_ASSERT, cur(p).start);
         n->as.assert1.cond = cond;
         n->as.assert1.body = body;
         n->as.assert1.cond_text = p->src + start_tok.start;
@@ -2125,7 +2125,7 @@ static Ast *parse_expr(Parser *p) {
         parse_formals(p, &formals, &fcount, &ellipsis);
         expect(p, TOK_COLON, "':'");
         Ast *body = parse_expr(p);
-        Ast *n = asnix_ast_new_at(AST_LAMBDA, cur(p).start);
+        Ast *n = ll_ast_new_at(AST_LAMBDA, cur(p).start);
         n->as.lambda.is_pattern = 1;
         n->as.lambda.formals = formals;
         n->as.lambda.formals_count = fcount;
@@ -2159,7 +2159,7 @@ static Ast *parse_expr(Parser *p) {
             }
             expect(p, TOK_COLON, "':'");
             Ast *body = parse_expr(p);
-            Ast *n = asnix_ast_new_at(AST_LAMBDA, cur(p).start);
+            Ast *n = ll_ast_new_at(AST_LAMBDA, cur(p).start);
             n->as.lambda.is_pattern = 1;
             n->as.lambda.formals = formals;
             n->as.lambda.formals_count = fcount;
@@ -2179,14 +2179,14 @@ static Ast *parse_expr(Parser *p) {
 
 /* M135: fuses lexing and parsing -- src is lexed on demand through a
  * Lexer instead of being fully lexed into an array before this function
- * is ever called (that was the old asnix_lex(src,&n)+asnix_parse(toks,n,
+ * is ever called (that was the old ll_lex(src,&n)+ll_parse(toks,n,
  * src) two-call pattern every caller used; see docs/architecture.md
  * M134/M135). M175: that on-demand `Lexer` is now a true pull cursor
  * (lexer.h) with no backing Token array at all -- `p.tok`/`p.next` are
  * primed here by calling lexer_next() twice up front, mirroring the old
  * invariant that `peek2()` is always valid even right at TOK_EOF (lexing
  * an empty file primes both slots to TOK_EOF, same as before). */
-Ast *asnix_parse(const char *src) {
+Ast *ll_parse(const char *src) {
     Lexer *lx = lexer_new(src);
     Parser p = { .lx = lx, .src = src, .curpos_base = src };
     p.tok = lexer_next(lx);
@@ -2201,7 +2201,7 @@ Ast *asnix_parse(const char *src) {
  * see compiler.c's LazyThunkDescriptor comment and bytecode.c's
  * PTAG_OP_LAZY_MARKER comment): parses exactly ONE expression starting
  * at byte offset `start_offset` within `src`, which is the SAME full,
- * NUL-terminated file buffer an ordinary asnix_parse(src) call would
+ * NUL-terminated file buffer an ordinary ll_parse(src) call would
  * have used (never a fresh copy) -- `start_offset` always lands right
  * after a `name = ` (or attrpath-sugar `a.b.c = `) token sequence, at
  * the first token of that binding's RHS (see parser.c's own
@@ -2209,7 +2209,7 @@ Ast *asnix_parse(const char *src) {
  * value Ast's `src_pos` with a real, reparseable span).
  *
  * Deliberately does NOT call `expect(&p, TOK_EOF, ...)` the way
- * asnix_parse does -- unlike a whole top-level file, there is always
+ * ll_parse does -- unlike a whole top-level file, there is always
  * real, meaningful content after this one expression ends (at minimum
  * the `;` that closed the original binding statement, usually a lot
  * more: sibling bindings, the enclosing `}`, everything after it). This
@@ -2218,7 +2218,7 @@ Ast *asnix_parse(const char *src) {
  * dependency on what precedes its own starting point (confirmed:
  * lexer_new just stores a `const char *`/`pos` pair, see lexer.c), so
  * pointing it at `src + start_offset` is exactly as safe as pointing it
- * at `src + 0` (asnix_parse's own case) -- `parse_expr` naturally stops
+ * at `src + 0` (ll_parse's own case) -- `parse_expr` naturally stops
  * consuming tokens the instant this one expression is grammatically
  * complete (recursive descent, not a greedy consume-until-EOF loop), and
  * this function simply never looks at (or lexes past what it needs to
@@ -2231,12 +2231,12 @@ Ast *asnix_parse(const char *src) {
  * compile_expr, from the current `g_compile_file_path` global, same as
  * any other compile of this same body would set it, so that part needs
  * no special handling here at all. */
-Ast *asnix_parse_subexpr(const char *src, size_t start_offset) {
+Ast *ll_parse_subexpr(const char *src, size_t start_offset) {
     /* lexer_new_lenient, NOT lexer_new -- see that function's own
      * comment. Found the hard way: forcing a cache-loaded deferred
      * field whose value is the LAST binding before its enclosing `}`
      * (e.g. `rec { a = 1; b = a + 1; }`, forcing `b`) crashed with
-     * "asnix: unmatched '}'" -- the ordinary lexer_new's ONE token of
+     * "ll: unmatched '}'" -- the ordinary lexer_new's ONE token of
      * required lookahead past this expression's own end (`cur()`/
      * `peek2()`'s 2-slot buffer, primed below) reached the enclosing
      * rec{}'s own closing brace, which THIS fresh Lexer, starting mid-

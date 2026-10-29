@@ -18,10 +18,10 @@ LL_OP_ATTR Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
     uint32_t fixed_syms[LL_MK_ATTRS_FIXED_SYMS];
     uint32_t *syms = fixed_syms;
     if (count > LL_MK_ATTRS_FIXED_SYMS) {
-        syms = (uint32_t *)ll_arena_alloc((uint64_t)count * sizeof(uint32_t));
+        syms = (uint32_t *)ll_arena_alloc_fast((uint64_t)count * sizeof(uint32_t));
     }
     for (int64_t i = 0; i < count; i++) syms[i] = (uint32_t)pool[pidx + i];
-    Value result = asnix_bshared_make_attrs(syms, vals, count);
+    Value result = ll_bshared_make_attrs(syms, vals, count);
     vs = vals;
     ll_check_valstack(vs);
     vs[0] = result;

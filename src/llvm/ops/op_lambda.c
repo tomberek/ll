@@ -8,14 +8,14 @@ LL_OP_ATTR Value ll_op_lambda(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetF
     Value formals;
     formals.raw = (uint64_t)pool[pidx + 1];
 
-    Closure *c = (Closure *)ll_arena_alloc(ASNIX_CLOSURE_SIZE);
+    Closure *c = (Closure *)ll_arena_alloc_fast(LL_CLOSURE_SIZE);
     c->up = env;
     c->prog = body_prog;
     c->arity = arity;
     c->formals = formals;
 
     ll_check_valstack(vs);
-    vs[0].raw = ((uint64_t)(uintptr_t)c) | ASNIX_TAG_CLOSURE;
+    vs[0].raw = ((uint64_t)(uintptr_t)c) | LL_TAG_CLOSURE;
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);
 }
@@ -24,12 +24,12 @@ LL_OP_ATTR Value ll_op_mk_thunk(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
     int64_t pidx = ip->b;
     IrProgram *body_prog = (IrProgram *)(uintptr_t)pool[pidx];
 
-    Thunk *t = (Thunk *)ll_arena_alloc(ASNIX_THUNK_SIZE);
+    Thunk *t = (Thunk *)ll_arena_alloc_fast(LL_THUNK_SIZE);
     t->state = (int64_t)(uintptr_t)body_prog; /* 8-byte-aligned pointer -- tag bits 0 == UNFORCED */
     t->env = (uint64_t)(uintptr_t)env;
 
     ll_check_valstack(vs);
-    vs[0].raw = ((uint64_t)(uintptr_t)t) | ASNIX_TAG_THUNK;
+    vs[0].raw = ((uint64_t)(uintptr_t)t) | LL_TAG_THUNK;
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);
 }

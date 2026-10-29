@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_STRING_CONTEXT_H
-#define ASNIX_STRING_CONTEXT_H
+#ifndef LL_STRING_CONTEXT_H
+#define LL_STRING_CONTEXT_H
 
 #include <stddef.h>
 
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /*
  * M76: real Nix string context -- an invisible dependency-provenance set
@@ -15,7 +15,7 @@
  * INTERPOLATION of a derivation reference, concatenated with a literal
  * suffix, evaluated to a plain opaque string long before `derivation
  * {...}`'s primop ever sees it. M74's structural collector
- * (asnix_collect_input_refs, derivation.c) walks an already-forced
+ * (ll_collect_input_refs, derivation.c) walks an already-forced
  * Value looking for a bare derivation attrset/list/Path -- it is blind
  * to this by construction, since once a reference becomes a STRING via
  * interpolation, there's no structure left to walk. This is the same
@@ -27,7 +27,7 @@
  * Key simplification vs. that earlier, declined scope: that estimate
  * (~101 call sites, a new tagged Value kind touching the asm layer)
  * assumed context would be baked into the STRING HEAP LAYOUT itself
- * (like Path/Float's marker-byte trick, include/asnix/heap.h). Instead,
+ * (like Path/Float's marker-byte trick, include/ll/heap.h). Instead,
  * this attaches context via a SIDE TABLE keyed by the string Value's
  * own arena pointer (a linear-scan array, same convention as
  * eval_file.c's import cache / derivation.c's masked-hash cache) --
@@ -46,13 +46,13 @@
 typedef struct {
     char *drv_path;
     char *output_name;
-} AsnixCtxBuiltRef;
+} LlCtxBuiltRef;
 
 typedef struct {
-    AsnixCtxBuiltRef *drvs;
+    LlCtxBuiltRef *drvs;
     size_t ndrvs, drvs_cap;
-    /* perf: open-addressing dedup indexes for asnix_ctx_add_built/
-     * asnix_ctx_add_opaque/asnix_ctx_add_deep (string_context.c) --
+    /* perf: open-addressing dedup indexes for ll_ctx_add_built/
+     * ll_ctx_add_opaque/ll_ctx_add_deep (string_context.c) --
      * parallel to drvs/srcs/deep below. Mirrors derivation.c's
      * InputRefSet (drvs_index/srcs_index, same file's dcc_hash_str) --
      * see string_context.c for why a per-add linear strcmp scan here
@@ -67,17 +67,17 @@ typedef struct {
      * DrvDeep` -- "this string refers to the WHOLE closure of this
      * derivation (all its outputs), not just one named output" -- the
      * kind attached to a derivation's own `.drvPath` string (see
-     * derivation.c's asnix_prim_derivation) and produced by `builtins.
+     * derivation.c's ll_prim_derivation) and produced by `builtins.
      * addDrvOutputDependencies`. Exposed at the language level by
      * `getContext` as `{ allOutputs = true; }` (builtins_m54.c) --
      * distinct from `drvs` above (a specific NAMED output, `{ outputs =
      * [...]; }`) and from `srcs` (a plain store-path reference with no
      * derivation relationship at all, `{ path = true; }`). Deliberately
      * a separate bare `char *` array, not a 3rd field on
-     * AsnixCtxBuiltRef, since a DrvDeep element has no output name at
+     * LlCtxBuiltRef, since a DrvDeep element has no output name at
      * all (unlike Built) -- reusing that struct with a NULL/sentinel
      * output_name would make every existing `ndrvs`-only reader
-     * (derivation.c's asnix_collect_input_refs) responsible for skipping
+     * (derivation.c's ll_collect_input_refs) responsible for skipping
      * it, which this keeps them oblivious to instead (that file is
      * deliberately untouched by this milestone -- a DrvDeep-tagged
      * string used directly as a derivation attribute's VALUE still
@@ -89,27 +89,27 @@ typedef struct {
     size_t ndeep, deep_cap;
     size_t *deep_index;
     size_t deep_index_cap;
-} AsnixStringContext;
+} LlStringContext;
 
-void asnix_ctx_init(AsnixStringContext *ctx);
-void asnix_ctx_add_built(AsnixStringContext *ctx, const char *drv_path, const char *output_name);
-void asnix_ctx_add_opaque(AsnixStringContext *ctx, const char *path);
-/* M80: see AsnixStringContext's own `deep` field comment just above. */
-void asnix_ctx_add_deep(AsnixStringContext *ctx, const char *drv_path);
-int asnix_ctx_is_empty(const AsnixStringContext *ctx);
+void ll_ctx_init(LlStringContext *ctx);
+void ll_ctx_add_built(LlStringContext *ctx, const char *drv_path, const char *output_name);
+void ll_ctx_add_opaque(LlStringContext *ctx, const char *path);
+/* M80: see LlStringContext's own `deep` field comment just above. */
+void ll_ctx_add_deep(LlStringContext *ctx, const char *drv_path);
+int ll_ctx_is_empty(const LlStringContext *ctx);
 /* dst |= src (deduped) -- a no-op if src is NULL or empty. */
-void asnix_ctx_union_into(AsnixStringContext *dst, const AsnixStringContext *src);
+void ll_ctx_union_into(LlStringContext *dst, const LlStringContext *src);
 
 /* Attaches a deep copy of `ctx` to `v` (a String Value, i.e.
- * ASNIX_TAG_PTR, not a Path/Float) in the process-lifetime side table --
+ * LL_TAG_PTR, not a Path/Float) in the process-lifetime side table --
  * a no-op if `ctx` is NULL or empty (the overwhelmingly common case:
  * every plain-literal/arithmetic/non-derivation string never gets an
  * entry at all, so lookups for them stay a fast "not found"). */
-void asnix_string_attach_context(Value v, const AsnixStringContext *ctx);
+void ll_string_attach_context(Value v, const LlStringContext *ctx);
 
 /* NULL if `v` has no attached context. The returned pointer is owned by
  * the side table (process lifetime, same memory model as the rest of
  * this codebase) -- never free it. */
-const AsnixStringContext *asnix_string_context_of(Value v);
+const LlStringContext *ll_string_context_of(Value v);
 
-#endif /* ASNIX_STRING_CONTEXT_H */
+#endif /* LL_STRING_CONTEXT_H */

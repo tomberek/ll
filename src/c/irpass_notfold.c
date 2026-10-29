@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 
@@ -48,7 +48,7 @@
  * a single trailing `!`). Folding here rewrites ops[i] in place and
  * removes ops[i+1] (the NOT); if some other live jump targets ops[i+1]
  * directly, skipping ops[i] entirely, that jump would now land on the
- * removed op -- asnix_irpass_remove's own safety check would catch this
+ * removed op -- ll_irpass_remove's own safety check would catch this
  * but treats it as FATAL (exit 1) rather than "skip this fold", so this
  * pass pre-checks (same incoming-jump-target guard irpass_cmpnot.c/
  * irpass_jmpnop.c/irpass_dce_if.c each independently establish for this
@@ -66,7 +66,7 @@ static int is_jump_target(IrOp *ops, size_t len, size_t index) {
     for (size_t i = 0; i < len; i++) {
         int id = (int)(intptr_t)ops[i].handler;
         if (!op_is_jump(id)) continue;
-        int64_t target = (int64_t)i + ops[i].a / ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)i + ops[i].a / LL_IROP_SIZE;
         if (target == (int64_t)index) return 1;
     }
     return 0;
@@ -75,7 +75,7 @@ static int is_jump_target(IrOp *ops, size_t len, size_t index) {
 static int fold_bool_not(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size_t *pool_cap) {
     (void)pool;
     (void)pool_len;
-    (void)pool_cap; /* strconcat-fold extension widened AsnixIrPass's signature for every pass
+    (void)pool_cap; /* strconcat-fold extension widened LlIrPass's signature for every pass
                       * uniformly (see irpass.h) -- this pass only folds PUSH_TRUE/FALSE;NOT
                       * pairs into a single PUSH_FALSE/TRUE, never touches the constant pool. */
     for (size_t i = 0; i + 1 < *len; i++) {
@@ -91,12 +91,12 @@ static int fold_bool_not(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_le
         ops[i].handler = (void *)(intptr_t)folded;
         ops[i].a = 0;
         ops[i].b = 0;
-        asnix_irpass_remove(ops, len, i + 1, 1);
+        ll_irpass_remove(ops, len, i + 1, 1);
         return 1; /* re-scan from the top next iteration -- simplest correct strategy */
     }
     return 0;
 }
 
-void asnix_irpass_register_notfold(void) {
-    asnix_irpass_register("notfold", fold_bool_not);
+void ll_irpass_register_notfold(void) {
+    ll_irpass_register("notfold", fold_bool_not);
 }

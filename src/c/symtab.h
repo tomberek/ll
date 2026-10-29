@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_SYMTAB_H
-#define ASNIX_SYMTAB_H
+#ifndef LL_SYMTAB_H
+#define LL_SYMTAB_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -14,9 +14,9 @@
  * string hashing (see docs/architecture.md's prior-art notes).
  */
 
-uint32_t asnix_intern(const char *name, size_t len);
+uint32_t ll_intern(const char *name, size_t len);
 
 /* Reverse lookup, mainly for error messages/debugging. */
-const char *asnix_sym_name(uint32_t id, size_t *out_len);
+const char *ll_sym_name(uint32_t id, size_t *out_len);
 
-#endif /* ASNIX_SYMTAB_H */
+#endif /* LL_SYMTAB_H */

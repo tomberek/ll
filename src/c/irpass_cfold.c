@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 
@@ -50,7 +50,7 @@ static int fold_constant_int_binop(IrOp *ops, size_t *len, int64_t **pool, size_
              * around ADD/SUB/MUL from a non-literal source -- confirmed on
              * the real nix-conformance corpus: `let a = 4294967297; in a *
              * a * a` (eval-fail-overflowing-mul.nix) WRONGLY succeeded
-             * under ASNIX_IR_OPT=1 before this fix, once this session's
+             * under LL_IR_OPT=1 before this fix, once this session's
              * own constprop pass started feeding it exactly that shape.
              * Mirrors compiler.c's own try_fold_const_binop (M136) exactly
              * -- same three builtins, same bounds check below. */
@@ -70,13 +70,13 @@ static int fold_constant_int_binop(IrOp *ops, size_t *len, int64_t **pool, size_
             case OP_GE: result = (a >= b); is_bool = 1; break;
             default: ok = 0; break;
         }
-        /* The narrower ASNIX_INT_MIN/MAX tagged-value window, same
+        /* The narrower LL_INT_MIN/MAX tagged-value window, same
          * as compiler.c's try_fold_const_binop -- a result that survives
          * the int64-overflow check above can still fall outside what a
          * real Nix int VALUE can represent (op_arith.S's own range check,
          * see value.h), which must also still reach the runtime op and
          * abort, not be silently folded into an out-of-range constant. */
-        if (ok && !is_bool && (result < ASNIX_INT_MIN || result > ASNIX_INT_MAX)) ok = 0;
+        if (ok && !is_bool && (result < LL_INT_MIN || result > LL_INT_MAX)) ok = 0;
         if (!ok) continue;
         if (is_bool) {
             ops[i].handler = (void *)(intptr_t)(result ? OP_PUSH_TRUE : OP_PUSH_FALSE);
@@ -88,12 +88,12 @@ static int fold_constant_int_binop(IrOp *ops, size_t *len, int64_t **pool, size_
             ops[i].a = 0;
             /* ops[i].b intentionally left as-is: same pool slot, now holding `result` */
         }
-        asnix_irpass_remove(ops, len, i + 1, 2);
+        ll_irpass_remove(ops, len, i + 1, 2);
         return 1; /* re-scan from the top next iteration -- simplest correct strategy */
     }
     return 0;
 }
 
-void asnix_irpass_register_cfold(void) {
-    asnix_irpass_register("cfold", fold_constant_int_binop);
+void ll_irpass_register_cfold(void) {
+    ll_irpass_register("cfold", fold_constant_int_binop);
 }

@@ -5,7 +5,7 @@
 LL_OP_ATTR Value ll_op_mk_list(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     Value *elems = vs - count; /* the popped elements already sit contiguously here */
-    Value result = asnix_bshared_make_list(elems, count);
+    Value result = ll_bshared_make_list(elems, count);
     vs = elems;
     ll_check_valstack(vs);
     vs[0] = result;

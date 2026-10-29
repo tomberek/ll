@@ -1,10 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_BUILTINS_FLAKEREF_H
-#define ASNIX_BUILTINS_FLAKEREF_H
+#ifndef LL_BUILTINS_FLAKEREF_H
+#define LL_BUILTINS_FLAKEREF_H
 
 #include <stddef.h>
 
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /*
  * M66: `builtins.parseFlakeRef` / `builtins.flakeRefToString` -- pure
@@ -20,14 +20,14 @@
  * "no textual collision with a sibling agent's own builtins module"
  * rationale as every prior builtins-expansion pass (see builtins_m54.h).
  */
-typedef Value (*AsnixBuiltinFlakerefBuilder)(void);
+typedef Value (*LlBuiltinFlakerefBuilder)(void);
 
 typedef struct {
     const char *name;
-    AsnixBuiltinFlakerefBuilder build;
-} AsnixBuiltinFlakerefDef;
+    LlBuiltinFlakerefBuilder build;
+} LlBuiltinFlakerefDef;
 
-extern const AsnixBuiltinFlakerefDef ASNIX_FLAKEREF_BUILTINS[];
-extern const size_t ASNIX_FLAKEREF_BUILTINS_COUNT;
+extern const LlBuiltinFlakerefDef LL_FLAKEREF_BUILTINS[];
+extern const size_t LL_FLAKEREF_BUILTINS_COUNT;
 
-#endif /* ASNIX_BUILTINS_FLAKEREF_H */
+#endif /* LL_BUILTINS_FLAKEREF_H */

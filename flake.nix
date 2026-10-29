@@ -64,8 +64,8 @@
           ];
           shellHook = ''
             export LL_ROOT=$(pwd)
-            export ASNIX_LIBCRYPTO_LIB="$(ls ${pkgs.openssl.out}/lib/libcrypto.so* | head -1)"
-            export ASNIX_MIMALLOC_LIB="${pkgs.mimalloc}/lib/libmimalloc.a"
+            export LL_LIBCRYPTO_LIB="$(ls ${pkgs.openssl.out}/lib/libcrypto.so* | head -1)"
+            export LL_MIMALLOC_LIB="${pkgs.mimalloc}/lib/libmimalloc.a"
           '';
         };
       });

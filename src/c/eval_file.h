@@ -1,8 +1,8 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_EVAL_FILE_H
-#define ASNIX_EVAL_FILE_H
+#ifndef LL_EVAL_FILE_H
+#define LL_EVAL_FILE_H
 
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /* Runs the full lex -> parse -> compile -> eval pipeline on the .nix file
  * at `path` and returns the resulting Value. Used by both main() (the
@@ -19,25 +19,25 @@
  * resolving `path` to an absolute, lexically-canonicalized path (M57h:
  * does NOT resolve symlinks on disk, unlike `realpath()` -- see
  * eval_file.c's resolve_import_path for why) and passing its directory
- * to `asnix_compile()` as the base_dir every AST_PATH node in this file
+ * to `ll_compile()` as the base_dir every AST_PATH node in this file
  * resolves against (see compiler.c's AST_PATH case).
  *
  * Aborts the process (message to stderr, exit 1) if `path` can't be
  * opened or resolved to an absolute path. */
-Value asnix_eval_file(const char *path);
+Value ll_eval_file(const char *path);
 
 /* M54: `builtins.scopedImport scope path` -- same pipeline as
- * asnix_eval_file above, except `scope` (an already-forced Attrs Value)
+ * ll_eval_file above, except `scope` (an already-forced Attrs Value)
  * supplies an extra, innermost lexical scope level for the imported
  * file: each of `scope`'s attribute names becomes directly resolvable as
  * a bare identifier inside `path`'s own source (compiler.c's
- * asnix_compile_scoped), taking priority over (shadowing) the ordinary
+ * ll_compile_scoped), taking priority over (shadowing) the ordinary
  * bare globals/`builtins.X` of the same name -- exactly matching real
- * Nix's own `scopedImport` (see compiler.c's asnix_compile_scoped for
+ * Nix's own `scopedImport` (see compiler.c's ll_compile_scoped for
  * the full rationale). `scope`'s field VALUES are not forced here (same
  * laziness as any other attrset field, M6) -- only its NAMES are needed
  * up front, to build the compile-time ScopeFrame. */
-Value asnix_eval_file_scoped(const char *path, Value scope);
+Value ll_eval_file_scoped(const char *path, Value scope);
 
 /* M57i: runs the same lex -> parse -> compile -> eval pipeline over a
  * source STRING (not a file) -- used by main.c's `--arg name EXPR` CLI
@@ -45,24 +45,24 @@ Value asnix_eval_file_scoped(const char *path, Value scope);
  * Relative path literals inside `src` resolve against the process's
  * current working directory (matching real Nix: a `--arg`/`--argstr`
  * value has no "containing file" of its own to resolve against). */
-Value asnix_eval_expr_source(const char *src);
+Value ll_eval_expr_source(const char *src);
 
-/* M58: same pipeline as asnix_eval_file, but for bootstrapping the
+/* M58: same pipeline as ll_eval_file, but for bootstrapping the
  * `derivation` wrapper itself (derivation.c's
- * asnix_make_derivation_wrapper_value) -- breaks the self-referential
+ * ll_make_derivation_wrapper_value) -- breaks the self-referential
  * cycle that would otherwise result from building a root Env's own
  * `derivation` slot, see eval_file.c's make_root_env_ex comment for the
  * full rationale. Not useful for anything else. */
-Value asnix_eval_file_for_derivation_bootstrap(const char *path);
+Value ll_eval_file_for_derivation_bootstrap(const char *path);
 
 /* M59: the resolved absolute path of the OUTERMOST file passed to
- * asnix_eval_file (i.e. argv's <file.nix>, main.c) -- captured once, the
- * first time asnix_eval_file runs, and never overwritten by any nested
- * `import`/`scopedImport` (which re-enters asnix_eval_file/
- * asnix_eval_file_scoped recursively but finds this already non-NULL).
+ * ll_eval_file (i.e. argv's <file.nix>, main.c) -- captured once, the
+ * first time ll_eval_file runs, and never overwritten by any nested
+ * `import`/`scopedImport` (which re-enters ll_eval_file/
+ * ll_eval_file_scoped recursively but finds this already non-NULL).
  * NULL if no file has been evaluated yet (shouldn't happen in practice:
- * main.c's only entry point is asnix_eval_file) or if the process only
- * ever ran asnix_eval_expr_source (a `--arg`/`--argstr` value expression
+ * main.c's only entry point is ll_eval_file) or if the process only
+ * ever ran ll_eval_expr_source (a `--arg`/`--argstr` value expression
  * has no file of its own).
  *
  * This exists for exactly one caller: `builtins.unsafeGetAttrPos`
@@ -78,6 +78,6 @@ Value asnix_eval_file_for_derivation_bootstrap(const char *path);
  * reports "the file asnix was originally told to evaluate" uniformly for
  * every attribute that exists, regardless of which file actually wrote
  * it. */
-const char *asnix_eval_top_level_file(void);
+const char *ll_eval_top_level_file(void);
 
-#endif /* ASNIX_EVAL_FILE_H */
+#endif /* LL_EVAL_FILE_H */

@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#include "asnix/irpass.h"
+#include "ll/irpass.h"
 
 #include <stdint.h>
 
@@ -87,7 +87,7 @@
  * not itself jump-bearing, but CAN be a live jump's TARGET -- e.g. `let
  * in (if c then 1 else 2)` lands the inner if's own join-point JMP
  * target exactly on the outer FRAME_EXIT (the first op after the whole
- * if-expression). asnix_irpass_remove's own safety check would already
+ * if-expression). ll_irpass_remove's own safety check would already
  * catch this and abort the whole process (fatal), so -- same discipline
  * as every other pass in this framework -- check first and simply
  * decline (continue the outer scan) rather than ever reaching that. */
@@ -103,7 +103,7 @@ static int is_targeted_by_another_jump(IrOp *ops, size_t len, size_t idx) {
         if (j == idx) continue;
         int id = (int)(intptr_t)ops[j].handler;
         if (!op_is_jump(id)) continue;
-        int64_t target = (int64_t)j + ops[j].a / (int64_t)ASNIX_IROP_SIZE;
+        int64_t target = (int64_t)j + ops[j].a / (int64_t)LL_IROP_SIZE;
         if (target == (int64_t)idx) return 1;
     }
     return 0;
@@ -206,13 +206,13 @@ static int eliminate_dead_zero_frame(IrOp *ops, size_t *len, int64_t **pool, siz
         apply_depth_fixup(ops, i, j);
         /* Remove FRAME_EXIT (the higher index) first so FRAME_ALLOC's own
          * index `i` isn't shifted out from under the second removal. */
-        asnix_irpass_remove(ops, len, j, 1);
-        asnix_irpass_remove(ops, len, i, 1);
+        ll_irpass_remove(ops, len, j, 1);
+        ll_irpass_remove(ops, len, i, 1);
         return 1; /* re-scan from the top next iteration -- simplest correct strategy */
     }
     return 0;
 }
 
-void asnix_irpass_register_deadframe(void) {
-    asnix_irpass_register("deadframe", eliminate_dead_zero_frame);
+void ll_irpass_register_deadframe(void) {
+    ll_irpass_register("deadframe", eliminate_dead_zero_frame);
 }

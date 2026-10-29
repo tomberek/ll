@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_AST_H
-#define ASNIX_AST_H
+#ifndef LL_AST_H
+#define LL_AST_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -114,8 +114,8 @@ typedef struct {
 struct Ast {
     AstKind kind;
     /* Byte offset of this node's leading token in the source buffer, set
-     * by asnix_ast_new_at (parser.c's own construction sites) -- 0 for
-     * any node built via the plain asnix_ast_new (compiler.c's synthetic
+     * by ll_ast_new_at (parser.c's own construction sites) -- 0 for
+     * any node built via the plain ll_ast_new (compiler.c's synthetic
      * desugared nodes have no single corresponding source span). Exists
      * purely so a debug tool (irdump) can map a compiled op back to an
      * approximate source line for a human auditing which Nix constructs
@@ -283,15 +283,15 @@ struct Ast {
 
 /* perf: owns its own dedicated, resettable chunk list (ast.c) -- NOT the
  * main never-free arena -- since an Ast tree is pure compile-time
- * scratch, fully dead once asnix_compile()/asnix_compile_scoped() walks
+ * scratch, fully dead once ll_compile()/ll_compile_scoped() walks
  * it into an IrProgram. */
-Ast *asnix_ast_new(AstKind kind);
+Ast *ll_ast_new(AstKind kind);
 
-/* Same as asnix_ast_new, plus sets the new node's src_pos (see struct
+/* Same as ll_ast_new, plus sets the new node's src_pos (see struct
  * Ast's own comment above) -- used by parser.c's real construction
  * sites, which always know the current token's byte offset.
  *
- * ASNIX_IRDUMP_LINE_TRACKING-gated, not just a runtime no-op: measured
+ * LL_IRDUMP_LINE_TRACKING-gated, not just a runtime no-op: measured
  * directly (real d.nix/ffmpeg eval, interleaved perf stat) that even an
  * always-inlined "set one extra field" version cost a real, reproducible
  * ~1.1% instruction regression on its own (parser.c's 46 call sites are
@@ -305,38 +305,38 @@ Ast *asnix_ast_new(AstKind kind);
  * parser.c/ast.c/compiler.c/irbuild.c/irpass.c object code is BYTE-
  * IDENTICAL to before this feature existed -- confirmed directly
  * (`objdump -d`/`cmp` against a pristine master build). When undefined,
- * `asnix_ast_new_at(kind, pos)` macro-expands to plain `asnix_ast_new
+ * `ll_ast_new_at(kind, pos)` macro-expands to plain `ll_ast_new
  * (kind)` -- a pure textual substitution, so `pos`'s expression (e.g.
  * `cur(p).start`) is never even evaluated, not just cheaply skipped. */
-#ifdef ASNIX_IRDUMP_LINE_TRACKING
-static inline Ast *asnix_ast_new_at(AstKind kind, uint32_t src_pos) {
-    Ast *n = asnix_ast_new(kind);
+#ifdef LL_IRDUMP_LINE_TRACKING
+static inline Ast *ll_ast_new_at(AstKind kind, uint32_t src_pos) {
+    Ast *n = ll_ast_new(kind);
     n->src_pos = src_pos;
     return n;
 }
 #else
-#define asnix_ast_new_at(kind, src_pos) asnix_ast_new(kind)
+#define ll_ast_new_at(kind, src_pos) ll_ast_new(kind)
 #endif
 
 /* Frees every Ast node allocated since the last reset (or process
- * start). Call right after a top-level asnix_compile()/
- * asnix_compile_scoped() returns -- see ast.c's own header comment for
+ * start). Call right after a top-level ll_compile()/
+ * ll_compile_scoped() returns -- see ast.c's own header comment for
  * why that's always safe. */
-void asnix_ast_arena_reset(void);
+void ll_ast_arena_reset(void);
 
 /* Lazy-thunk-compile experiment, ported from asnix (docs/lazy-thunk-
- * compile-proposal.md): redirects every asnix_ast_new()/
- * asnix_ast_new_at() call made while active into a SEPARATE chunk list
- * that asnix_ast_arena_reset() never touches -- i.e. permanently
+ * compile-proposal.md): redirects every ll_ast_new()/
+ * ll_ast_new_at() call made while active into a SEPARATE chunk list
+ * that ll_ast_arena_reset() never touches -- i.e. permanently
  * retained for the rest of the process, since a deferred lazy-compile
  * stub's Ast subtree must survive past the file's own compile call.
- * Gated internally on asnix_lazy_thunk_enabled (compiler.h) -- a no-op
+ * Gated internally on ll_lazy_thunk_enabled (compiler.h) -- a no-op
  * when the experiment is off. parser.c's own call sites toggle this
  * around exactly the subtree the experiment defers (an attrset literal
  * binding's value expression). Returns the previous state (nested-safe:
  * a `let`/attrset nested INSIDE an already-redirected value expression
  * must stay redirected for its own nested attrset fields too). */
-int asnix_ast_enter_retained(void);
-void asnix_ast_leave_retained(int prev_state);
+int ll_ast_enter_retained(void);
+void ll_ast_leave_retained(int prev_state);
 
-#endif /* ASNIX_AST_H */
+#endif /* LL_AST_H */

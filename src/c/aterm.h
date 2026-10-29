@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_ATERM_H
-#define ASNIX_ATERM_H
+#ifndef LL_ATERM_H
+#define LL_ATERM_H
 
 #include <stddef.h>
 
@@ -77,13 +77,13 @@ typedef struct {
  * NUL-terminated string (caller frees) -- this is scratch/build-time
  * text, not part of the runtime Value graph, so it doesn't need the
  * arena. */
-char *asnix_build_derivation_aterm(const AtermOutput *outputs, size_t noutputs,
+char *ll_build_derivation_aterm(const AtermOutput *outputs, size_t noutputs,
                                     const AtermInputDrv *input_drvs, size_t ninput_drvs, const char **input_srcs,
                                     size_t ninput_srcs, const char *system, const char *builder, const char **args,
                                     size_t nargs, const AtermEnvVar *env, size_t nenv);
 
 /* M151: a per-derivation escape cache, keyed by the SOURCE POINTER of each
- * string handed to `asnix_build_derivation_aterm_cached` (not its content --
+ * string handed to `ll_build_derivation_aterm_cached` (not its content --
  * pointer identity is exactly what the caller already guarantees for the
  * common case this exists for: `derivation.c` builds up to 3 ATerm texts
  * per derivation -- masked/real/cache-hash passes -- from the SAME
@@ -98,22 +98,22 @@ typedef struct AtermEscapeCache AtermEscapeCache;
 /* `hint` is the caller's best guess at how many distinct strings it will
  * feed through this cache across all passes (doesn't need to be exact --
  * just sizes the initial table to avoid a few early growths). */
-AtermEscapeCache *asnix_aterm_escape_cache_new(size_t hint);
-void asnix_aterm_escape_cache_free(AtermEscapeCache *cache);
+AtermEscapeCache *ll_aterm_escape_cache_new(size_t hint);
+void ll_aterm_escape_cache_free(AtermEscapeCache *cache);
 
-/* Same as `asnix_build_derivation_aterm`, but every string argument (each
+/* Same as `ll_build_derivation_aterm`, but every string argument (each
  * `AtermOutput`/`AtermInputDrv`/`AtermEnvVar` field, `system`, `builder`,
  * every `args`/`input_srcs` entry) is escaped through `cache`: a string
  * whose POINTER was already escaped earlier via this same cache is
  * reused verbatim (skipping the scan-and-copy work entirely), and a
  * first-seen pointer is escaped normally, then recorded for later reuse.
  * `cache` may be NULL, in which case this is identical to
- * `asnix_build_derivation_aterm` (no caching) -- `asnix_build_derivation_
+ * `ll_build_derivation_aterm` (no caching) -- `ll_build_derivation_
  * aterm` itself is now just this function called with `cache=NULL`. */
-char *asnix_build_derivation_aterm_cached(const AtermOutput *outputs, size_t noutputs,
+char *ll_build_derivation_aterm_cached(const AtermOutput *outputs, size_t noutputs,
                                            const AtermInputDrv *input_drvs, size_t ninput_drvs,
                                            const char **input_srcs, size_t ninput_srcs, const char *system,
                                            const char *builder, const char **args, size_t nargs,
                                            const AtermEnvVar *env, size_t nenv, AtermEscapeCache *cache);
 
-#endif /* ASNIX_ATERM_H */
+#endif /* LL_ATERM_H */

@@ -11,19 +11,19 @@
  * ip=body_prog->ops/pool=body_prog->pool/env=thunk_env musttail jump).
  *
  * asnix's own asm handler has to carefully save/restore %rdi (the real
- * captured ENV) across its `call asnix_compile_lazy_thunk_body`, because
+ * captured ENV) across its `call ll_compile_lazy_thunk_body`, because
  * the SysV calling convention doesn't do that for a leaf asm routine on
  * its own -- that's the one real bug the design doc's own first draft
  * had (clobbered %rdi before saving it). Here, in plain C, `env` is just
  * a function parameter: the C calling convention already preserves it
- * across the call to asnix_compile_lazy_thunk_body below for free, so
+ * across the call to ll_compile_lazy_thunk_body below for free, so
  * there is nothing to save/restore -- the entire hazard the asm version
  * has to work around doesn't exist in this backend. */
 LL_OP_ATTR Value ll_op_lazy_thunk_body(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t pidx = ip->b;
     void *desc = (void *)(uintptr_t)pool[pidx];
 
-    IrProgram *real = asnix_compile_lazy_thunk_body(desc); /* mutates desc->self's ops/pool
+    IrProgram *real = ll_compile_lazy_thunk_body(desc); /* mutates desc->self's ops/pool
                                                               * in place, returns desc->self */
 
     pool = real->pool;

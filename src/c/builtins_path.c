@@ -8,10 +8,10 @@
  * the word) -- found needed by numtide/nix-conformance's
  * eval-okay-drv-sources.nix, which exercises both directly.
  *
- * Reuses M75's NAR-dump machinery (nar.c's `asnix_copy_path_to_store_ext`,
+ * Reuses M75's NAR-dump machinery (nar.c's `ll_copy_path_to_store_ext`,
  * a new, filter/custom-name/flat-method-aware sibling of
- * `asnix_copy_path_to_store` added alongside this file -- see nar.h's
- * own comment) and M73's `asnix_compute_fixed_output_path` formula
+ * `ll_copy_path_to_store` added alongside this file -- see nar.h's
+ * own comment) and M73's `ll_compute_fixed_output_path` formula
  * (derivation.h) for the actual path computation, so this file itself
  * is just argument parsing/validation plus wiring a Nix-level `filter`
  * function into nar.c's plain C callback shape.
@@ -26,7 +26,7 @@
  *     builtins.path-adjacent hash this project parses (derivation.c's
  *     `outputHash`) has the same narrower scope cut already.
  *   - `path`'s own existence/type isn't pre-validated the way real
- *     Nix's `coerceToPath` does beyond what `asnix_copy_path_to_store_ext`
+ *     Nix's `coerceToPath` does beyond what `ll_copy_path_to_store_ext`
  *     itself already checks (lstat failures still produce a fatal
  *     error, just not real Nix's exact wording).
  */
@@ -40,7 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/ir.h" /* asnix_force_for_print */
+#include "ll/ir.h" /* ll_force_for_print */
 #include "base32.h" /* M80 (merge): numtide/nix-conformance's eval-okay-path.nix pins its
                       * 'sha256' attribute in Nix's own base32 ("nix32") encoding, not hex --
                       * decode_hex32 below accepts both. */
@@ -66,15 +66,15 @@ static int decode_hex32(const char *hex, size_t len, uint8_t out[32]) {
         }
         return 1;
     }
-    if (len == asnix_base32_encoded_length(32)) {
-        return asnix_base32_decode(hex, len, out, 32) == 0;
+    if (len == ll_base32_encoded_length(32)) {
+        return ll_base32_decode(hex, len, out, 32) == 0;
     }
     return 0;
 }
 
 /* Closure over the Nix-level `filter` function, threaded through
- * nar.c's plain-C `AsnixNarFilter` callback shape (see nar.h's own
- * comment on why that module stays decoupled from `Value`/`asnix_apply`
+ * nar.c's plain-C `LlNarFilter` callback shape (see nar.h's own
+ * comment on why that module stays decoupled from `Value`/`ll_apply`
  * entirely). */
 typedef struct {
     Value fn;
@@ -82,95 +82,95 @@ typedef struct {
 
 static int path_filter_cb(void *ctx_, const char *path, const char *type) {
     PathFilterCtx *ctx = ctx_;
-    Value a = asnix_make_string_value(path, strlen(path));
-    Value b = asnix_make_string_value(type, strlen(type));
-    Value res = asnix_force_for_print(asnix_bshared_apply2(ctx->fn, a, b));
-    if (asnix_tag_of(res) != ASNIX_TAG_IMM
-        || (asnix_imm_subtag(res) != ASNIX_IMM_TRUE && asnix_imm_subtag(res) != ASNIX_IMM_FALSE)) {
-        fprintf(stderr, "asnix: path filter function must return a boolean\n");
+    Value a = ll_make_string_value(path, strlen(path));
+    Value b = ll_make_string_value(type, strlen(type));
+    Value res = ll_force_for_print(ll_bshared_apply2(ctx->fn, a, b));
+    if (ll_tag_of(res) != LL_TAG_IMM
+        || (ll_imm_subtag(res) != LL_IMM_TRUE && ll_imm_subtag(res) != LL_IMM_FALSE)) {
+        fprintf(stderr, "ll: path filter function must return a boolean\n");
         exit(1);
     }
-    return asnix_imm_subtag(res) == ASNIX_IMM_TRUE;
+    return ll_imm_subtag(res) == LL_IMM_TRUE;
 }
 
 static char *path_value_to_cstr(Value v, const char *who) {
-    v = asnix_force_for_print(v);
+    v = ll_force_for_print(v);
     int64_t len;
     const char *bytes;
-    asnix_bshared_string_bytes(v, &bytes, &len, who);
+    ll_bshared_string_bytes(v, &bytes, &len, who);
     return strndup(bytes, (size_t)len);
 }
 
 /* Shared tail: runs the (possibly filtered/flat/pinned) copy and
  * attaches the resulting path's own Opaque context -- same convention
- * M75/M76's `asnix_copy_path_to_store` callers already use (e.g.
+ * M75/M76's `ll_copy_path_to_store` callers already use (e.g.
  * value_util.c's Path-coercion cases). */
 static Value finish_path_copy(const char *path, const char *name, int recursive, int have_filter, Value filter_fn,
                                int have_sha256, const uint8_t sha256[32]) {
     PathFilterCtx fctx;
     fctx.fn = filter_fn;
     char out_path[300];
-    asnix_copy_path_to_store_ext(path, name, recursive, have_filter ? path_filter_cb : NULL,
+    ll_copy_path_to_store_ext(path, name, recursive, have_filter ? path_filter_cb : NULL,
                                   have_filter ? &fctx : NULL, have_sha256 ? sha256 : NULL, out_path,
                                   sizeof(out_path));
-    Value out = asnix_make_string_value(out_path, strlen(out_path));
-    AsnixStringContext ctx;
-    asnix_ctx_init(&ctx);
-    asnix_ctx_add_opaque(&ctx, out_path);
-    asnix_string_attach_context(out, &ctx);
+    Value out = ll_make_string_value(out_path, strlen(out_path));
+    LlStringContext ctx;
+    ll_ctx_init(&ctx);
+    ll_ctx_add_opaque(&ctx, out_path);
+    ll_string_attach_context(out, &ctx);
     return out;
 }
 
 static Value prim_path(const Value *args, int64_t argc) {
     (void)argc;
-    ASNIX_REQUIRE_ATTRS(args[0], "path");
+    LL_REQUIRE_ATTRS(args[0], "path");
 
     char *path_str = NULL;
     char *name = NULL;
     int have_filter = 0;
-    Value filter_fn = ASNIX_NULL;
+    Value filter_fn = LL_NULL;
     int recursive = 1;
     int have_sha256 = 0;
     uint8_t sha256[32];
 
-    int64_t n = asnix_bshared_attrs_count(args[0]);
+    int64_t n = ll_bshared_attrs_count(args[0]);
     for (int64_t i = 0; i < n; i++) {
-        uint32_t sym = asnix_bshared_attrs_sym(args[0], i);
+        uint32_t sym = ll_bshared_attrs_sym(args[0], i);
         size_t klen;
-        const char *kname = asnix_sym_name(sym, &klen);
-        Value val = asnix_bshared_attrs_value(args[0], i);
+        const char *kname = ll_sym_name(sym, &klen);
+        Value val = ll_bshared_attrs_value(args[0], i);
         if (klen == 4 && memcmp(kname, "path", 4) == 0) {
             path_str = path_value_to_cstr(val, "path");
         } else if (klen == 4 && memcmp(kname, "name", 4) == 0) {
             name = path_value_to_cstr(val, "path");
         } else if (klen == 6 && memcmp(kname, "filter", 6) == 0) {
-            filter_fn = asnix_force_for_print(val);
+            filter_fn = ll_force_for_print(val);
             have_filter = 1;
         } else if (klen == 9 && memcmp(kname, "recursive", 9) == 0) {
-            Value rv = asnix_force_for_print(val);
-            if (asnix_tag_of(rv) != ASNIX_TAG_IMM
-                || (asnix_imm_subtag(rv) != ASNIX_IMM_TRUE && asnix_imm_subtag(rv) != ASNIX_IMM_FALSE)) {
-                fprintf(stderr, "asnix: path: 'recursive' must be a boolean\n");
+            Value rv = ll_force_for_print(val);
+            if (ll_tag_of(rv) != LL_TAG_IMM
+                || (ll_imm_subtag(rv) != LL_IMM_TRUE && ll_imm_subtag(rv) != LL_IMM_FALSE)) {
+                fprintf(stderr, "ll: path: 'recursive' must be a boolean\n");
                 exit(1);
             }
-            recursive = asnix_imm_subtag(rv) == ASNIX_IMM_TRUE;
+            recursive = ll_imm_subtag(rv) == LL_IMM_TRUE;
         } else if (klen == 6 && memcmp(kname, "sha256", 6) == 0) {
-            Value sv = asnix_force_for_print(val);
+            Value sv = ll_force_for_print(val);
             int64_t slen;
             const char *sbytes;
-            asnix_bshared_string_bytes(sv, &sbytes, &slen, "path");
+            ll_bshared_string_bytes(sv, &sbytes, &slen, "path");
             if (!decode_hex32(sbytes, (size_t)slen, sha256)) {
-                fprintf(stderr, "asnix: path: 'sha256' must be a 64-character hex digest or a 52-character nix32 one\n");
+                fprintf(stderr, "ll: path: 'sha256' must be a 64-character hex digest or a 52-character nix32 one\n");
                 exit(1);
             }
             have_sha256 = 1;
         } else {
-            fprintf(stderr, "asnix: unsupported argument '%.*s' to 'builtins.path'\n", (int)klen, kname);
+            fprintf(stderr, "ll: unsupported argument '%.*s' to 'builtins.path'\n", (int)klen, kname);
             exit(1);
         }
     }
     if (!path_str) {
-        fprintf(stderr, "asnix: missing required 'path' attribute in the first argument to 'builtins.path'\n");
+        fprintf(stderr, "ll: missing required 'path' attribute in the first argument to 'builtins.path'\n");
         exit(1);
     }
 
@@ -179,20 +179,20 @@ static Value prim_path(const Value *args, int64_t argc) {
     free(name);
     return result;
 }
-static Value build_path(void) { return asnix_bshared_make_primop((void *)prim_path, 1); }
+static Value build_path(void) { return ll_bshared_make_primop((void *)prim_path, 1); }
 
 static Value filterSource2_impl(const Value *args, int64_t argc) {
     (void)argc;
-    Value filter_fn = asnix_force_for_print(args[0]);
+    Value filter_fn = ll_force_for_print(args[0]);
     char *path_str = path_value_to_cstr(args[1], "filterSource");
     Value result = finish_path_copy(path_str, NULL, 1, 1, filter_fn, 0, NULL);
     free(path_str);
     return result;
 }
-static Value build_filterSource(void) { return asnix_bshared_make_curried_native((void *)filterSource2_impl, 2); }
+static Value build_filterSource(void) { return ll_bshared_make_curried_native((void *)filterSource2_impl, 2); }
 
-const AsnixBuiltinMiscDef ASNIX_PATH_BUILTINS[] = {
+const LlBuiltinMiscDef LL_PATH_BUILTINS[] = {
     { "path", build_path },
     { "filterSource", build_filterSource },
 };
-const size_t ASNIX_PATH_BUILTINS_COUNT = sizeof(ASNIX_PATH_BUILTINS) / sizeof(ASNIX_PATH_BUILTINS[0]);
+const size_t LL_PATH_BUILTINS_COUNT = sizeof(LL_PATH_BUILTINS) / sizeof(LL_PATH_BUILTINS[0]);

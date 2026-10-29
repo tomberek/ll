@@ -1,9 +1,9 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_CODEGEN_H
-#define ASNIX_CODEGEN_H
+#ifndef LL_CODEGEN_H
+#define LL_CODEGEN_H
 
 #include "ast.h"
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /*
  * M4.5: copy-and-patch native code generation. Compiles an AST directly to
@@ -19,15 +19,15 @@
  * supported here -- they need a heap Closure + an explicit call/return
  * protocol (mirroring src/asm/ops/op_call.S), which is a real additional
  * project, not a small extension; see docs/architecture.md's M4.5 notes
- * for why this was scoped out of the first cut. asnix_codegen() aborts the
+ * for why this was scoped out of the first cut. ll_codegen() aborts the
  * process with a clear message if it encounters an AST_LAMBDA/AST_APP
  * node.
  *
  * The returned function is an ordinary SysV-ABI-compliant `Value (*)(void)`
  * -- callable directly, no special entry convention.
  */
-typedef Value (*AsnixNativeFn)(void);
+typedef Value (*LlNativeFn)(void);
 
-AsnixNativeFn asnix_codegen(Ast *root);
+LlNativeFn ll_codegen(Ast *root);
 
-#endif /* ASNIX_CODEGEN_H */
+#endif /* LL_CODEGEN_H */

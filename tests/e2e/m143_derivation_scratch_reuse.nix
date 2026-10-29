@@ -1,7 +1,7 @@
 /* M143: forcing `top`'s attributes recursively forces `mid1`/`mid2`
  * (each itself a `derivation {}` call with TWO distinct input
  * derivations), which in turn recursively force `x1`/`x2`/`x3`. This
- * exercises `asnix_prim_derivation`'s depth-indexed scratch-buffer
+ * exercises `ll_prim_derivation`'s depth-indexed scratch-buffer
  * pool (M143) three ways at once: real recursion depth (x* are depth
  * 2, mid* are depth 1, top is depth 0), SIBLING reuse of the SAME
  * depth-1 frame across two sequential, non-nested calls (mid1 fully

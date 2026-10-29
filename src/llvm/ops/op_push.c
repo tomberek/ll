@@ -3,12 +3,12 @@
 
 LL_OP_ATTR Value ll_op_push_int(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t raw = pool[ip->b];
-    if (raw > ASNIX_INT_MAX || raw < ASNIX_INT_MIN) {
-        static const char msg[] = "asnix: integer literal out of asnix's representable range, aborting\n";
-        asnix_fatal(msg, sizeof(msg) - 1);
+    if (raw > LL_INT_MAX || raw < LL_INT_MIN) {
+        static const char msg[] = "ll: integer literal out of ll's representable range, aborting\n";
+        ll_fatal(msg, sizeof(msg) - 1);
     }
     ll_check_valstack(vs);
-    vs[0].raw = ((uint64_t)raw << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+    vs[0].raw = ((uint64_t)raw << LL_TAG_BITS) | LL_TAG_INT;
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);
 }
@@ -29,7 +29,7 @@ LL_OP_ATTR Value ll_op_push_false(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
 
 LL_OP_ATTR Value ll_op_push_null(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     ll_check_valstack(vs);
-    vs[0].raw = ((uint64_t)ASNIX_IMM_NULL << ASNIX_TAG_BITS) | ASNIX_TAG_IMM;
+    vs[0].raw = ((uint64_t)LL_IMM_NULL << LL_TAG_BITS) | LL_TAG_IMM;
     vs++;
     LL_NEXT(ip, env, vs, pool, rs);
 }
@@ -53,14 +53,14 @@ LL_OP_ATTR Value ll_op_push_const(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
 LL_OP_ATTR Value ll_op_push_int_run(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     int64_t start = ip->b;
-    if ((void *)(vs + count) > asnix_valstack_limit) asnix_valstack_overflow();
+    if ((void *)(vs + count) > ll_valstack_limit) ll_valstack_overflow();
     for (int64_t k = 0; k < count; k++) {
         int64_t raw = pool[start + k];
-        if (raw > ASNIX_INT_MAX || raw < ASNIX_INT_MIN) {
-            static const char msg[] = "asnix: integer literal out of asnix's representable range, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+        if (raw > LL_INT_MAX || raw < LL_INT_MIN) {
+            static const char msg[] = "ll: integer literal out of ll's representable range, aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        vs[k].raw = ((uint64_t)raw << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+        vs[k].raw = ((uint64_t)raw << LL_TAG_BITS) | LL_TAG_INT;
     }
     vs += count;
     ip += count;

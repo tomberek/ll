@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_STACKCHECK_H
-#define ASNIX_STACKCHECK_H
+#ifndef LL_STACKCHECK_H
+#define LL_STACKCHECK_H
 
 /*
  * Bounds checks for the two explicit stacks the dispatch loop keeps off
@@ -16,10 +16,10 @@
  * happened to allocate next instead of failing loudly (see
  * docs/architecture.md's "Known bugs" list).
  *
- * `asnix_valstack_limit`/`asnix_retsp_limit` (defined in
+ * `ll_valstack_limit`/`ll_retsp_limit` (defined in
  * src/asm/stacklimits.S) hold "one past the last valid byte" of whichever
  * buffer is *currently* active. There are two separate dispatch contexts
- * that can be active at a time -- the top-level asnix_eval loop
+ * that can be active at a time -- the top-level ll_eval loop
  * (dispatch.S, large buffers) and force.S's smaller, separate nested
  * -forcing context -- and both write these same two globals when they set
  * up %r12/%r14, saving/restoring the previous values around the nested
@@ -34,18 +34,18 @@
 
 #ifdef __ASSEMBLER__
 
-.macro ASNIX_CHECK_VALSTACK scratch
+.macro LL_CHECK_VALSTACK scratch
     leaq 8(%r12), \scratch
-    cmpq asnix_valstack_limit(%rip), \scratch
-    ja asnix_valstack_overflow
+    cmpq ll_valstack_limit(%rip), \scratch
+    ja ll_valstack_overflow
 .endm
 
-.macro ASNIX_CHECK_RETSP scratch
-    leaq ASNIX_RETFRAME_SIZE(%r14), \scratch
-    cmpq asnix_retsp_limit(%rip), \scratch
-    ja asnix_retsp_overflow
+.macro LL_CHECK_RETSP scratch
+    leaq LL_RETFRAME_SIZE(%r14), \scratch
+    cmpq ll_retsp_limit(%rip), \scratch
+    ja ll_retsp_overflow
 .endm
 
 #endif /* __ASSEMBLER__ */
 
-#endif /* ASNIX_STACKCHECK_H */
+#endif /* LL_STACKCHECK_H */

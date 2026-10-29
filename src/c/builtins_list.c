@@ -20,7 +20,7 @@
  *
  * The fix: allocate *larger* PrimOp objects for these curried stages --
  * {fn; arity; capture0; [capture1]} -- nothing anywhere checks that a
- * PrimOp heap object is exactly ASNIX_PRIMOP_SIZE bytes, only that
+ * PrimOp heap object is exactly LL_PRIMOP_SIZE bytes, only that
  * offsets 0/8 hold fn/arity (see make_primop1/make_primop2 below). The
  * captured Value(s) are recovered inside the stage's own `fn` via
  * `self_captures()`, which exploits a real invariant of op_call.S's
@@ -32,9 +32,9 @@
  * assembly changes. This invariant holds for every *ordinary* Nix-level
  * application (`f x` always desugars to an OP_CALL, regardless of how
  * `f` was obtained), which is the only way these stage-2/3 PrimOps are
- * ever invoked -- this module itself only ever uses asnix_apply (see
+ * ever invoked -- this module itself only ever uses ll_apply (see
  * apply_shim.h) to call the *user-supplied* function/predicate/operator,
- * never its own curried stages, so the asnix_apply primop path (which
+ * never its own curried stages, so the ll_apply primop path (which
  * does NOT preserve this invariant -- it tail-calls `fn` with the
  * caller's own args pointer, nothing before it) never needs to recover a
  * self pointer this way.
@@ -56,53 +56,53 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "asnix/arena.h"
-#include "asnix/heap.h"
-#include "asnix/ir.h"
-#include "asnix/value.h"
+#include "ll/arena.h"
+#include "ll/heap.h"
+#include "ll/ir.h"
+#include "ll/value.h"
 #include "builtins_shared.h"
-#include "value_util.h" /* asnix_make_lazyapp1 -- see prim_map_stage2's comment */
+#include "value_util.h" /* ll_make_lazyapp1 -- see prim_map_stage2's comment */
 
-/* Plain, non-capturing PrimOp (ASNIX_PRIMOP_SIZE bytes, heap.h). */
+/* Plain, non-capturing PrimOp (LL_PRIMOP_SIZE bytes, heap.h). */
 static Value make_primop0(void *fn, int64_t arity) {
-    void *mem = asnix_arena_alloc(ASNIX_PRIMOP_SIZE);
-    *(void **)((char *)mem + ASNIX_PRIMOP_OFF_FN) = fn;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_ARITY) = arity;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PRIMOP };
+    void *mem = ll_arena_alloc(LL_PRIMOP_SIZE);
+    *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_ARITY) = arity;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PRIMOP };
 }
 
 /* PrimOp with one trailing captured Value (see header comment above). */
 static Value make_primop1(void *fn, int64_t arity, Value cap0) {
-    void *mem = asnix_arena_alloc(ASNIX_PRIMOP_SIZE + sizeof(Value));
-    *(void **)((char *)mem + ASNIX_PRIMOP_OFF_FN) = fn;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_ARITY) = arity;
-    *(Value *)((char *)mem + ASNIX_PRIMOP_SIZE) = cap0;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PRIMOP };
+    void *mem = ll_arena_alloc(LL_PRIMOP_SIZE + sizeof(Value));
+    *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_ARITY) = arity;
+    *(Value *)((char *)mem + LL_PRIMOP_SIZE) = cap0;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PRIMOP };
 }
 
-/* Same as make_primop1, but sets ASNIX_PRIMOP_OFF_NOFORCE (heap.h) so
+/* Same as make_primop1, but sets LL_PRIMOP_OFF_NOFORCE (heap.h) so
  * op_call.S/apply.S do NOT force this primop's own argument before
  * calling it. M53: used only for foldl''s stage2 -- see
  * prim_foldl_prime's own comment for why plain make_primop1 (which
  * leaves every other curried stage's forcing untouched, correctly) is
  * wrong specifically here. */
 static Value make_primop1_noforce(void *fn, int64_t arity, Value cap0) {
-    void *mem = asnix_arena_alloc(ASNIX_PRIMOP_SIZE + sizeof(Value));
-    *(void **)((char *)mem + ASNIX_PRIMOP_OFF_FN) = fn;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_ARITY) = arity;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_NOFORCE) = 1;
-    *(Value *)((char *)mem + ASNIX_PRIMOP_SIZE) = cap0;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PRIMOP };
+    void *mem = ll_arena_alloc(LL_PRIMOP_SIZE + sizeof(Value));
+    *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_ARITY) = arity;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_NOFORCE) = 1;
+    *(Value *)((char *)mem + LL_PRIMOP_SIZE) = cap0;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PRIMOP };
 }
 
 /* PrimOp with two trailing captured Values (foldl''s stage3: op + acc). */
 static Value make_primop2(void *fn, int64_t arity, Value cap0, Value cap1) {
-    void *mem = asnix_arena_alloc(ASNIX_PRIMOP_SIZE + 2 * sizeof(Value));
-    *(void **)((char *)mem + ASNIX_PRIMOP_OFF_FN) = fn;
-    *(int64_t *)((char *)mem + ASNIX_PRIMOP_OFF_ARITY) = arity;
-    *(Value *)((char *)mem + ASNIX_PRIMOP_SIZE) = cap0;
-    *(Value *)((char *)mem + ASNIX_PRIMOP_SIZE + sizeof(Value)) = cap1;
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_PRIMOP };
+    void *mem = ll_arena_alloc(LL_PRIMOP_SIZE + 2 * sizeof(Value));
+    *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
+    *(int64_t *)((char *)mem + LL_PRIMOP_OFF_ARITY) = arity;
+    *(Value *)((char *)mem + LL_PRIMOP_SIZE) = cap0;
+    *(Value *)((char *)mem + LL_PRIMOP_SIZE + sizeof(Value)) = cap1;
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PRIMOP };
 }
 
 /* Recovers this call's own PrimOp heap pointer from the args pointer (see
@@ -110,8 +110,8 @@ static Value make_primop2(void *fn, int64_t arity, Value cap0, Value cap1) {
  * returns a pointer to its first trailing captured Value. */
 static Value *self_captures(const Value *args) {
     Value self = args[-1];
-    void *obj = (void *)(uintptr_t)(self.raw & ~(uint64_t)ASNIX_TAG_MASK);
-    return (Value *)((char *)obj + ASNIX_PRIMOP_SIZE);
+    void *obj = (void *)(uintptr_t)(self.raw & ~(uint64_t)LL_TAG_MASK);
+    return (Value *)((char *)obj + LL_PRIMOP_SIZE);
 }
 
 static void fatal(const char *msg) {
@@ -120,39 +120,39 @@ static void fatal(const char *msg) {
 }
 
 static void check_list(Value v, const char *who) {
-    if (asnix_tag_of(v) != ASNIX_TAG_LIST) {
-        fprintf(stderr, "asnix: %s: expected a list\n", who);
+    if (ll_tag_of(v) != LL_TAG_LIST) {
+        fprintf(stderr, "ll: %s: expected a list\n", who);
         exit(1);
     }
 }
 
 static int64_t list_count(Value v) {
-    const char *base = (const char *)(uintptr_t)(v.raw & ~(uint64_t)ASNIX_TAG_MASK);
-    return *(const int64_t *)(base + ASNIX_LIST_OFF_COUNT);
+    const char *base = (const char *)(uintptr_t)(v.raw & ~(uint64_t)LL_TAG_MASK);
+    return *(const int64_t *)(base + LL_LIST_OFF_COUNT);
 }
 
 static const Value *list_elems(Value v) {
-    const char *base = (const char *)(uintptr_t)(v.raw & ~(uint64_t)ASNIX_TAG_MASK);
-    return (const Value *)(base + ASNIX_LIST_OFF_ELEMS);
+    const char *base = (const char *)(uintptr_t)(v.raw & ~(uint64_t)LL_TAG_MASK);
+    return (const Value *)(base + LL_LIST_OFF_ELEMS);
 }
 
 static Value make_list(int64_t count, const Value *src) {
-    void *mem = asnix_arena_alloc(8 + (uint64_t)count * sizeof(Value));
-    *(int64_t *)((char *)mem + ASNIX_LIST_OFF_COUNT) = count;
+    void *mem = ll_arena_alloc(8 + (uint64_t)count * sizeof(Value));
+    *(int64_t *)((char *)mem + LL_LIST_OFF_COUNT) = count;
     if (count > 0) {
-        memcpy((char *)mem + ASNIX_LIST_OFF_ELEMS, src, (size_t)count * sizeof(Value));
+        memcpy((char *)mem + LL_LIST_OFF_ELEMS, src, (size_t)count * sizeof(Value));
     }
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_LIST };
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_LIST };
 }
 
 /* Applies a curried-by-construction 2-argument Nix function (e.g. `a: b:
  * ...`, which compiles to two nested arity-1 closures, exactly like
  * every other multi-argument Nix lambda) to two arguments via two
- * successive single-argument asnix_apply calls -- `fn a b` is `(fn a) b`,
+ * successive single-argument ll_apply calls -- `fn a b` is `(fn a) b`,
  * same as any other curried application in this codebase. */
 static Value apply2(Value fn, Value a, Value b) {
-    Value step1 = asnix_apply(fn, &a, 1);
-    return asnix_apply(step1, &b, 1);
+    Value step1 = ll_apply(fn, &a, 1);
+    return ll_apply(step1, &b, 1);
 }
 
 /* --------------------------------------------------------------------- */
@@ -163,16 +163,16 @@ static Value apply2(Value fn, Value a, Value b) {
  * thunks, each calling `f elem` only once actually forced (verified:
  * `builtins.length (map (x: throw "boom") [1 2 3])` => 3, never
  * triggering the throw at all since nothing forces the elements here).
- * A prior version of this function called `asnix_apply(f, &elem, 1)`
+ * A prior version of this function called `ll_apply(f, &elem, 1)`
  * immediately for every element while *building* the result list --
  * a real, previously-undiscovered strictness bug (not a cosmetic
  * printing difference), found via numtide/nix-conformance's
  * eval-okay-intersectAttrs.nix exposing the identical bug in `mapAttrs`
  * (see builtins_attrs.c's own fix). Each element is now a genuinely
  * lazy value instead of an already-computed one -- M117: a LazyApp
- * (asnix_make_lazyapp1, value_util.c), not a Thunk+Env pair the way
- * asnix_bshared_make_lazy_call1 (removed) used to build -- see heap.h's
- * ASNIX_LAZYAPP_MARKER comment for the full rationale. */
+ * (ll_make_lazyapp1, value_util.c), not a Thunk+Env pair the way
+ * ll_bshared_make_lazy_call1 (removed) used to build -- see heap.h's
+ * LL_LAZYAPP_MARKER comment for the full rationale. */
 static Value prim_map_stage2(const Value *args, int64_t argc) {
     (void)argc;
     Value f = self_captures(args)[0];
@@ -183,7 +183,7 @@ static Value prim_map_stage2(const Value *args, int64_t argc) {
 
     Value *out = count > 0 ? malloc((size_t)count * sizeof(Value)) : NULL;
     for (int64_t i = 0; i < count; i++) {
-        out[i] = asnix_make_lazyapp1(f, elems[i]);
+        out[i] = ll_make_lazyapp1(f, elems[i]);
     }
     Value result = make_list(count, out);
     free(out);
@@ -195,7 +195,7 @@ static Value prim_map(const Value *args, int64_t argc) {
     return make_primop1((void *)prim_map_stage2, 1, args[0]);
 }
 
-Value asnix_make_map_primop(void) {
+Value ll_make_map_primop(void) {
     return make_primop0((void *)prim_map, 1);
 }
 
@@ -215,13 +215,13 @@ static Value prim_filter_stage2(const Value *args, int64_t argc) {
     int64_t n_kept = 0;
     for (int64_t i = 0; i < count; i++) {
         Value elem = elems[i];
-        Value keep = asnix_apply(pred, &elem, 1);
-        if (asnix_tag_of(keep) != ASNIX_TAG_IMM ||
-            (asnix_imm_subtag(keep) != ASNIX_IMM_TRUE && asnix_imm_subtag(keep) != ASNIX_IMM_FALSE)) {
+        Value keep = ll_apply(pred, &elem, 1);
+        if (ll_tag_of(keep) != LL_TAG_IMM ||
+            (ll_imm_subtag(keep) != LL_IMM_TRUE && ll_imm_subtag(keep) != LL_IMM_FALSE)) {
             free(kept);
-            fatal("asnix: filter: predicate did not return a boolean");
+            fatal("ll: filter: predicate did not return a boolean");
         }
-        if (asnix_imm_subtag(keep) == ASNIX_IMM_TRUE) {
+        if (ll_imm_subtag(keep) == LL_IMM_TRUE) {
             kept[n_kept++] = elem;
         }
     }
@@ -280,7 +280,7 @@ static Value prim_foldl_prime(const Value *args, int64_t argc) {
      * before stage2's own body (which only captures it, never inspects
      * its tag) ever ran. stage3 (supplying `list`) deliberately keeps
      * ordinary forcing -- it genuinely needs the list's own
-     * ASNIX_TAG_LIST tag/count/elems (check_list), matching real Nix's
+     * LL_TAG_LIST tag/count/elems (check_list), matching real Nix's
      * own `state.forceList(*args[2], ...)`. */
     return make_primop1_noforce((void *)prim_foldl_prime_stage2, 1, args[0]);
 }
@@ -293,13 +293,13 @@ static Value prim_elemAt_stage2(const Value *args, int64_t argc) {
     (void)argc;
     Value list = self_captures(args)[0];
     Value idx_v = args[0];
-    if (asnix_tag_of(idx_v) != ASNIX_TAG_INT) {
-        fatal("asnix: elemAt: index is not an integer");
+    if (ll_tag_of(idx_v) != LL_TAG_INT) {
+        fatal("ll: elemAt: index is not an integer");
     }
-    int64_t idx = asnix_int_value(idx_v);
+    int64_t idx = ll_int_value(idx_v);
     int64_t count = list_count(list);
     if (idx < 0 || idx >= count) {
-        fprintf(stderr, "asnix: elemAt: index %lld out of bounds (list has %lld elements)\n",
+        fprintf(stderr, "ll: elemAt: index %lld out of bounds (list has %lld elements)\n",
                 (long long)idx, (long long)count);
         exit(1);
     }
@@ -327,7 +327,7 @@ static Value prim_concatLists(const Value *args, int64_t argc) {
      * list elements are always lazy by design (same as attrset values),
      * so an unforced Thunk here is completely ordinary, not an error;
      * only forcing reveals whether it's actually a list. A prior
-     * version of this function checked `asnix_tag_of()` on the raw,
+     * version of this function checked `ll_tag_of()` on the raw,
      * possibly-still-thunked element directly, which happened to "work"
      * only because every list producer up to M23 always left already-
      * computed values in a list -- M23's `map` fix (now genuinely lazy
@@ -339,17 +339,17 @@ static Value prim_concatLists(const Value *args, int64_t argc) {
     Value *oelems = ocount > 0 ? malloc((size_t)ocount * sizeof(Value)) : NULL;
     int64_t total = 0;
     for (int64_t i = 0; i < ocount; i++) {
-        oelems[i] = asnix_force_for_print(oelems_raw[i]);
-        if (asnix_tag_of(oelems[i]) != ASNIX_TAG_LIST) {
-            fprintf(stderr, "asnix: concatLists: element %lld is not a list\n", (long long)i);
+        oelems[i] = ll_force_for_print(oelems_raw[i]);
+        if (ll_tag_of(oelems[i]) != LL_TAG_LIST) {
+            fprintf(stderr, "ll: concatLists: element %lld is not a list\n", (long long)i);
             exit(1);
         }
         total += list_count(oelems[i]);
     }
 
-    void *mem = asnix_arena_alloc(8 + (uint64_t)total * sizeof(Value));
-    *(int64_t *)((char *)mem + ASNIX_LIST_OFF_COUNT) = total;
-    Value *out = (Value *)((char *)mem + ASNIX_LIST_OFF_ELEMS);
+    void *mem = ll_arena_alloc(8 + (uint64_t)total * sizeof(Value));
+    *(int64_t *)((char *)mem + LL_LIST_OFF_COUNT) = total;
+    Value *out = (Value *)((char *)mem + LL_LIST_OFF_ELEMS);
     int64_t pos = 0;
     for (int64_t i = 0; i < ocount; i++) {
         int64_t icount = list_count(oelems[i]);
@@ -359,7 +359,7 @@ static Value prim_concatLists(const Value *args, int64_t argc) {
         pos += icount;
     }
     free(oelems);
-    return (Value){ .raw = (uint64_t)(uintptr_t)mem | ASNIX_TAG_LIST };
+    return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_LIST };
 }
 
 /* --------------------------------------------------------------------- */
@@ -372,7 +372,7 @@ static Value prim_tail(const Value *args, int64_t argc) {
     check_list(list, "tail");
     int64_t count = list_count(list);
     if (count == 0) {
-        fatal("asnix: tail: list is empty");
+        fatal("ll: tail: list is empty");
     }
     return make_list(count - 1, list_elems(list) + 1);
 }
@@ -382,14 +382,14 @@ static Value prim_head(const Value *args, int64_t argc) {
     Value list = args[0];
     check_list(list, "head");
     if (list_count(list) == 0) {
-        fatal("asnix: head: list is empty");
+        fatal("ll: head: list is empty");
     }
     return list_elems(list)[0];
 }
 
 /* --------------------------------------------------------------------- */
 
-const AsnixBuiltinDef asnix_builtins_list[] = {
+const LlBuiltinDef ll_builtins_list[] = {
     { "map", prim_map, 1 },
     { "filter", prim_filter, 1 },
     { "foldl'", prim_foldl_prime, 1 },
@@ -399,4 +399,4 @@ const AsnixBuiltinDef asnix_builtins_list[] = {
     { "head", prim_head, 1 },
 };
 
-const size_t asnix_builtins_list_count = sizeof(asnix_builtins_list) / sizeof(asnix_builtins_list[0]);
+const size_t ll_builtins_list_count = sizeof(ll_builtins_list) / sizeof(ll_builtins_list[0]);

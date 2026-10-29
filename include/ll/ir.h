@@ -1,6 +1,6 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_IR_H
-#define ASNIX_IR_H
+#ifndef LL_IR_H
+#define LL_IR_H
 
 /*
  * Flat, fixed-width IR: a 16-byte, 8-byte-aligned record per instruction.
@@ -19,7 +19,7 @@
  * negative literals) -- so OP_PUSH_INT no longer carries its value inline
  * at all; it now routes through the constant pool exactly like
  * OP_PUSH_CONST (b = pool index of the raw int64 literal), the same
- * precedent M105 set narrowing ASNIX_ATTR_SIZE 16->12. Every OTHER
+ * precedent M105 set narrowing LL_ATTR_SIZE 16->12. Every OTHER
  * op's `a`/`b` is internal bookkeeping (a De Bruijn depth/slot, a frame
  * slot index, a pool index, a symbol id, a self-relative jump byte-delta,
  * an element count) bounded by the size of the compiled program or the
@@ -28,13 +28,13 @@
  * compiler-inserted padding, same as the old 24-byte layout.
  */
 
-#define ASNIX_IROP_SIZE        16
-#define ASNIX_IROP_OFF_HANDLER 0
-#define ASNIX_IROP_OFF_A       8
-#define ASNIX_IROP_OFF_B       12
+#define LL_IROP_SIZE        16
+#define LL_IROP_OFF_HANDLER 0
+#define LL_IROP_OFF_A       8
+#define LL_IROP_OFF_B       12
 
-#define ASNIX_IRPROG_OFF_OPS  0
-#define ASNIX_IRPROG_OFF_POOL 8
+#define LL_IRPROG_OFF_OPS  0
+#define LL_IRPROG_OFF_POOL 8
 
 /* Closure heap object: {up; prog; arity; formals}. In this minimal model a
  * lambda's frame has exactly `arity` slots (one per parameter, no extra
@@ -55,7 +55,7 @@
  * A narrower encoding was considered (a 32-bit index into a table of
  * distinct programs, or a 32-bit offset into a dedicated contiguous
  * region) and measured to buy NOTHING further here specifically:
- * `asnix_arena_alloc` (arena.S) rounds every allocation up to the next
+ * `ll_arena_alloc` (arena.S) rounds every allocation up to the next
  * multiple of 8 bytes, so a 20-byte Closure (up 8 + a 4-byte field +
  * arity 8) and a 24-byte Closure (up 8 + an 8-byte pointer + arity 8)
  * consume the IDENTICAL 24 bytes from the arena -- the narrower
@@ -72,9 +72,9 @@
  * instead of its own (the bug M4's curried lambdas first exposed: M3's
  * single-level fixture never had a lambda body containing another
  * OP_LAMBDA). */
-#define ASNIX_CLOSURE_OFF_UP    0
-#define ASNIX_CLOSURE_OFF_PROG  8
-#define ASNIX_CLOSURE_OFF_ARITY 16
+#define LL_CLOSURE_OFF_UP    0
+#define LL_CLOSURE_OFF_PROG  8
+#define LL_CLOSURE_OFF_ARITY 16
 /* `builtins.functionArgs`'s pre-built result Value for this closure (M37)
  * -- a plain attrset {name: hasDefault} for a lambda-pattern (`{a, b ?
  * d, ...}: ...`), or the shared empty-attrset Value for every other
@@ -85,8 +85,8 @@
  * OP_PUSH_CONST uses for any other constant Value -- not computed at
  * OP_LAMBDA-execution time, since it never varies per-call the way the
  * `up`/`prog` fields (capturing the *current* call's environment) do. */
-#define ASNIX_CLOSURE_OFF_FORMALS 24
-#define ASNIX_CLOSURE_SIZE      32
+#define LL_CLOSURE_OFF_FORMALS 24
+#define LL_CLOSURE_SIZE      32
 
 /* Call-frame record on the explicit RETSP stack (kept off the native
  * machine stack, so the jmp-chain dispatch loop never grows it): where to
@@ -97,11 +97,11 @@
  * than to make an ordinary OP_CALL -- OP_RET uses it to know which Thunk
  * cell to memoize the result into before resuming (zero means "ordinary
  * call, no memoization"). */
-#define ASNIX_RETFRAME_OFF_IP           0
-#define ASNIX_RETFRAME_OFF_ENV          8
-#define ASNIX_RETFRAME_OFF_POOL         16
-#define ASNIX_RETFRAME_OFF_FORCE_TARGET 24
-#define ASNIX_RETFRAME_SIZE             32
+#define LL_RETFRAME_OFF_IP           0
+#define LL_RETFRAME_OFF_ENV          8
+#define LL_RETFRAME_OFF_POOL         16
+#define LL_RETFRAME_OFF_FORCE_TARGET 24
+#define LL_RETFRAME_SIZE             32
 
 /* Thunk heap object (M6): a deferred, memoized computation -- the
  * mechanism behind Nix's laziness. `state` distinguishes:
@@ -109,7 +109,7 @@
  *   IN_PROGRESS:  currently being forced -- re-entering (e.g. `let x = x;
  *                 in x`) is a cycle, caught and aborted (blackholing).
  *                 While IN_PROGRESS, `env` is repurposed (see M82 below)
- *                 to link this cell onto `asnix_inprogress_head`'s
+ *                 to link this cell onto `ll_inprogress_head`'s
  *                 intrusive stack -- safe because nothing needs to read
  *                 the ORIGINAL `env` again once its one-time use (the
  *                 jump into the thunk's body) has already happened; see
@@ -128,7 +128,7 @@
  *                 genuine blackhole (it isn't a cycle, just a stale
  *                 IN_PROGRESS left by the longjmp skipping the normal
  *                 "mark FORCED" epilogue) -- instead it re-raises
- *                 (`asnix_tryeval_raise_or_fatal`, tryeval.c/.h),
+ *                 (`ll_tryeval_raise_or_fatal`, tryeval.c/.h),
  *                 catchable by an enclosing `tryEval` same as the
  *                 original failure was. `env`/`prog` are no
  *                 longer meaningful once FAILED (same as FORCED).
@@ -140,46 +140,46 @@
  * M103: `state` and `prog` (M100's single IrProgram* replacing the old
  * {body,pool} pair) are now PACKED into the same 8-byte word instead of
  * living in two separate fields -- the same low-bits-are-free-on-an-
- * aligned-pointer trick Value.raw's own ASNIX_TAG_MASK already uses
+ * aligned-pointer trick Value.raw's own LL_TAG_MASK already uses
  * (value.h), applied a second time here:
  *   - every IrProgram* this field ever holds comes from either
  *     ib_finish's calloc(), or malloc() (bytecode.c's deserializer) --
  *     both glibc-guaranteed at least 8-byte-aligned -- so its low 3 bits
  *     are always 0 while UNFORCED. The bare pointer IS the tagged word:
- *     ASNIX_THUNK_STATE_UNFORCED == 0, so no OR is even needed to write
+ *     LL_THUNK_STATE_UNFORCED == 0, so no OR is even needed to write
  *     it, and reading it back doubles as reading the state (0 == UNFORCED).
  *   - once the thunk transitions away from UNFORCED, the ONE read of the
  *     real pointer that matters already happened (the jump into the
  *     thunk's body, at the exact same insertion point as the old
- *     ASNIX_THUNK_OFF_PROG read) -- so this word is overwritten with just
+ *     LL_THUNK_OFF_PROG read) -- so this word is overwritten with just
  *     the bare state tag (1/2/3), discarding the pointer bits, exactly
  *     mirroring how the old separate `state` field was overwritten in
  *     place and the old separate `prog` field was simply never read again.
  * This does NOT generalize to packing the tag into `env` instead: env's
- * FORCED case caches a raw Value.raw, whose own ASNIX_TAG_MASK already
- * saturates all 8 combinations of the low 3 bits (ASNIX_TAG_PTR=0x0
- * through ASNIX_TAG_PRIMOP=0x7, value.h) -- there is no spare tag value
+ * FORCED case caches a raw Value.raw, whose own LL_TAG_MASK already
+ * saturates all 8 combinations of the low 3 bits (LL_TAG_PTR=0x0
+ * through LL_TAG_PRIMOP=0x7, value.h) -- there is no spare tag value
  * left to distinguish "this word is a Value" from "this word is a
  * state-tagged something else" without an external discriminator, which
  * is exactly the field this change is trying to eliminate. `prog` has no
  * such saturation problem: it is NEVER anything other than a plain
  * IrProgram* (or, post-transition, a don't-care), so tagging it is safe. */
-#define ASNIX_THUNK_OFF_STATE 0  /* M103: UNFORCED -- this word IS the IrProgram* (tag bits 0);
+#define LL_THUNK_OFF_STATE 0  /* M103: UNFORCED -- this word IS the IrProgram* (tag bits 0);
                                     IN_PROGRESS/FORCED/FAILED -- bare state tag alone, see above */
-#define ASNIX_THUNK_OFF_ENV   8  /* UNFORCED: Env*; IN_PROGRESS: intrusive "prev" link (M82); FORCED: cached Value.raw */
-#define ASNIX_THUNK_SIZE      16
+#define LL_THUNK_OFF_ENV   8  /* UNFORCED: Env*; IN_PROGRESS: intrusive "prev" link (M82); FORCED: cached Value.raw */
+#define LL_THUNK_SIZE      16
 
-#define ASNIX_THUNK_STATE_UNFORCED    0
-#define ASNIX_THUNK_STATE_IN_PROGRESS 1
-#define ASNIX_THUNK_STATE_FORCED      2
-#define ASNIX_THUNK_STATE_FAILED      3 /* M82: see the comment block above */
+#define LL_THUNK_STATE_UNFORCED    0
+#define LL_THUNK_STATE_IN_PROGRESS 1
+#define LL_THUNK_STATE_FORCED      2
+#define LL_THUNK_STATE_FAILED      3 /* M82: see the comment block above */
 
 #ifndef __ASSEMBLER__
 
 #include <stddef.h>
 #include <stdint.h>
-#include "asnix/env.h"
-#include "asnix/value.h"
+#include "ll/env.h"
+#include "ll/value.h"
 
 typedef struct {
     void *handler;
@@ -191,7 +191,7 @@ enum {
     OP_PUSH_INT,   /* M169: b = pool index of a raw (untagged) int64 literal -- a 64-bit Nix
                      * integer can't fit in IrOp's now-32-bit `a`/`b` fields, so this routes
                      * through the constant pool exactly like OP_PUSH_CONST instead of carrying
-                     * the literal inline. op_push_int.S still does the ASNIX_INT_MIN/MAX
+                     * the literal inline. op_push_int.S still does the LL_INT_MIN/MAX
                      * range check + tagging at run time, just against the pool-loaded value. */
     OP_PUSH_TRUE,
     OP_PUSH_FALSE,
@@ -200,7 +200,7 @@ enum {
     OP_VAR_REF_CELL, /* M92: a = depth, b = slot -- same De Bruijn depth/slot addressing as
                      * OP_VAR_REF, but instead of forcing and pushing the slot's VALUE, this
                      * pushes a Cell wrapping a pointer straight at the slot itself (see
-                     * heap.h's ASNIX_CELL_MARKER comment). Emitted ONLY by compiler.c's
+                     * heap.h's LL_CELL_MARKER comment). Emitted ONLY by compiler.c's
                      * `try_cell_ref`, at each of the ten `ib_mk_thunk` call sites, when the
                      * expression about to be thunked is a bare variable reference that
                      * resolves LEXICALLY (never for a `with`-fallback name, which has no
@@ -260,15 +260,15 @@ enum {
     OP_GE,
     OP_NOT,         /* in-place: top of stack must be TAG_IMM true/false, else fatal */
     OP_UPDATE,      /* pops rhs,lhs (both must be TAG_ATTRS, else fatal); pushes the
-                      * right-biased sorted-array merge (asnix_attrs_update, src/c/attrs_update.c) */
-    OP_ASSERT_FAIL, /* b = pool index of {msg ptr, msg len}; unconditionally asnix_fatal()s --
+                      * right-biased sorted-array merge (ll_attrs_update, src/c/attrs_update.c) */
+    OP_ASSERT_FAIL, /* b = pool index of {msg ptr, msg len}; unconditionally ll_fatal()s --
                       * compiler.c's AST_ASSERT only reaches this on the cond-false branch */
     OP_STR_CONCAT, /* strings: a = count; pops `count` values (reverse push order like
                     * OP_MK_LIST), coerces each to a string (same rules as
                     * builtins.toString), concatenates them in order, pushes one
                     * String -- the runtime half of string interpolation. */
     OP_WITH,       /* `with`: pops the with-expr thunk pushed just before this op, binds it
-                     * into a new 1-slot Env frame whose `up` field has ASNIX_ENV_WITH_TAG
+                     * into a new 1-slot Env frame whose `up` field has LL_ENV_WITH_TAG
                      * set (see env.h) so OP_WITH_TRY/the var-ref depth walk can recognize it
                      * as a with-frame rather than an ordinary let/lambda frame. */
     OP_WITH_TRY,   /* a = byte delta to jump to when the symbol isn't in this with-level's
@@ -280,7 +280,7 @@ enum {
     OP_WITH_MISS,  /* All enclosing `with`s were tried and none had the symbol: aborts with
                      * "undefined variable" (mirrors the compile-time error raised when no
                      * `with` is in scope at all -- see compiler.c's AST_VAR case). */
-    OP_WITH_EXIT,  /* M52: no operands; ENV = ENV->up with ASNIX_ENV_WITH_TAG masked off --
+    OP_WITH_EXIT,  /* M52: no operands; ENV = ENV->up with LL_ENV_WITH_TAG masked off --
                      * the `with`-frame counterpart of OP_FRAME_EXIT, undoing exactly one
                      * OP_WITH so a non-tail `with ...; body` (e.g. one list/attrset element
                      * among siblings) doesn't leak its frame into whatever depth-relative
@@ -317,19 +317,19 @@ enum {
                           * target (reverse push order); interns the name (must be a string,
                           * fatal otherwise) and looks it up at runtime, since (unlike plain
                           * OP_SELECT) the symbol can't be known at compile time -- see
-                          * asnix_bshared_select_dynamic (builtins_shared.c) and
+                          * ll_bshared_select_dynamic (builtins_shared.c) and
                           * op_select_dynamic.S. Fatal on a non-attrset target or a missing
                           * key, matching plain OP_SELECT (not OP_SELECT_OR's graceful
                           * fallthrough) -- `.${expr} or default` is rejected at parse time
                           * instead (see parser.c), so this op never needs a miss path. */
     OP_CONCAT,     /* `++` list concatenation (M23): pops rhs,lhs (both must be TAG_LIST,
-                     * else fatal -- see asnix_concat_lists, value_util.c), pushes a fresh
+                     * else fatal -- see ll_concat_lists, value_util.c), pushes a fresh
                      * list with lhs's elements followed by rhs's elements. Deferred to C
                      * (not hand-rolled in asm) for the same reason OP_UPDATE is: not a
                      * hot-path op, and a plain memcpy-twice is far easier to get right. */
     OP_DIV,        /* `/` integer division (M23): pops rhs,lhs (both must be TAG_INT, else
                      * fatal; rhs == 0 is also fatal, "division by zero"), pushes the
-                     * truncated-toward-zero quotient -- see op_arith.S's asnix_op_div. */
+                     * truncated-toward-zero quotient -- see op_arith.S's ll_op_div. */
     OP_INSERT_DYNAMIC_ATTR, /* `${nameExpr} = value;` inside a plain `{...}`/`rec {...}`
                      * literal (M28): pops value, name, attrs (reverse push order --
                      * compiler.c's AST_ATTRSET case pushes the already-built static
@@ -337,14 +337,14 @@ enum {
                      * name (must be a string, fatal otherwise) and inserts it into
                      * attrs, fatal on a collision with an existing key (matching real
                      * Nix's own "attribute ... already defined" for a plain literal's
-                     * duplicate key) -- see asnix_attrs_insert_dynamic,
+                     * duplicate key) -- see ll_attrs_insert_dynamic,
                      * attrs_update.c. */
     OP_SELECT_DYNAMIC_OR, /* `expr.${nameExpr} or default` (M28): a = byte delta to jump
                      * to (not found / wrong type) on a miss. Pops the name Value then
                      * the select target (same reverse-push order as OP_SELECT_DYNAMIC).
                      * On a hit: forces the matching entry if it's an unforced thunk and
                      * falls through with it on top of VALSTACK, same shape as
-                     * OP_SELECT_OR. See asnix_bshared_select_dynamic_or,
+                     * OP_SELECT_OR. See ll_bshared_select_dynamic_or,
                      * builtins_shared.c. */
     OP_RESOLVE_SEARCH_PATH, /* `<name>` (M31): pops a String (the search name, pushed as
                      * an ordinary compile-time constant by compiler.c's AST_PATH case),
@@ -352,7 +352,7 @@ enum {
                      * routing through the same catchable-throw mechanism `throw`/failed
                      * `assert` use (real Nix's own `findFile` throws the same exception
                      * class on a miss, confirmed in cppnix's source -- see
-                     * asnix_resolve_search_path_value, compiler.c). Deliberately resolved
+                     * ll_resolve_search_path_value, compiler.c). Deliberately resolved
                      * at *evaluation* time, not compile time like an ordinary path
                      * literal, specifically so this can be caught. */
     OP_HAS_ATTR_DYNAMIC, /* `expr ? ${nameExpr}` (M33): pops the name Value then the target
@@ -362,7 +362,7 @@ enum {
                      * fatal-on-miss). The name must still be a string (fatal otherwise, a
                      * genuine misuse rather than a "not found"). Membership-only, like
                      * OP_HAS_ATTR -- never forces the matched entry's value. See
-                     * asnix_bshared_has_attr_dynamic (builtins_shared.c) and
+                     * ll_bshared_has_attr_dynamic (builtins_shared.c) and
                      * op_has_attr_dynamic.S. Found needed evaluating real nixpkgs:
                      * lib/systems/default.nix has `rustc-target-env ?
                      * ${final.rust.rustcTargetSpec}`. */
@@ -395,7 +395,7 @@ enum {
                      * plus any unmatched extras) -- same "one Value on top of VALSTACK"
                      * postcondition OP_MK_ATTRS leaves, so the dynamic-`${k} = v;` loop
                      * and OP_FRAME_EXIT that normally follow it don't need to know which
-                     * path ran. See asnix_bshared_rec_overrides_merge,
+                     * path ran. See ll_bshared_rec_overrides_merge,
                      * builtins_shared.c. */
     OP_VAR_REF_RAW, /* M92: a = depth, b = slot -- same De Bruijn depth/slot addressing as
                      * OP_VAR_REF, but pushes the slot's raw content verbatim, with NO
@@ -403,14 +403,14 @@ enum {
                      * relative reads, needed for the identical reason OP_FRAME_GET itself
                      * was (ir.h's own OP_FRAME_GET comment): OP_VAR_REF's force-on-read is
                      * sometimes wrong. Specifically used by
-                     * asnix_bshared_make_curried_native_noforce (builtins_shared.c) to
+                     * ll_bshared_make_curried_native_noforce (builtins_shared.c) to
                      * reassemble a curried multi-arg native builtin's captured arguments
                      * before the final native call -- OP_VAR_REF there would silently force
                      * (and Cell-resolve) each argument on the way back out of the curry
                      * chain's own Env slots, defeating the whole point of a NOFORCE primop
                      * like `elem` wanting its raw, unforced first argument (see that
                      * builtin's own comment, builtins_list2.c, and heap.h's
-                     * ASNIX_CELL_MARKER comment for why forcing loses slot-identity). Not
+                     * LL_CELL_MARKER comment for why forcing loses slot-identity). Not
                      * used anywhere a Nix-source-level thunk needs its usual laziness
                      * semantics preserved -- ordinary `let`/list/attrs bindings still go
                      * through OP_MK_THUNK/OP_VAR_REF_CELL/OP_VAR_REF exactly as before. */
@@ -431,7 +431,7 @@ enum {
                      * literal case OP_PATH_CONCAT is never used for. compiler.c's AST_PATH
                      * case only ever emits this op when the first part is guaranteed to
                      * already be a Path constant (see resolve_path_chunk), so
-                     * asnix_concat_path (value_util.c) can unconditionally canon+wrap the
+                     * ll_concat_path (value_util.c) can unconditionally canon+wrap the
                      * final result with no runtime type check. */
     /* M162: branch-fused comparison/`?`-membership ops -- compiler.c's
      * AST_IF case emits ONE of these instead of {comparison-or-HAS_ATTR
@@ -461,7 +461,7 @@ enum {
      * or errors on a non-attrset target (a miss just takes the
      * else-branch, same as plain OP_HAS_ATTR returning FALSE); OP_LT_IF/
      * OP_GE_IF still fatal on a non-int/non-float operand via the
-     * identical C fallback (asnix_cmp_lt_values/asnix_cmp_ge_values)
+     * identical C fallback (ll_cmp_lt_values/ll_cmp_ge_values)
      * plain OP_LT/OP_GE already use, only skipping the TRUE/FALSE-
      * tagging step on the way back since the branch is taken directly
      * off the result instead. `>`/`<=`-as-condition reuse OP_LT_IF with
@@ -486,7 +486,7 @@ enum {
                       * (same a/b roles as OP_WITH_TRY/OP_SELECT_OR) -- pops a value, same
                       * never-forces/never-fatal-on-non-attrset semantics as plain OP_HAS_ATTR */
     OP_LAZY_THUNK_BODY, /* ported from asnix's lazy-thunk-compile experiment (compiler.c's own
-                          * comment on asnix_lazy_thunk_enabled has the full rationale): b = pool
+                          * comment on ll_lazy_thunk_enabled has the full rationale): b = pool
                           * index of a LazyThunkDescriptor* (compiler.c). The ONLY op in a stub
                           * IrProgram -- entered exactly like any other thunk body (same dispatch,
                           * same already-pushed RetFrame), compiles the deferred subtree for real,
@@ -506,7 +506,7 @@ enum {
                         * following OP_CHECK_FORMALS in the same compiled lambda-pattern body
                         * -- writes one packed FormalsMap word directly into env->values[i]
                         * for every formal this op covers, skipping the thunk/OP_FRAME_SET
-                        * pair entirely for those slots. See heap.h's ASNIX_FORMALSMAP_MARKER
+                        * pair entirely for those slots. See heap.h's LL_FORMALSMAP_MARKER
                         * comment for the full design and op_misc.c's ll_op_mk_formalsmap for
                         * the handler. */
     OP_CALL_CHAIN, /* ll-only, no asnix equivalent: a = n (>= 2), the number of args in a
@@ -518,7 +518,7 @@ enum {
                      * optimization, never a behavior change. At runtime, checks whether
                      * the callee is the head of a plain one-slot-per-level curry chain
                      * (every non-pattern lambda and every curried-native-builtin stage is
-                     * built this way -- see builtins_shared.c's asnix_bshared_make_
+                     * built this way -- see builtins_shared.c's ll_bshared_make_
                      * curried_native) at least n-1 levels deep; if so, builds all n of
                      * those levels' 1-slot Env frames in ONE bump allocation instead of
                      * n separate ones, then runs the n-th level's own body directly
@@ -538,33 +538,33 @@ typedef struct {
     int64_t *pool;
 } IrProgram;
 
-extern void *asnix_handler_table[OP_COUNT];
+extern void *ll_handler_table[OP_COUNT];
 
 /* Rewrites every ops[i].handler in place from a small op-id (as emitted by
- * the builder) to the real handler address from asnix_handler_table. Must
- * be called exactly once per ops array before it's passed to asnix_eval. */
+ * the builder) to the real handler address from ll_handler_table. Must
+ * be called exactly once per ops array before it's passed to ll_eval. */
 void ir_link(IrOp *ops, size_t n);
 
 /* The one public M3 entry point: executes `prog` (already ir_link()ed)
  * starting at prog->ops[0] with `root_env` as the outermost lexical scope,
  * and returns the value left on the operand stack by OP_HALT. */
-Value asnix_eval(IrProgram *prog, Env *root_env);
+Value ll_eval(IrProgram *prog, Env *root_env);
 
 /* M6: forces `v` if it's a thunk (returning the cached value unchanged
- * otherwise), usable from C code with no active asnix_eval invocation --
+ * otherwise), usable from C code with no active ll_eval invocation --
  * see src/asm/force.S for exactly what this does and doesn't cover. */
-Value asnix_force_for_print(Value v);
+Value ll_force_for_print(Value v);
 
 /* M7+: applies `fn` (a Closure or PrimOp Value -- anything else is a fatal
  * type error) to `argc` arguments, usable from C code with or without an
- * active asnix_eval/asnix_force_for_print/asnix_apply invocation already
+ * active ll_eval/ll_force_for_print/ll_apply invocation already
  * on the native call stack (brings its own fresh VALSTACK/RETSP, never
  * shares one with an already-active context -- see src/asm/apply.S). This
  * is the general re-entrant "call this Value" mechanism builtins like
  * map/filter/foldl' need; `argc` must exactly match `fn`'s arity (a fatal
  * error otherwise, matching op_call.S's own arity check). */
-Value asnix_apply(Value fn, const Value *args, int64_t argc);
+Value ll_apply(Value fn, const Value *args, int64_t argc);
 
 #endif /* __ASSEMBLER__ */
 
-#endif /* ASNIX_IR_H */
+#endif /* LL_IR_H */

@@ -5,17 +5,17 @@
 LL_OP_ATTR Value ll_op_add(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         int64_t sum = l + r;
-        if (sum > ASNIX_INT_MAX || sum < ASNIX_INT_MIN) {
-            static const char msg[] = "asnix: integer overflow in '+', aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+        if (sum > LL_INT_MAX || sum < LL_INT_MIN) {
+            static const char msg[] = "ll: integer overflow in '+', aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        result.raw = ((uint64_t)sum << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+        result.raw = ((uint64_t)sum << LL_TAG_BITS) | LL_TAG_INT;
     } else {
-        result = asnix_add_values(lhs, rhs);
+        result = ll_add_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -25,17 +25,17 @@ LL_OP_ATTR Value ll_op_add(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
 LL_OP_ATTR Value ll_op_sub(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         int64_t diff = l - r;
-        if (diff > ASNIX_INT_MAX || diff < ASNIX_INT_MIN) {
-            static const char msg[] = "asnix: integer overflow in '-', aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+        if (diff > LL_INT_MAX || diff < LL_INT_MIN) {
+            static const char msg[] = "ll: integer overflow in '-', aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        result.raw = ((uint64_t)diff << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+        result.raw = ((uint64_t)diff << LL_TAG_BITS) | LL_TAG_INT;
     } else {
-        result = asnix_sub_values(lhs, rhs);
+        result = ll_sub_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -45,17 +45,17 @@ LL_OP_ATTR Value ll_op_sub(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
 LL_OP_ATTR Value ll_op_mul(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         int64_t prod;
-        if (__builtin_mul_overflow(l, r, &prod) || prod > ASNIX_INT_MAX || prod < ASNIX_INT_MIN) {
-            static const char msg[] = "asnix: integer overflow in '*', aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+        if (__builtin_mul_overflow(l, r, &prod) || prod > LL_INT_MAX || prod < LL_INT_MIN) {
+            static const char msg[] = "ll: integer overflow in '*', aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        result.raw = ((uint64_t)prod << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+        result.raw = ((uint64_t)prod << LL_TAG_BITS) | LL_TAG_INT;
     } else {
-        result = asnix_mul_values(lhs, rhs);
+        result = ll_mul_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;
@@ -65,21 +65,21 @@ LL_OP_ATTR Value ll_op_mul(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
 LL_OP_ATTR Value ll_op_div(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
     Value result;
-    if ((lhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT && (rhs.raw & ASNIX_TAG_MASK) == ASNIX_TAG_INT) {
-        int64_t l = (int64_t)lhs.raw >> ASNIX_TAG_BITS;
-        int64_t r = (int64_t)rhs.raw >> ASNIX_TAG_BITS;
+    if ((lhs.raw & LL_TAG_MASK) == LL_TAG_INT && (rhs.raw & LL_TAG_MASK) == LL_TAG_INT) {
+        int64_t l = (int64_t)lhs.raw >> LL_TAG_BITS;
+        int64_t r = (int64_t)rhs.raw >> LL_TAG_BITS;
         if (r == 0) {
-            static const char msg[] = "asnix: division by zero, aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+            static const char msg[] = "ll: division by zero, aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
         int64_t q = l / r; /* C truncates toward zero, matching idivq */
-        if (q > ASNIX_INT_MAX || q < ASNIX_INT_MIN) {
-            static const char msg[] = "asnix: integer overflow in '/', aborting\n";
-            asnix_fatal(msg, sizeof(msg) - 1);
+        if (q > LL_INT_MAX || q < LL_INT_MIN) {
+            static const char msg[] = "ll: integer overflow in '/', aborting\n";
+            ll_fatal(msg, sizeof(msg) - 1);
         }
-        result.raw = ((uint64_t)q << ASNIX_TAG_BITS) | ASNIX_TAG_INT;
+        result.raw = ((uint64_t)q << LL_TAG_BITS) | LL_TAG_INT;
     } else {
-        result = asnix_div_values(lhs, rhs);
+        result = ll_div_values(lhs, rhs);
     }
     vs--;
     vs[-1] = result;

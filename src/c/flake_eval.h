@@ -1,8 +1,8 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-#ifndef ASNIX_FLAKE_EVAL_H
-#define ASNIX_FLAKE_EVAL_H
+#ifndef LL_FLAKE_EVAL_H
+#define LL_FLAKE_EVAL_H
 
-#include "asnix/value.h"
+#include "ll/value.h"
 
 /*
  * M126: `./asnix --flake DIR[#attr.path]` -- the smallest useful slice of
@@ -14,7 +14,7 @@
  * local directory, is what's reproduced here) and for exactly what is
  * and isn't supported.
  *
- * `asnix_eval_flake_outputs(dir)` evaluates `dir/flake.nix`, requires it
+ * `ll_eval_flake_outputs(dir)` evaluates `dir/flake.nix`, requires it
  * to declare NO non-empty `inputs` (the only case this milestone
  * handles: a flake that is entirely self-contained, or whose `outputs`
  * function only ever reads `self`), builds `self`/`sourceInfo` for `dir`
@@ -37,6 +37,6 @@
  * flake output attribute is byte-for-byte the same operation as `-A` on
  * any other evaluated file).
  */
-Value asnix_eval_flake_outputs(const char *dir);
+Value ll_eval_flake_outputs(const char *dir);
 
-#endif /* ASNIX_FLAKE_EVAL_H */
+#endif /* LL_FLAKE_EVAL_H */
