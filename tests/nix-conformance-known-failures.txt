@@ -1,0 +1,13 @@
+# Cases this evaluator fails on purpose, see tests/nix-conformance-adapter.
+# A listed case that starts PASSING is reported as a failure by
+# nix-conformance's own `./run --known` (see its README.md) -- that is
+# intentional: it means this list is stale and must be trimmed, not that
+# something is wrong.
+#
+# All three are builtins.unsafeGetAttrPos/__curPos-style position
+# tracking: position info is a debug-build-only feature here (gated
+# behind ASNIX_IRDUMP_LINE_TRACKING, see compiler.c's asnix_ast_new_at),
+# deliberately not paid for in a normal build -- a real gap, not a typo.
+lang/eval-okay-getattrpos-functionargs.nix
+lang/eval-okay-getattrpos.nix
+lang/eval-okay-inherit-attr-pos.nix

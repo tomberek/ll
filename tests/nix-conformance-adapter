@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Adapter for github.com/numtide/nix-conformance's `./run` protocol (see
+# that repo's README.md, "Writing an adapter"): invoked as
+# `ADAPTER OP FILE [FLAG...]` from the conformance repo's own root. Must
+# exit 3 for anything this implementation does not support, so the
+# runner counts the case as skipped rather than failed -- never guess at
+# unimplemented behavior.
+set -u
+op=${1:-}
+file=${2:-}
+shift 2 2> /dev/null || true
+
+root=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+bin="${LL_BIN:-$root/ll}"
+
+case "$op" in
+  eval)
+    # ll's CLI takes only a single file-or-expression argument (see
+    # src/llvm/ll_main.c) -- no nix-instantiate-style flags
+    # (--arg/--argstr/-A/--flake aren't implemented at all). Any case
+    # whose own .flags sidecar asks for one is honestly unsupported.
+    [ "$#" -eq 0 ] || exit 3
+    exec "$bin" "$file"
+    ;;
+  *)
+    # parse/check/nar/drv/flake/eval-xml/wire: not implemented.
+    exit 3
+    ;;
+esac

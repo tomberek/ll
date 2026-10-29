@@ -1,0 +1,34 @@
+name: nix-conformance
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ll
+        uses: actions/checkout@v4
+
+      - name: Check out numtide/nix-conformance
+        uses: actions/checkout@v4
+        with:
+          repository: numtide/nix-conformance
+          # Pinned for reproducibility -- bump deliberately, re-run
+          # tests/nix-conformance-known-failures.txt by hand against the
+          # new commit before updating this, since a corpus change can
+          # add or remove cases that list covers.
+          ref: 466c61d3113e958cc13e7e26cf4d388b84986f3b
+          path: nix-conformance
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build and run the conformance suite
+        run: |
+          nix develop --command \
+            make test-nix-conformance NIX_CONFORMANCE_DIR="$GITHUB_WORKSPACE/nix-conformance"

@@ -88,11 +88,34 @@ C_LIB_SRCS := $(wildcard src/c/*.c) \
 LIB_OBJS := $(ASM_SRCS:.S=.o) $(C_LIB_SRCS:.c=.o)
 DEPS := $(LIB_OBJS:.o=.d)
 
-.PHONY: all clean test
+.PHONY: all clean test test-nix-conformance
 all: ll
 
 test: ll
 	bash tests/difftest.sh
+
+# Runs the real github.com/numtide/nix-conformance corpus through
+# tests/nix-conformance-adapter, via that project's own `run` script (not
+# a reimplementation of its comparison logic -- see the adapter's own
+# header comment for the protocol). Clone the corpus to
+# NIX_CONFORMANCE_DIR first (default /tmp/nix-conformance), or pass
+# NIX_CONFORMANCE_DIR=/path/to/it. tests/nix-conformance-known-failures.txt
+# lists the (currently 3) cases this evaluator fails on purpose -- `run
+# --known` counts those as "known" rather than "fail" and, conversely,
+# fails the build if one of them starts PASSING (a sign the list is
+# stale), so this target's exit code is a real pass/fail gate, suitable
+# for CI, unlike test-nixpkgs-hash's deliberately non-gating sweep.
+NIX_CONFORMANCE_DIR ?= /tmp/nix-conformance
+test-nix-conformance: ll
+	@if [ ! -d "$(NIX_CONFORMANCE_DIR)/lang" ]; then \
+		echo "test-nix-conformance: '$(NIX_CONFORMANCE_DIR)/lang' not found -- clone" \
+		     "https://github.com/numtide/nix-conformance to $(NIX_CONFORMANCE_DIR)" \
+		     "(or pass NIX_CONFORMANCE_DIR=/path/to/it) first" >&2; \
+		exit 1; \
+	fi
+	LL_BIN=$(CURDIR)/ll "$(NIX_CONFORMANCE_DIR)/run" \
+		--known $(CURDIR)/tests/nix-conformance-known-failures.txt \
+		$(CURDIR)/tests/nix-conformance-adapter lang
 
 ll: src/llvm/ll_main.o libll.a
 	$(CC) $(LDFLAGS) -o $@ src/llvm/ll_main.o -L. -lll $(MIMALLOC_LDLIBS)
