@@ -78,7 +78,6 @@ MAKEFLAGS += -j$(shell nproc 2>/dev/null || echo 4)
 
 ASM_SRCS := $(wildcard src/asm/*.S)
 C_LIB_SRCS := $(wildcard src/c/*.c) \
-              src/llvm/bytecode_cache_stub.c \
               src/llvm/env_helpers.c \
               src/llvm/closure_helpers.c \
               src/llvm/root_env.c \
