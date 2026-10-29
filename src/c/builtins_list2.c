@@ -1,19 +1,4 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-/*
- * elem, any, all, concatMap, sort, genList, partition, foldl, foldr,
- * catAttrs -- see builtins_list2.h. Every entry here is arity>=2 in real
- * Nix, so each is built via builtins_shared.h's make_curried_native (a
- * curried Closure chain, same mechanism builtins_misc.c's `substring`/
- * `concatStringsSep` already use), not a single multi-arg PrimOp
- * registration -- parser.c's parse_app always desugars `f a b` into
- * nested arity-1 App nodes, so OP_CALL only ever sees argc=1 calls for
- * ordinary Nix-level application (see docs/architecture.md's M8/M17
- * scope notes for the full rationale).
- *
- * Every builtin below was verified against real `nix-instantiate --eval`
- * (2.35.2) before being trusted -- see each function's own comment for the
- * specific expressions checked.
- */
 #include "builtins_list2.h"
 
 #include <stdint.h>
@@ -34,26 +19,18 @@ static Value check_bool(Value v, const char *who) {
 }
 
 /* ---------------------------------------------------------------------
- * elem x list -- verified: `builtins.elem 2 [1 2 3]` == true,
- * `builtins.elem 4 [1 2 3]` == false. Equality is ll_bshared_value_eq
- * (real content equality for int/string/bool/null, pointer identity for
- * aggregates -- see builtins_shared.h), not real Nix's deep structural
- * eqValues; a documented, narrow divergence, not an oversight.
+ * elem x list
  *
- * M92: `x` (args[0]) is deliberately left completely unforced -- built
- * via ll_bshared_make_curried_native_noforce (NOT the ordinary
- * ll_bshared_make_curried_native every other curried builtin here
- * uses), specifically so ll_bshared_value_eq's own slot/Cell-identity
- * shortcut (see that function's M92 comment) still has something to
- * check: forcing `x` before this function ever sees it -- which is
- * exactly what the FORCE-mode curry builder's OP_VAR_REF reassembly
- * (plus op_call.S's own M25 post-dispatch force-loop) would otherwise
- * do, completely incidentally, to every curried argument -- throws away
- * the very slot-identity information `elem x [x]` depends on being
- * `true`. Matches real Nix's own `prim_elem` (primops.cc), which passes
- * `*args[0]` to `eqValues` with no forcing of its own either, for the
- * identical reason. `list` (args[1]) must still be forced explicitly
- * here, since NOFORCE means NEITHER argument arrives pre-forced. */
+ * `x` (args[0]) is deliberately left completely unforced -- built via
+ * ll_bshared_make_curried_native_noforce, NOT the ordinary
+ * ll_bshared_make_curried_native every other curried builtin here uses.
+ * Do not switch this to the ordinary force-mode curry builder: forcing
+ * `x` before this function sees it throws away the slot-identity
+ * information `elem x [x]` depends on being `true` (ll_bshared_value_eq
+ * has its own slot/Cell-identity shortcut that needs `x` to still be
+ * the original, unforced reference). `list` (args[1]) must still be
+ * forced explicitly here, since NOFORCE means NEITHER argument arrives
+ * pre-forced. */
 Value ll_prim_elem2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value x = args[0];
@@ -68,14 +45,6 @@ Value ll_prim_elem2_impl(const Value *args, int64_t argc) {
 }
 static Value build_elem(void) { return ll_bshared_make_curried_native_noforce((void *)ll_prim_elem2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * any pred list / all pred list -- verified:
- * `builtins.any (x: x > 2) [1 2 3]` == true;
- * `builtins.all (x: x > 0) [1 2 3]` == true. Both short-circuit, matching
- * real Nix exactly: `builtins.any (x: if x==2 then true else throw "x")
- * [2 1 3]` succeeds on real Nix (stops at the first `true`, never reaches
- * the throwing element) -- confirmed directly before relying on it.
- * --------------------------------------------------------------------- */
 Value ll_prim_any2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value pred = args[0], list = args[1];
@@ -104,12 +73,6 @@ Value ll_prim_all2_impl(const Value *args, int64_t argc) {
 }
 static Value build_all(void) { return ll_bshared_make_curried_native((void *)ll_prim_all2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * concatMap f list -- verified: `builtins.concatMap (x: [x x]) [1 2 3]`
- * == [1 1 2 2 3 3]. Equivalent to `concatLists (map f list)` but computed
- * directly (one pass calling f, one pass copying), same two-pass shape
- * builtins_list.c's own concatLists already uses.
- * --------------------------------------------------------------------- */
 static Value concatMap2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0], list = args[1];
@@ -137,14 +100,6 @@ static Value concatMap2_impl(const Value *args, int64_t argc) {
 }
 static Value build_concatMap(void) { return ll_bshared_make_curried_native((void *)concatMap2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * genList f n -- verified: `builtins.genList (x: x*x) 5` == [0 1 4 9 16].
- * Computed eagerly (calls f immediately for every index) rather than real
- * Nix's lazy-per-element list (`<CODE>` when printed unforced there) --
- * consistent with this project's standing M6 scope decision that list
- * elements are not thunked (see docs/architecture.md), the same choice
- * `map`/`mapAttrs` already made for the identical reason.
- * --------------------------------------------------------------------- */
 static Value genList2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0], n_v = args[1];
@@ -162,17 +117,9 @@ static Value genList2_impl(const Value *args, int64_t argc) {
 }
 static Value build_genList(void) { return ll_bshared_make_curried_native((void *)genList2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * sort cmp list -- verified: `builtins.sort builtins.lessThan [3 1 2]`
- * == [1 2 3]. Stable insertion sort (preserves relative order of elements
- * the comparator treats as equivalent, matching real Nix's documented
- * stability guarantee) -- O(n^2), accepted the same way this project
- * already accepts it elsewhere for "not a hot path, typically small"
- * builtins (e.g. builtins_attrs.c's sorted_name_order); real Nix uses an
- * O(n log n) adaptive mergesort (peeksort) for the same job, which would
- * be a reasonable follow-up if a caller ever sorts something large enough
- * to care.
- * --------------------------------------------------------------------- */
+/* Stable insertion sort -- preserves relative order of elements the
+ * comparator treats as equivalent, matching real Nix's documented
+ * stability guarantee. */
 static Value sort2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value cmp = args[0], list = args[1];
@@ -198,15 +145,6 @@ static Value sort2_impl(const Value *args, int64_t argc) {
 }
 static Value build_sort(void) { return ll_bshared_make_curried_native((void *)sort2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * partition pred list -- verified: `builtins.partition (x: x > 2)
- * [1 2 3 4]` == { right = [3 4]; wrong = [1 2]; }. The two freshly
- * interned symbols ("right"/"wrong") are sorted by sym id before building
- * the result Attrs (ll_bshared_make_attrs) -- their relative sym-id
- * order depends on whatever else this process has interned already, not
- * source order, so it can't be assumed ascending the way removeAttrs/
- * mapAttrs can assume it from an already-sorted input Attrs.
- * --------------------------------------------------------------------- */
 static Value partition2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value pred = args[0], list = args[1];
@@ -234,34 +172,10 @@ static Value partition2_impl(const Value *args, int64_t argc) {
 }
 static Value build_partition(void) { return ll_bshared_make_curried_native((void *)partition2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * foldl op nul list / foldr op nul list --
- *
- * Only `foldl'` (strict) is a core Nix builtin: confirmed directly,
- * `nix-instantiate --eval -E 'builtins ? foldl'` and `builtins ? foldr`
- * both report `false`; only `builtins ? "foldl'"` is `true`. Plain
- * `foldl`/`foldr` are nixpkgs *lib* functions (`lib.foldl`/`lib.foldr`),
- * not core builtins. Added here as `builtins.foldl`/`builtins.foldr`
- * anyway -- same choice this pass makes for `attrByPath`/
- * `stringToCharacters`/`filterAttrs` (also lib-only or lib-originated in
- * at least some Nix versions), since this project has no "with lib" root
- * scope the way real Nix programs reach `lib` at all; everything useful
- * has to live directly under `builtins` here or not be reachable.
- *
- * `foldl` is implemented identically to `foldl'`, verified byte-for-byte
- * against real `lib.foldl`: `lib.foldl (a: b: a - b) 0 [1 2 3]` == -6,
- * the same result `foldl'` gives for the same expression. This is not a
- * copy-paste oversight -- real Nix's `foldl`/`foldl'` differ *only* in
- * strictness (whether the accumulator's thunk chain is forced after each
- * step), and this project's M6 design already forces every thunk inline
- * on read (`OP_VAR_REF`/`OP_SELECT` -- see docs/architecture.md's M6
- * scope notes), so a Nix-level closure here never actually hands back an
- * *unforced* Thunk `Value` for `foldl` to defer in the first place --
- * there is no observable strict/lazy distinction left to implement.
- * Kept as its own function (not a literal alias for `foldl'`) purely so
- * `builtins.foldl` doesn't depend on builtins_list.c's internals, not
- * because the two bodies differ.
- * --------------------------------------------------------------------- */
+/* `foldl` is implemented identically to `foldl'` -- not a copy-paste
+ * bug: real Nix's `foldl`/`foldl'` differ only in strictness, and this
+ * project forces every thunk inline on read, so there's no observable
+ * strict/lazy distinction left to implement. */
 static Value foldl3_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value op = args[0], acc = args[1], list = args[2];
@@ -274,13 +188,7 @@ static Value foldl3_impl(const Value *args, int64_t argc) {
 static Value build_foldl(void) { return ll_bshared_make_curried_native((void *)foldl3_impl, 3); }
 
 /* foldr op nul [x1 x2 ... xn] == op x1 (op x2 (... (op xn nul))) --
- * verified: `lib.foldr (a: b: a - b) 0 [1 2 3]` == 2 (= 1 - (2 - (3 - 0))).
- * A plain right-to-left native loop, not real recursion -- no reason to
- * spend one native C stack frame per list element (see
- * docs/architecture.md's Known Bugs #7 for a *different*, already-known
- * native-recursion depth limit elsewhere in this codebase; no reason to
- * add a second one here when an iterative loop is just as simple and
- * gives the identical left-to-right-application result). */
+ * implemented as a plain right-to-left native loop, not recursion. */
 static Value foldr3_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value op = args[0], acc = args[1], list = args[2];
@@ -292,13 +200,6 @@ static Value foldr3_impl(const Value *args, int64_t argc) {
 }
 static Value build_foldr(void) { return ll_bshared_make_curried_native((void *)foldr3_impl, 3); }
 
-/* ---------------------------------------------------------------------
- * catAttrs attr list -- verified: `builtins.catAttrs "a"
- * [{a=1;} {b=0;} {a=2;}]` == [1 2]. Attrsets missing the named attribute
- * are skipped (not an error, matching real Nix exactly); each collected
- * value is passed through verbatim, unforced -- same lazy pass-through
- * convention builtins_attrs.c's getAttr/removeAttrs already use.
- * --------------------------------------------------------------------- */
 static Value catAttrs2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value name_v = args[0], list = args[1];
@@ -314,10 +215,8 @@ static Value catAttrs2_impl(const Value *args, int64_t argc) {
     Value *out = n > 0 ? malloc((size_t)n * sizeof(Value)) : NULL;
     int64_t nout = 0;
     for (int64_t i = 0; i < n; i++) {
-        /* List elements are lazy (a `map`-produced list's elements are
-         * deliberately unforced Thunks, M23) -- force before checking the
-         * tag, same fix M23's own concatLists needed (see its comment,
-         * builtins_list.c). */
+        /* List elements are lazy -- force before checking the tag
+         * (same reason as concatLists, builtins_list.c). */
         Value elem = ll_force_for_print(elems[i]);
         LL_REQUIRE_ATTRS(elem, "catAttrs");
         int64_t idx = ll_bshared_attrs_find(elem, sym);

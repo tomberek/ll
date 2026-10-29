@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * M68's own small POSIX-ERE backtracking matcher -- see regex_engine.c's
+ * A small POSIX-ERE backtracking matcher -- see regex_engine.c's
  * header comment for the full rationale (glibc's <regex.h>, which
  * builtins_regex.c otherwise drives, disagrees with real Nix's
  * libstdc++ `std::regex` on *which* capture a repeated/ambiguous

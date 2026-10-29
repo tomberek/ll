@@ -6,21 +6,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* perf (M128 follow-up): a flat, append-then-finalize vector whose
- * backing store is one SHARED, never-freed-mid-parse buffer reused
- * across EVERY node of this same kind for the whole file, instead of
- * each node paying for its own fresh malloc-from-cap-0 -- the same
- * "shared scratch stack, commit a finished run into permanent storage"
- * technique a comparison evaluator (iets, ~/gnix/iets/src/syntax/
- * parser.rs's `commit`/`sc_ids`/`sc_elems`/etc.) uses for its own
- * equivalent vectors, adapted here to keep this project's existing
- * "each Ast node owns its own permanent, exact-size array" output shape
- * (VEC_TRIM's old job, for the vectors converted to this macro) instead
- * of iets's single ever-growing flat table indexed by (start,len).
+/* A flat, append-then-finalize vector whose backing store is one SHARED,
+ * never-freed-mid-parse buffer reused across EVERY node of this same
+ * kind for the whole file, instead of each node paying for its own
+ * fresh malloc-from-cap-0. Still produces this project's usual "each Ast
+ * node owns its own permanent, exact-size array" output shape (via
+ * `_commit`'s exact-size copy-out).
  *
  * Safety argument for why sharing ONE buffer across the whole file is
- * sound (verified against every call site this macro is actually used
- * at, below): a NESTED use of the exact same vector kind -- e.g. a list
+ * sound: a NESTED use of the exact same vector kind -- e.g. a list
  * literal nested inside another list literal's own element expression,
  * or a lambda-formal's default-value expression that itself contains
  * another lambda pattern -- always runs its own complete push...push...
@@ -33,14 +27,13 @@
  * "whatever the (possibly several, properly nested) callers above me on
  * the C call stack have each already pushed, plus however far EACH ONE
  * has run so far" -- never corrupted by a sibling call that hasn't
- * returned yet, because recursive descent has no such thing (only
- * nested calls that fully return before the next statement). The one
- * discipline this places on every call site: never dereference a stale
- * `T*` captured before a call that might recurse into the SAME macro
- * instance (a `realloc` inside a nested `_push` can move the buffer) --
- * every call site below only ever reads from the buffer via a fresh
- * `_commit(mark, ...)` call made AFTER all such recursion for that span
- * has already returned, never a cached pointer held across one.
+ * returned yet. The one discipline this places on every call site:
+ * never dereference a stale `T*` captured before a call that might
+ * recurse into the SAME macro instance (a `realloc` inside a nested
+ * `_push` can move the buffer) -- every call site below only ever reads
+ * from the buffer via a fresh `_commit(mark, ...)` call made AFTER all
+ * such recursion for that span has already returned, never a cached
+ * pointer held across one.
  *
  * NOT applied to BTVec/BindingVec/DynBindingVec (irregularly-nested,
  * tree-shaped, incrementally mutated-and-reopened lifetimes -- see
@@ -54,15 +47,6 @@
     static size_t name##_mark(void) { return name##_len; }                                                             \
     static void name##_push(T item) {                                                                                  \
         if (name##_len == name##_cap) {                                                                                \
-            /* perf (M132): initial cap 8->24 -- measured directly (same methodology as    \
-             * irbuild.c's ib_emit/ib_pool_add): astvec/formalvec's old 8-slot start was    \
-             * undersized even at the average for real nixpkgs shapes (e.g. a function      \
-             * with >8 named formals), cutting growth-reallocs by 90-92% on a real eval.     \
-             * partvec/attrsegvec/rawind already regrew under 0.2% of pushes at cap 8, so    \
-             * this is a harmless, zero-permanent-cost bump for them too (SCRATCH_VEC's      \
-             * buffer is shared scratch, always copied out to an exact-size allocation by    \
-             * `_commit`, so a bigger initial guess here is never carried into permanent     \
-             * storage). */                                                                 \
             name##_cap = name##_cap ? name##_cap * 2 : 24;                                                              \
             name##_buf = realloc(name##_buf, name##_cap * sizeof(T));                                                   \
         }                                                                                                               \
@@ -91,31 +75,20 @@ typedef struct {
 
 static void bindingvec_push(BindingVec *v, AstBinding item) {
     if (v->len == v->cap) {
-        /* perf (M132): cap 8->24, same measured tuning as SCRATCH_VEC above --
-         * BindingVec isn't a shared scratch buffer (each node owns its own
-         * permanent array), but VEC_TRIM below still trims any slack before
-         * handoff, so this only reduces realloc count, never permanent memory. */
         v->cap = v->cap ? v->cap * 2 : 24;
         v->items = realloc(v->items, v->cap * sizeof(AstBinding));
     }
     v->items[v->len++] = item;
 }
 
-/* perf: BindingVec (above) doubles its capacity on growth -- correct
- * amortized-O(1) push, but whichever fill fraction it happens to land
- * on when parsing finishes (e.g. 55% full right after a doubling) gets
- * handed straight into PERMANENT Ast storage (attrset/let bindings)
- * with that slack never trimmed -- the exact same bug M87 already found
- * and fixed for IrBuilder's ops/pool arrays (irbuild.c's ib_finish),
- * just never applied here. Measured via an LD_PRELOAD malloc tracer on
- * a real nixpkgs closure: tens of MB of pure doubling slack across this
- * and the sibling vector types below (AstVec/PartVec/FormalVec/
- * AttrSegVec/RawIndVec), before those were converted (M128 follow-up,
- * see SCRATCH_VEC above) to a shared, file-lifetime scratch buffer that
- * trims itself via `_commit`'s own exact-size copy-out instead -- only
- * BindingVec (tightly coupled to BTVec's own tree-shaped, non-LIFO
- * lifetime, see BTVec's header comment) and BTVec's own DynBindingVec
- * still need this macro at all. Safe to trim unconditionally before
+/* BindingVec (above) doubles its capacity on growth -- correct
+ * amortized-O(1) push, but whichever fill fraction it happens to land on
+ * when parsing finishes gets handed straight into PERMANENT Ast storage
+ * (attrset/let bindings) unless trimmed here first. Only BindingVec
+ * (tightly coupled to BTVec's own tree-shaped, non-LIFO lifetime, see
+ * BTVec's header comment) and BTVec's own DynBindingVec still need this
+ * macro -- the other vector types use SCRATCH_VEC's own `_commit`
+ * exact-size copy-out instead. Safe to trim unconditionally before
  * handoff: shrinking realloc never moves/invalidates the still-needed
  * prefix. */
 #define VEC_TRIM(v, T)                                                                                               \
@@ -127,21 +100,16 @@ static void bindingvec_push(BindingVec *v, AstBinding item) {
  * separately from BTVec/BTNode (the static-key tree): the name isn't
  * known until runtime, so it can't participate in that tree's compile-
  * time dup-detection/nested-attrpath merging at all -- see compiler.c's
- * AST_ATTRSET case for how these are applied (after the static part is
- * built, via a runtime insert-with-collision-check op). Real Nix allows
- * this in a plain `{...}`/`rec {...}` literal but explicitly rejects it
- * in `let` ("dynamic attributes not allowed in let", confirmed directly
- * against cppnix's own grammar, `~/nix/src/libexpr/parser.y`'s `LET
- * binds IN_KW ...` action) -- `parse_binding_stmt`'s `dyn_out` parameter
- * is NULL at the one call site (`let`) where that rejection applies.
- * A dynamic segment followed by more attrpath segments (`${k}.a = v;`)
- * or one after a leading static segment (`a.${k} = v;`) is also
- * supported (M41) -- see parse_binding_stmt's attrpath-sugar branch and
- * build_dynamic_chain_value, which handle every position uniformly;
- * this vector only ever receives the entries that end up as *this*
- * block's own direct dynamic bindings (a dynamic chain nested under a
- * static prefix instead becomes that prefix's leaf value via
- * build_dynamic_chain_value, never pushed here directly). */
+ * AST_ATTRSET case for how these are applied. Real Nix allows this in a
+ * plain `{...}`/`rec {...}` literal but explicitly rejects it in `let`
+ * ("dynamic attributes not allowed in let") -- `parse_binding_stmt`'s
+ * `dyn_out` parameter is NULL at the one call site (`let`) where that
+ * rejection applies. A dynamic segment followed by more attrpath
+ * segments (`${k}.a = v;`) or one after a leading static segment
+ * (`a.${k} = v;`) is also supported -- see parse_binding_stmt's
+ * attrpath-sugar branch and build_dynamic_chain_value, which handle
+ * every position uniformly; this vector only ever receives the entries
+ * that end up as *this* block's own direct dynamic bindings. */
 typedef struct {
     Ast *name_expr;
     Ast *value;
@@ -173,30 +141,28 @@ static AstDynBinding *finalize_dyn_vec(DynBindingVec *vec) {
 }
 
 /* Attrpath binding sugar (`a.b.c = val;`, real Nix's `attrpath '=' expr
- * ';'` grammar rule -- see cppnix's parser.y/parser-state.hh's addAttr):
- * a *tree* of these is built incrementally while parsing one binds-block
- * (one `{...}`/`rec{...}`/`let`'s immediate binding list), then flattened
- * into ordinary nested AST_ATTRSET Ast nodes only once the whole block is
- * done (finalize_bt_vec below) -- an attrpath statement anywhere in the
- * block can still extend a sibling attrpath statement's nested attrset
- * parsed earlier in the same block (`a.b = 1; a.c = 2;` => `a = { b = 1;
- * c = 2; };`, confirmed order-independent against nix-instantiate), so
- * nothing can be finalized to a flat Ast until the whole block is known.
+ * ';'` grammar rule): a *tree* of these is built incrementally while
+ * parsing one binds-block (one `{...}`/`rec{...}`/`let`'s immediate
+ * binding list), then flattened into ordinary nested AST_ATTRSET Ast
+ * nodes only once the whole block is done (finalize_bt_vec below) -- an
+ * attrpath statement anywhere in the block can still extend a sibling
+ * attrpath statement's nested attrset parsed earlier in the same block
+ * (`a.b = 1; a.c = 2;` => `a = { b = 1; c = 2; };`, order-independent),
+ * so nothing can be finalized to a flat Ast until the whole block is
+ * known.
  *
  * Each node is either a LEAF (name has a definitive value: an ordinary
  * `name = expr;`, or an `inherit`ed name) or a BRANCH (name was only ever
  * used as a non-final attrpath segment, so it implicitly denotes a nested
  * attrset -- never both. This tree only ever holds STATIC segments
  * (`AttrSeg.is_dynamic == 0`) -- a dynamic segment anywhere in an
- * attrpath (`a.${k} = v;`, `${k}.b = v;`, `a.${k1}.${k2} = v;`, M41) is
+ * attrpath (`a.${k} = v;`, `${k}.b = v;`, `a.${k1}.${k2} = v;`) is
  * handled by splitting the chain at the first dynamic segment:
  * everything before it still flows through this static tree as normal;
  * everything from the first dynamic segment onward becomes a synthetic
- * nested plain-attrset literal with a `${...} = ...;` dynamic binding
- * (reusing M28's existing DynBindingVec/OP_INSERT_DYNAMIC_ATTR
- * machinery) as that static prefix's leaf value -- see
- * parse_binding_stmt's attrpath-sugar branch below for exactly where
- * that split happens. */
+ * nested plain-attrset literal with a `${...} = ...;` dynamic binding as
+ * that static prefix's leaf value -- see parse_binding_stmt's
+ * attrpath-sugar branch below for exactly where that split happens. */
 typedef struct {
     int is_dynamic;
     Ast *name_expr;      /* valid when is_dynamic */
@@ -205,30 +171,22 @@ typedef struct {
 } AttrSeg;
 
 typedef struct BTNode BTNode;
-/* M67: `dyn` -- dynamic (`${expr} = value;`) bindings absorbed into THIS
+/* `dyn` -- dynamic (`${expr} = value;`) bindings absorbed into THIS
  * level of the tree by `reopen_attrset_into` (below), carried alongside
  * the ordinary static `items`/`len`/`cap` since a BTNode has no static
  * name to merge them under. Empty/zero for the overwhelming majority of
  * BTVecs, which never go through a merge involving a dynamic-keyed
- * literal at all. */
-/* Perf note (post-M86 CPU profiling pass, same session as derivation.c's
- * `cache_own_drv_closure` fix): `btvec_find` below was a linear memcmp
- * scan over `items` -- fine for an ordinary handful-of-attrs literal, but
- * `insert_attrpath` calls it once per binding statement in a block, so a
- * SINGLE large attrset literal with n bindings (e.g. real nixpkgs's
- * `pkgs/top-level/all-packages.nix`, which lists thousands of
- * `name = callPackage ...;` bindings in one literal `{ ... }`) drove it
- * to O(n) per insert * n inserts = O(n^2) for that one literal. `index`/
- * `index_cap` (maintained by `btvec_push`, consulted by `btvec_find`) is
- * an open-addressing hash index parallel to `items`, same convention as
- * `symtab.c`'s own name table and this session's `string_context.c`/
- * `derivation.c` fixes -- turns the dup-attr check inside
- * `insert_attrpath` into O(1) amortized. */
+ * literal at all.
+ *
+ * `index`/`index_cap` (maintained by `btvec_push`, consulted by
+ * `btvec_find`) is an open-addressing hash index parallel to `items`,
+ * turning the dup-attr check inside `insert_attrpath` into O(1)
+ * amortized instead of a linear scan per binding statement. */
 typedef struct { BTNode *items; size_t len, cap; DynBindingVec dyn; size_t *index; size_t index_cap; } BTVec;
 
 #define BTVEC_EMPTY_SLOT SIZE_MAX
 
-/* M67: folds a BTVec's own absorbed-via-merge dynamic bindings (see
+/* Folds a BTVec's own absorbed-via-merge dynamic bindings (see
  * reopen_attrset_into's comment) into this BLOCK's top-level explicit
  * `${expr} = value;` DynBindingVec, so one `finalize_dyn_vec` call at
  * each `{...}`/`rec {...}` call site below picks up both kinds. */
@@ -246,14 +204,12 @@ struct BTNode {
     int rec;           /* valid iff !is_leaf: whether the attrset this branch finalizes
                          * into should be `rec`. Always 0 for a branch created purely by
                          * attrpath-sugar descent (`a.b = 1;` makes an ordinary, non-rec
-                         * nested `a`, confirmed against nix-instantiate: ExprAttrs
-                         * defaults non-recursive and addAttr's own intermediate-node
-                         * creation never sets ->recursive). Only set to 1 when a branch
-                         * was instead "reopened" from a pre-existing literal `rec {...}`
-                         * value below (the regrettable-merge path) -- it then keeps that
-                         * literal's original rec-ness, per real Nix's own documented
-                         * quirk (NixOS/nix#9020: "any rec marker on [the earlier value]
-                         * will apply to the attributes in [the later one]"). */
+                         * nested `a`). Only set to 1 when a branch was instead "reopened"
+                         * from a pre-existing literal `rec {...}` value below (the
+                         * regrettable-merge path) -- it then keeps that literal's original
+                         * rec-ness, per real Nix's own documented quirk (NixOS/nix#9020:
+                         * "any rec marker on [the earlier value] will apply to the
+                         * attributes in [the later one]"). */
     BTVec children;    /* valid iff !is_leaf */
 };
 
@@ -289,7 +245,6 @@ static void btvec_index_rehash(BTVec *v, size_t new_cap) {
 
 static void btvec_push(BTVec *v, BTNode item) {
     if (v->len == v->cap) {
-        /* perf (M132): cap 8->24, same measured tuning as bindingvec_push above. */
         v->cap = v->cap ? v->cap * 2 : 24;
         v->items = realloc(v->items, v->cap * sizeof(BTNode));
     }
@@ -335,24 +290,16 @@ static void insert_attrpath(BTVec *vec, AttrSeg *segs, size_t seg_count, size_t 
  * into-a-literal merge (`a = rec {...}; a.c = ...;`, NixOS/nix#9020) via
  * the exact same code path real Nix's addAttr uses for both. */
 static void reopen_attrset_into(BTVec *dest, Ast *attrs) {
-    /* M67: `a."${k}" = 1; a."${k2}" = 2;` / `a.b = 1; a."${k}" = 2;`-style
+    /* `a."${k}" = 1; a."${k2}" = 2;` / `a.b = 1; a."${k}" = 2;`-style
      * regrettable merges (NixOS/nix#9020) of a literal that itself had a
-     * dynamic key -- previously fatal unconditionally ("cannot merge an
-     * attrpath into a literal attrset that has a dynamic key"), found
-     * actually hit by numtide/nix-conformance's eval-okay-dynamic-attrs-2/
-     * eval-okay-merge-dynamic-attrs.nix, not just a hypothetical. Carried
-     * into `dest->dyn` (BTVec's own comment) instead of being dropped or
-     * fataling -- `finalize_bt_node`/the top-level block parser (below)
-     * re-attach it to whichever AST_ATTRSET this BTVec ultimately
-     * finalizes into, same as this project's own direct `${k} = v;`
-     * dynamic bindings already were. Verified against real
-     * `nix-instantiate --eval`: both files' listed cases evaluate as
-     * their own `.exp` says (plain merge of the static and dynamic
-     * attributes, duplicate-key rules applying across the two kinds
-     * exactly like real Nix's `addAttr` -- this project doesn't attempt
-     * to replicate the "two dynamic keys that happen to collide at
-     * runtime" dup-attr check, same OP_INSERT_DYNAMIC_ATTR behavior as
-     * every other dynamic binding already had before this fix). */
+     * dynamic key: carried into `dest->dyn` (BTVec's own comment) instead
+     * of being dropped or fataling -- `finalize_bt_node`/the top-level
+     * block parser (below) re-attach it to whichever AST_ATTRSET this
+     * BTVec ultimately finalizes into, same as this project's own direct
+     * `${k} = v;` dynamic bindings already were. This project doesn't
+     * attempt to replicate real Nix's "two dynamic keys that happen to
+     * collide at runtime" dup-attr check, same OP_INSERT_DYNAMIC_ATTR
+     * behavior as every other dynamic binding already has. */
     for (size_t i = 0; i < attrs->as.attrset.dyn_count; i++) {
         AstDynBinding *db = &attrs->as.attrset.dyn_bindings[i];
         dynbindingvec_push(&dest->dyn, (DynBinding){ .name_expr = db->name_expr, .value = db->value });
@@ -442,26 +389,20 @@ static AstBinding finalize_bt_node(BTNode *node) {
     attrs->as.attrset.bindings = out.items;
     attrs->as.attrset.count = out.len;
     attrs->as.attrset.is_rec = node->rec;
-    /* M67: re-attach whatever dynamic bindings this branch absorbed via
+    /* Re-attach whatever dynamic bindings this branch absorbed via
      * reopen_attrset_into (see that function's own comment) -- a nested
      * synthetic attrset needs its own dyn_bindings just like a top-level
      * one does. */
     attrs->as.attrset.dyn_bindings = finalize_dyn_vec(&node->children.dyn);
     attrs->as.attrset.dyn_count = node->children.dyn.len;
-    /* M86 perf: everything this branch's subtree needs has now been
-     * copied out (leaf values are Ast* already living in the arena;
-     * finalize_dyn_vec copies its own exact-size array) -- nothing
-     * retains node->children's own backing arrays past this point, but
-     * they were never freed. Profiling found this parser-time family
-     * (one BTVec per attrset literal, recursively one per nested
-     * attrpath-sugar branch) among the largest non-arena leaks across a
-     * full nixpkgs evaluation. */
+    /* Everything this branch's subtree needs has now been copied out
+     * (leaf values are Ast* already living in the arena; finalize_dyn_vec
+     * copies its own exact-size array) -- nothing retains node->children's
+     * own backing arrays past this point, so free all three of them,
+     * including `.index` (the open-addressing hash table backing
+     * btvec_find), a SEPARATE malloc'd array from `.items`. */
     free(node->children.items);
     free(node->children.dyn.items);
-    /* perf: `.index` (the open-addressing hash table backing btvec_find,
-     * added after this free() was originally written) is a SEPARATE
-     * malloc'd array from `.items` -- freeing only `.items` leaked it on
-     * every subtree. */
     free(node->children.index);
     return (AstBinding){ .name = node->name, .name_len = node->name_len, .value = attrs, .is_inherit = 0 };
 }
@@ -470,25 +411,18 @@ static void finalize_bt_vec(BTVec *vec, BindingVec *out) {
     for (size_t i = 0; i < vec->len; i++) {
         bindingvec_push(out, finalize_bt_node(&vec->items[i]));
     }
-    free(vec->items); /* M86 perf: see finalize_bt_node's identical comment */
-    free(vec->index); /* perf: see finalize_bt_node's identical .index comment */
+    free(vec->items);
+    free(vec->index);
 }
 
-/* M128 follow-up: AstStringPart's own interpolation-part collection --
- * see SCRATCH_VEC's own header comment above for why sharing one
- * never-mid-parse-freed buffer across every string/path literal in the
- * file is safe. */
 SCRATCH_VEC(partvec, AstStringPart)
 
 /* A growable array of AttrSeg -- used by parse_binding_stmt to collect an
  * attrpath's segments (`a.b.c`/`a.${k}.c`) before handing them to
  * insert_attrpath (the static prefix) and/or build_dynamic_chain_value
- * (everything from the first dynamic segment onward). M128 follow-up:
- * see SCRATCH_VEC's own header comment above. */
+ * (everything from the first dynamic segment onward). */
 SCRATCH_VEC(attrsegvec, AttrSeg)
 
-/* M128 follow-up: lambda-pattern formals -- see SCRATCH_VEC's own header
- * comment above. */
 SCRATCH_VEC(formalvec, AstFormal)
 
 /* Raw piece of a '' ... '' literal as collected straight off the lexer,
@@ -504,13 +438,10 @@ typedef struct {
     Ast *expr;
 } RawIndPart;
 
-/* M128 follow-up: see SCRATCH_VEC's own header comment above. */
 SCRATCH_VEC(rawind, RawIndPart)
 
 /* Ported directly from real Nix's ParserState::stripIndentation
- * (~/nix's src/libexpr/include/nix/expr/parser-state.hh), verified against
- * `nix-instantiate --eval` for plain indentation, varying per-line
- * indentation, and an all-whitespace trailing line (see tests/e2e). Two
+ * (~/nix's src/libexpr/include/nix/expr/parser-state.hh). Two
  * passes over the raw parts: (1) find the minimum leading-space count
  * across every content line (a line ended by an escape or an
  * interpolation, not just a raw newline, still ends the "start of line"
@@ -620,14 +551,14 @@ static AstStringPart *strip_indentation(RawIndPart *raw, size_t n, size_t *out_c
 }
 
 typedef struct {
-    Lexer *lx;  /* M175: a true pull-based lexer (lexer.h) -- no backing Token array at
-                 * all, unlike M135's LexCursor/TokVec. `tok`/`next` below are this
-                 * parser's own 2-slot lookahead buffer, by VALUE, filled by calling
-                 * lexer_next(lx) -- cur()/peek2() are now plain field reads, never a
-                 * lexer.c call; only advance() ever calls lexer_next(). */
+    Lexer *lx;  /* A true pull-based lexer (lexer.h) -- no backing Token array at
+                 * all. `tok`/`next` below are this parser's own 2-slot lookahead
+                 * buffer, by VALUE, filled by calling lexer_next(lx) -- cur()/
+                 * peek2() are plain field reads, never a lexer.c call; only
+                 * advance() ever calls lexer_next(). */
     Token tok;  /* cur() */
     Token next; /* peek2() */
-    const char *src; /* M80: the buffer every Token.pos/.start points into -- see
+    const char *src; /* The buffer every Token.pos/.start points into -- see
                        * curpos_line_col below, parser.h's own ll_parse comment. */
     const char *curpos_base; /* Marker-reparse addition: the TRUE file-start pointer for
                        * `__curPos`'s line/column (curpos_line_col below) -- equal to `src`
@@ -639,15 +570,13 @@ typedef struct {
                        * token-offset-0 point -- see that function's own comment. */
 } Parser;
 
-/* M80: 1-based line/column of `at` (a pointer into `src`, e.g. a
+/* 1-based line/column of `at` (a pointer into `src`, e.g. a
  * `Token.pos`) -- counts newlines from the start of the buffer up to
- * `at`, same convention real Nix's own `Pos` uses (confirmed against
- * `nix-instantiate --eval`: the very first character of a file is line
- * 1, column 1). Only ever called for the rare `__curPos` occurrence (not
- * once per token), so an O(file size) scan here is a non-issue -- real
- * Nix itself only computes a `Pos`'s line/column lazily, on demand, for
- * exactly the same reason (`Pos::LazyLine`/`actualPos`, `~/nix/src/
- * libutil/position.cc`). */
+ * `at`, same convention real Nix's own `Pos` uses. Only ever called for
+ * the rare `__curPos` occurrence (not once per token), so an O(file
+ * size) scan here is a non-issue -- real Nix itself only computes a
+ * `Pos`'s line/column lazily, on demand, for exactly the same reason
+ * (`Pos::LazyLine`/`actualPos`, `~/nix/src/libutil/position.cc`). */
 static void curpos_line_col(const char *src, const char *at, int *out_line, int *out_col) {
     int line = 1, col = 1;
     for (const char *c = src; c < at; c++) {
@@ -658,14 +587,14 @@ static void curpos_line_col(const char *src, const char *at, int *out_line, int 
     *out_col = col;
 }
 
-/* M141: every Token now carries a raw [start,end) source-byte-offset span
- * instead of a decoded pointer+length (see lexer.h) -- these two tiny
- * helpers recover the "pointer into src, plus length" shape almost every
- * call site below still wants, for the (overwhelming majority of) token
- * kinds whose span IS its final text verbatim (identifiers, keywords,
- * path/URI/search-path literals -- never TOK_STR_PART/TOK_ISTR_PART/
- * TOK_ISTR_ESC, which need a real decode step instead, see
- * ll_decode_dquote_span/ll_decode_istr_esc's own call sites below). */
+/* Every Token carries a raw [start,end) source-byte-offset span (see
+ * lexer.h) -- these two tiny helpers recover the "pointer into src, plus
+ * length" shape almost every call site below still wants, for the
+ * (overwhelming majority of) token kinds whose span IS its final text
+ * verbatim (identifiers, keywords, path/URI/search-path literals --
+ * never TOK_STR_PART/TOK_ISTR_PART/TOK_ISTR_ESC, which need a real
+ * decode step instead, see ll_decode_dquote_span/ll_decode_istr_esc's
+ * own call sites below). */
 static const char *tok_text(Parser *p, Token t) { return p->src + t.start; }
 static size_t tok_len(Token t) { return (size_t)(t.end - t.start); }
 
@@ -675,15 +604,13 @@ static Token cur(Parser *p) {
 static Token peek2(Parser *p) {
     return p->next;
 }
-/* M175/M158: `is_formals_pattern`'s `{...}`-vs-formals disambiguation needs a
- * THIRD token of lookahead beyond `tok`/`next` -- probed by saving the
- * lexer's full resumable state, calling lexer_next() once to see what
- * comes after `next`, then rewinding immediately, exactly mirroring
- * `iets`'s own `Lexer::pos()`/`set_pos()` save/probe/rewind pattern
- * (~/gnix/iets/src/syntax/lexer.rs's `peek3`, "only valid right after
- * peek2" per its own doc comment -- same precondition here: this is only
- * ever called with the lexer already sitting exactly one token past
- * `next`, which lexer_save() below captures regardless). */
+/* `is_formals_pattern`'s `{...}`-vs-formals disambiguation needs a THIRD
+ * token of lookahead beyond `tok`/`next` -- probed by saving the lexer's
+ * full resumable state, calling lexer_next() once to see what comes
+ * after `next`, then rewinding immediately. Only valid right after
+ * peek2(): this is only ever called with the lexer already sitting
+ * exactly one token past `next`, which lexer_save() below captures
+ * regardless. */
 static TokKind peek3(Parser *p) {
     LexerSave save = lexer_save(p->lx);
     TokKind k = lexer_next(p->lx).kind;
@@ -704,20 +631,14 @@ static Token expect(Parser *p, TokKind kind, const char *what) {
     return t;
 }
 
-/* M67: `or` is lexed as its own keyword token (TOK_OR, for the `.attr or
+/* `or` is lexed as its own keyword token (TOK_OR, for the `.attr or
  * default` select-with-default form -- see parse_select), but real Nix's
  * grammar still accepts it as an ORDINARY IDENTIFIER in any position that
  * can't be confused with that form -- a binding/formal name, or a bare
  * variable reference (deprecated/"cursed" there with a warning, per
- * NixOS/nix#11121, but still accepted, not rejected -- confirmed against
- * real `nix-instantiate --eval`: `let or = 1; in or` evaluates to `1`
- * with only a warning on stderr). `starts_atom`/`parse_atom` below treat
- * a bare TOK_OR exactly like TOK_IDENT for this reason; found via
- * numtide/nix-conformance's eval-okay-attrs5.nix (`let or = x: y: x ||
- * y; in ...`, a plain binding name) and eval-okay-deprecate-cursed-or.nix
- * (bare `or` as a function-application argument) -- both previously hit
- * "parse error: expected a binding name"/failed to parse `or` as an
- * atom at all. */
+ * NixOS/nix#11121, but still accepted, not rejected). `starts_atom`/
+ * `parse_atom` below treat a bare TOK_OR exactly like TOK_IDENT for this
+ * reason. */
 static int starts_atom(TokKind k) {
     return k == TOK_INT || k == TOK_FLOAT || k == TOK_IDENT || k == TOK_TRUE || k == TOK_FALSE || k == TOK_NULL ||
            k == TOK_LPAREN || k == TOK_STR_START || k == TOK_ISTR_START || k == TOK_LBRACKET ||
@@ -745,39 +666,31 @@ static Ast *parse_select(Parser *p);
  * list, attrpath binding sugar (`a."b c".${k}.d = val;`), `.`-select
  * chains, and `?`-chains. Needed for names that collide with a reserved
  * keyword and so can't be written bare (e.g. nixpkgs's own
- * `lib/trivial.nix`: `"or" = x: y: x || y;`, and `lib/default.nix`:
- * `inherit (self.trivial) ... "or" ...;`) -- found evaluating real
- * nixpkgs. A dynamic segment (bare `${expr}` or an interpolated quoted
- * string) is likewise a real, supported case in every one of these
- * contexts EXCEPT `inherit` -- that one rejects it unconditionally,
- * confirmed in cppnix's own grammar (`attrs: attrs string_attr`'s
- * visitor throws "dynamic attributes not allowed in inherit" for the
- * `Expr*`/dynamic case specifically, not the plain-string case) -- see
- * that call site's own dedicated rejection check, not here, since a
- * static quoted-string segment must still be accepted for `inherit`.
- * Found needed evaluating real nixpkgs: `lib/systems/architectures.nix`
- * (or a sibling file reached from `d.nix`) has `"${ident}Fallback" =
- * fallback;`-shaped bindings. */
+ * `lib/trivial.nix`: `"or" = x: y: x || y;`). A dynamic segment (bare
+ * `${expr}` or an interpolated quoted string) is likewise a real,
+ * supported case in every one of these contexts EXCEPT `inherit` --
+ * that one rejects it unconditionally, confirmed in cppnix's own
+ * grammar (`attrs: attrs string_attr`'s visitor throws "dynamic
+ * attributes not allowed in inherit" for the `Expr*`/dynamic case
+ * specifically, not the plain-string case) -- see that call site's own
+ * dedicated rejection check, not here, since a static quoted-string
+ * segment must still be accepted for `inherit`. */
 static AttrSeg parse_attr_segment(Parser *p, const char *what) {
     if (cur(p).kind == TOK_DOLLAR_LBRACE) {
         advance(p);
         Ast *name_expr = parse_expr(p);
         expect(p, TOK_RBRACE, "'}' closing a dynamic attribute name");
-        /* M67: a bare `${"literal"}` (no interpolation inside the string
+        /* A bare `${"literal"}` (no interpolation inside the string
          * literal itself -- `${"a" + "b"}` or `${foo}` still count as
          * genuinely dynamic) is a compile-time-constant name, same as
          * the quoted-string branch below already folds. Real Nix does
-         * this too, generally (not just for `let`): `~/nix/src/libexpr/
-         * include/nix/expr/parser-state.hh`'s `ToBeStringyExpr::visit`,
-         * "consistently handle simple StringExpr ${"string"} as non-
-         * dynamic attributes" (NixOS/nix#14642) -- used for exactly this
-         * AttrPath-component position. Found via numtide/nix-
-         * conformance's eval-okay-dynamic-attrs-3.nix (`let ${"a"} = 1;
-         * in ...`, its own comment: "dynamic attrs are not generally
-         * allowed in `let`... but they are if they only contain a
-         * string") -- confirmed against real `nix-instantiate --eval`:
-         * `let ${"a"} = 1; in a` == `1`, but `let ${"a"+""} = 1; in a`
-         * still fails "dynamic attributes not allowed in let". */
+         * this too, generally: `~/nix/src/libexpr/include/nix/expr/
+         * parser-state.hh`'s `ToBeStringyExpr::visit`, "consistently
+         * handle simple StringExpr ${"string"} as non-dynamic
+         * attributes" (NixOS/nix#14642). `let ${"a"} = 1; in a` == `1`,
+         * but `let ${"a"+""} = 1; in a` still fails "dynamic attributes
+         * not allowed in let" since the inner expression is genuinely
+         * dynamic. */
         if (name_expr->kind == AST_STRING) {
             if (name_expr->as.string.count == 0) {
                 return (AttrSeg){ .is_dynamic = 0, .attr = "", .attr_len = 0 };
@@ -790,25 +703,15 @@ static AttrSeg parse_attr_segment(Parser *p, const char *what) {
         return (AttrSeg){ .is_dynamic = 1, .name_expr = name_expr };
     }
     if (cur(p).kind != TOK_STR_START) {
-        /* M67: `or` as a bare (unquoted) binding/attribute name -- see
-         * starts_atom's own comment above for the full rationale;
-         * `"or"` (quoted) was already accepted here (this function's own
-         * header comment), only the unquoted keyword-token form was
-         * missing.
-         *
-         * `null`/`true`/`false` as a bare binding/attribute name --
-         * confirmed against real `nix-instantiate --eval`: `{ null =
-         * 1; }.null` == `1`, same for `true`/`false`, found evaluating
-         * real nixpkgs (nixos/modules/services/games/minetest-server.nix's
-         * own `{ bool = ...; int = ...; null = ""; set = ...; string =
-         * ...; }."${builtins.typeOf value}"` dispatch table, keyed by
-         * `builtins.typeOf`'s own result strings, one of which is
-         * literally `"null"`). Real Nix's own structural keywords
-         * (`let`/`in`/`if`/`then`/`else`/`with`/`assert`/`inherit`/
-         * `rec`) stay rejected here, confirmed the same way -- only
-         * `or`/`null`/`true`/`false` are real Nix's own bare-identifier-
-         * shaped literal tokens, lexed as such but still accepted as
-         * plain names in this one grammar position. */
+        /* `or`/`null`/`true`/`false` are also valid as a bare (unquoted)
+         * binding/attribute name -- see starts_atom's own comment above
+         * for the `or` rationale; `{ null = 1; }.null` == `1`, same for
+         * `true`/`false`. Real Nix's own structural keywords (`let`/
+         * `in`/`if`/`then`/`else`/`with`/`assert`/`inherit`/`rec`) stay
+         * rejected here -- only `or`/`null`/`true`/`false` are real
+         * Nix's own bare-identifier-shaped literal tokens, lexed as such
+         * but still accepted as plain names in this one grammar
+         * position. */
         if (cur(p).kind == TOK_OR || cur(p).kind == TOK_NULL || cur(p).kind == TOK_TRUE || cur(p).kind == TOK_FALSE) {
             Token t = cur(p);
             advance(p);
@@ -822,9 +725,7 @@ static AttrSeg parse_attr_segment(Parser *p, const char *what) {
      * grammar as an ordinary string literal), then classifies the
      * result: zero parts (`""`) or exactly one non-interpolated literal
      * part is a compile-time-constant name (static); anything else
-     * (an interpolation chunk present) is genuinely dynamic. Verified
-     * against real `nix-instantiate --eval`: `let bar = "x"; in {
-     * "foo${bar}" = 1; }` == `{ foox = 1; }`. */
+     * (an interpolation chunk present) is genuinely dynamic. */
     Ast *str = parse_dquote_string(p);
     if (str->as.string.count == 0) {
         return (AttrSeg){ .is_dynamic = 0, .attr = "", .attr_len = 0 };
@@ -863,18 +764,15 @@ static void set_select_segment(Ast *n, AttrSeg seg) {
 /* Builds the value for an attrpath-sugar binding's segments
  * `segs[start..start+count)`, given the final `value` expression --
  * used for the portion of an attrpath STARTING AT the first dynamic
- * segment (M41: `a.${k}.b = v;`, `${k}.b = v;`, `a.${k1}.${k2} = v;`).
+ * segment (`a.${k}.b = v;`, `${k}.b = v;`, `a.${k1}.${k2} = v;`).
  * `count == 0` is the base case (the chain is exhausted; just return
  * `value` itself). Otherwise wraps the recursively-built inner value in
  * one more layer: a plain (non-`rec`) one-binding attrset literal, using
- * either an ordinary static binding (`{ segs[start] = inner; }`) or
- * M28's existing dynamic-binding machinery (`{ ${segs[start]} = inner;
- * }`) depending on that segment's own kind -- so a chain with multiple
- * dynamic segments (`a.${k1}.${k2} = v;`) composes correctly, each
- * nested dynamic binding getting its own OP_INSERT_DYNAMIC_ATTR at
- * runtime. Verified against real `nix-instantiate --eval`: `let k =
- * "a"; in { x.${k} = 1; }` == `{ x = { a = 1; }; }` and `let k = "a"; in
- * { ${k}.b = 1; }` == `{ a = { b = 1; }; }`. */
+ * either an ordinary static binding (`{ segs[start] = inner; }`) or the
+ * dynamic-binding machinery (`{ ${segs[start]} = inner; }`) depending on
+ * that segment's own kind -- so a chain with multiple dynamic segments
+ * (`a.${k1}.${k2} = v;`) composes correctly, each nested dynamic binding
+ * getting its own OP_INSERT_DYNAMIC_ATTR at runtime. */
 static Ast *build_dynamic_chain_value(AttrSeg *segs, size_t start, size_t count, Ast *value) {
     if (count == 0) return value;
     AttrSeg seg = segs[start];
@@ -903,13 +801,13 @@ static Ast *build_dynamic_chain_value(AttrSeg *segs, size_t start, size_t count,
  * attributes not allowed in let", matching real Nix's own explicit
  * rejection there); non-NULL (plain `{...}`/`rec {...}`) collects it
  * instead of fataling. See DynBindingVec's own comment above. */
-/* M80 (see docs/architecture.md): every synthetic hidden binding
- * `inherit (expr) a b c;` generates (below) gets a name built from this
- * counter, prefixed with a byte ('\x01') the lexer can never produce
- * inside an identifier/string-attr token -- guarantees it can never
- * collide with a real, source-written attribute name, so it's safe to
- * `btvec_push` directly (bypassing insert_attrpath's dup-attr/merge
- * checks entirely, which exist only for names a *user* could write). */
+/* Every synthetic hidden binding `inherit (expr) a b c;` generates
+ * (below) gets a name built from this counter, prefixed with a byte
+ * ('\x01') the lexer can never produce inside an identifier/string-attr
+ * token -- guarantees it can never collide with a real, source-written
+ * attribute name, so it's safe to `btvec_push` directly (bypassing
+ * insert_attrpath's dup-attr/merge checks entirely, which exist only
+ * for names a *user* could write). */
 static int g_inherit_hidden_counter = 0;
 
 /* Lazy-thunk-plus-bytecode-cache reconciliation (see compiler.c's own
@@ -981,28 +879,23 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
             }
             attrsegvec_push(name);
         }
-        /* M128 follow-up: commit now, right as collection ends -- nothing
-         * between here and this clause's own final `free` below recurses
-         * into the parser (btvec_push/ll_ast_new/insert_attrpath are
-         * pure tree-manipulation, see SCRATCH_VEC's own safety argument). */
+        /* Commit now, right as collection ends -- nothing between here
+         * and this clause's own final `free` below recurses into the
+         * parser (btvec_push/ll_ast_new/insert_attrpath are pure
+         * tree-manipulation, see SCRATCH_VEC's own safety argument). */
         size_t names_count;
         AttrSeg *names_items = attrsegvec_commit(names_mark, &names_count);
-        /* M80: `inherit (expr) a b;` must evaluate `expr` exactly ONCE,
-         * shared by every inherited name -- found via numtide/nix-
-         * conformance's eval-okay-inherit-from.nix (`inherit (builtins.
-         * trace "used" {...}) a b;` printed "trace: used" twice, real
-         * Nix once; confirmed directly against real `nix-instantiate
-         * --eval`, and against real Nix's own parser.y/nixexpr.cc, which
-         * give every `inherit (expr) ...;` clause exactly one shared
-         * `inheritFromExprs` thunk). Previously each name's `AST_SELECT`
-         * re-embedded the SAME `src_expr` Ast* pointer directly as its
-         * own `target` -- harmless when `src_expr` is a bare variable
-         * (forcing an already-memoized Env slot twice is a no-op) but
-         * wrong whenever it's a genuine expression with its own side
-         * effect or allocation cost, since compiler.c gives every
-         * binding (including each of these selects) its own independent
-         * `OP_MK_THUNK`, so `target` was really being *recompiled and
-         * re-run* once per inherited name, not shared.
+        /* `inherit (expr) a b;` must evaluate `expr` exactly ONCE, shared
+         * by every inherited name, matching real Nix's own parser.y/
+         * nixexpr.cc (every `inherit (expr) ...;` clause gets exactly one
+         * shared `inheritFromExprs` thunk). Re-embedding the SAME
+         * `src_expr` Ast* pointer directly as each name's own
+         * `AST_SELECT.target` would be wrong whenever `expr` is a genuine
+         * expression with its own side effect or allocation cost, since
+         * compiler.c gives every binding (including each of these
+         * selects) its own independent `OP_MK_THUNK`, so `target` would
+         * really be *recompiled and re-run* once per inherited name, not
+         * shared.
          *
          * Fixed by introducing one synthetic hidden binding (named via
          * `g_inherit_hidden_counter` above, `is_hidden` so neither
@@ -1017,22 +910,18 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
          * machinery needed. */
         Ast *hidden_var = NULL;
         if (src_expr && names_count > 1) {
-            /* M80: only bother introducing the hidden shared-source
-             * binding when there's more than one name to share it
-             * between -- a single-name `inherit (expr) x;` already
-             * evaluates `expr` exactly once either way (there's only
-             * ever the one `AST_SELECT` referencing it), so leaving it
-             * exactly as before for that case sidesteps a real
-             * complication: a `rec {}` combining `__overrides` with
-             * this hidden mechanism needs more care than this pass
-             * attempts (see compiler.c's AST_ATTRSET/overrides_slot
-             * comment) -- numtide/nix-conformance's own eval-okay-
-             * inherit-from.nix happens to combine exactly those two
-             * (`__overrides.y.d = [ ];` alongside `inherit (x) c;`/
-             * `inherit (y) d;`), but both of ITS inherit-from clauses
-             * are single-name, so this `> 1` guard keeps them on the
-             * untouched, already-correct path and avoids the conflict
-             * entirely rather than papering over it. */
+            /* Only bother introducing the hidden shared-source binding
+             * when there's more than one name to share it between -- a
+             * single-name `inherit (expr) x;` already evaluates `expr`
+             * exactly once either way (there's only ever the one
+             * `AST_SELECT` referencing it), so leaving it exactly as
+             * before for that case sidesteps a real complication: a
+             * `rec {}` combining `__overrides` with this hidden mechanism
+             * needs more care than this pass attempts (see compiler.c's
+             * AST_ATTRSET/overrides_slot comment). This `> 1` guard keeps
+             * the single-name case on the untouched, already-correct
+             * path and avoids that conflict entirely rather than papering
+             * over it. */
             char *hidden_name = malloc(32);
             int hlen = snprintf(hidden_name, 32, "\x01inherit#%d", g_inherit_hidden_counter++);
             BTNode hidden_node = {
@@ -1050,20 +939,16 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
             if (src_expr) {
                 /* Single-name `inherit (expr) x;` (no hidden binding was
                  * created -- `names_count` wasn't `> 1`) still selects off
-                 * `src_expr` directly, exactly as before M80; a multi-name
-                 * clause selects off the shared `hidden_var` instead. Bug
-                 * fix (caught before landing, isolating this same change):
-                 * an earlier version of this checked `if (hidden_var)`
-                 * here instead of `if (src_expr)`, so a single-name
-                 * `inherit (x) c;` fell into the bare-`inherit` branch
-                 * below and compiled `c`'s value as a plain `AST_VAR("c")`
-                 * -- which, looked up against this same block's own
-                 * recursive frame (`is_inherit` was correctly 0, since
-                 * `src_expr != NULL`), resolved right back to itself:
-                 * `c`'s own thunk forcing `c`'s own thunk, a genuine
-                 * blackhole (confirmed via numtide/nix-conformance's own
-                 * eval-okay-inherit-from.nix, whose `rec {}` block has
-                 * exactly this shape). */
+                 * `src_expr` directly; a multi-name clause selects off the
+                 * shared `hidden_var` instead. Do NOT check `if
+                 * (hidden_var)` here instead of `if (src_expr)`: that
+                 * makes a single-name `inherit (x) c;` fall into the
+                 * bare-`inherit` branch below and compile `c`'s value as
+                 * a plain `AST_VAR("c")` -- which, looked up against this
+                 * same block's own recursive frame, resolves right back
+                 * to itself: `c`'s own thunk forcing `c`'s own thunk, a
+                 * genuine blackhole (confirmed via numtide/nix-
+                 * conformance's own eval-okay-inherit-from.nix). */
                 Ast *sel = ll_ast_new_at(AST_SELECT, cur(p).start);
                 sel->as.select.target = hidden_var ? hidden_var : src_expr;
                 sel->as.select.attr = name.attr;
@@ -1079,12 +964,10 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
             }
             /* `inherit (expr) x;` is sugar for an ordinary binding `x =
              * expr.x;` -- expr resolves against this block's own scope
-             * just like any other binding's value (siblings visible,
-             * confirmed against real nix-instantiate: `let inherit (pt)
-             * x y; pt = { ... }; in ...` sees the sibling `pt`). Only the
-             * bare `inherit x;` form needs the is_inherit escape-to-
-             * outer-scope treatment below (see ast.h) -- real Nix
-             * resolves a bare inherited name against the scope
+             * just like any other binding's value (siblings visible).
+             * Only the bare `inherit x;` form needs the is_inherit
+             * escape-to-outer-scope treatment below (see ast.h) -- real
+             * Nix resolves a bare inherited name against the scope
              * *enclosing* this block, not the block's own recursive
              * scope, even though plain `x` would otherwise self-match.
              * An inherited name is always a single segment in real Nix's
@@ -1097,16 +980,16 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
              * comment on why that's safe. */
             insert_attrpath(out, &name, 1, 0, value, (src_expr == NULL));
         }
-        free(names_items); /* M86 perf: insert_attrpath copies each AttrSeg by value -- nothing retains `names_items` itself */
+        free(names_items); /* insert_attrpath copies each AttrSeg by value -- nothing retains `names_items` itself */
         expect(p, TOK_SEMI, "';'");
         return;
     }
     /* Attrpath binding sugar (`a.b.c = val;`, real Nix's `attrpath '='
      * expr ';'`) -- see the BTNode/insert_attrpath comment above for the
      * full merge semantics. Each segment may be a plain identifier, a
-     * static quoted-string key, or (M41) a dynamic one (bare `${expr}`
-     * or an interpolated quoted string) anywhere in the chain, including
-     * as the very first segment -- see parse_attr_segment. Collect every
+     * static quoted-string key, or a dynamic one (bare `${expr}` or an
+     * interpolated quoted string) anywhere in the chain, including as
+     * the very first segment -- see parse_attr_segment. Collect every
      * segment first, then split at the first dynamic one (if any): the
      * static prefix (possibly empty) still flows through insert_attrpath
      * as before; everything from the first dynamic segment onward
@@ -1114,9 +997,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
      * either becomes that static prefix's leaf value (non-empty prefix)
      * or -- when the very first segment is itself dynamic -- a direct
      * push to `dyn_out` (same `NULL` rejection as a bare `${expr} =
-     * value;` binding: "dynamic attributes not allowed in let"). Found
-     * needed evaluating real nixpkgs: `lib/systems/architectures.nix`
-     * has `"${ident}Fallback" = fallback;`-shaped bindings. */
+     * value;` binding: "dynamic attributes not allowed in let"). */
     size_t segs_mark = attrsegvec_mark();
     attrsegvec_push(parse_attr_segment(p, "a binding name"));
     while (cur(p).kind == TOK_DOT) {
@@ -1172,7 +1053,7 @@ static void parse_binding_stmt_inner(Parser *p, BTVec *out, DynBindingVec *dyn_o
     free(segs_items);
 }
 
-/* M64: an interpolated path literal's tail -- `t` is the already-consumed
+/* An interpolated path literal's tail -- `t` is the already-consumed
  * first TOK_PATH chunk (e.g. "./" in "./${foo}", "~/" in "~/${foo}"),
  * known by the caller to be immediately followed by TOK_DOLLAR_LBRACE.
  * Collects zero or more TOK_PATH_PART literal chunks interleaved with
@@ -1189,7 +1070,7 @@ static Ast *parse_path_literal_interp(Parser *p, Token t) {
     n->as.path.text = tok_text(p, t);
     n->as.path.len = tok_len(t);
     n->as.path.is_search = 0;
-    n->as.path.is_home = (p->src[t.start] == '~'); /* M141: derived, not carried on Token (see lexer.h) */
+    n->as.path.is_home = (p->src[t.start] == '~'); /* derived, not carried on Token (see lexer.h) */
 
     size_t parts_mark = partvec_mark();
     while (cur(p).kind != TOK_PATH_END) {
@@ -1225,7 +1106,7 @@ static Ast *parse_dquote_string(Parser *p) {
     size_t parts_mark = partvec_mark();
     while (cur(p).kind != TOK_STR_END) {
         if (cur(p).kind == TOK_STR_PART) {
-            /* M141: TOK_STR_PART is now a raw (escapes-not-yet-applied) span --
+            /* TOK_STR_PART is a raw (escapes-not-yet-applied) span --
              * decode exactly once, right here, at the point this AstStringPart
              * is actually built (see ll_decode_dquote_span's own comment,
              * lexer.h). */
@@ -1263,18 +1144,17 @@ static Ast *parse_indented_string(Parser *p) {
     size_t raw_mark = rawind_mark();
     while (cur(p).kind != TOK_ISTR_END) {
         if (cur(p).kind == TOK_ISTR_PART) {
-            /* M141: a raw content run never has escapes in it by construction
+            /* A raw content run never has escapes in it by construction
              * (an escape always ends the run, see lex_indented_run) -- its
-             * span IS its final text verbatim, no decode and no copy needed
-             * at all (points straight into the long-lived source buffer,
-             * unlike the pre-M141 lexer, which always malloc'd a copy here
-             * even though nothing about this case ever needed one). */
+             * span IS its final text verbatim, no decode and no copy
+             * needed at all (points straight into the long-lived source
+             * buffer). */
             Token t = cur(p);
             rawind_push((RawIndPart){ .is_expr = 0, .text = tok_text(p, t), .text_len = tok_len(t),
                                        .has_indentation = 1 });
             advance(p);
         } else if (cur(p).kind == TOK_ISTR_ESC) {
-            /* M141: one `''$`/`'''`/`''\<c>` escape unit -- decode now, into a
+            /* One `''$`/`'''`/`''\<c>` escape unit -- decode now, into a
              * freshly malloc'd (<=2-byte) owned buffer, matching the owned-
              * copy convention every other RawIndPart.text already relies on
              * (strip_indentation never frees these directly, but the whole
@@ -1321,10 +1201,6 @@ static Ast *parse_atom(Parser *p) {
         case TOK_INT: {
             advance(p);
             Ast *n = ll_ast_new_at(AST_INT, cur(p).start);
-            /* M141: decoded on demand, straight from the raw source span --
-             * see lexer.h's own Token comment for why strtoll here is safe
-             * unbounded (the lexer's own digit-run scan already found the
-             * exact same stopping point this call will). */
             n->as.int_val = strtoll(p->src + t.start, NULL, 10);
             return n;
         }
@@ -1355,17 +1231,15 @@ static Ast *parse_atom(Parser *p) {
         case TOK_ISTR_START:
             return parse_indented_string(p);
         case TOK_IDENT:
-        case TOK_OR: { /* M67: bare `or` as an ordinary (deprecated/"cursed") variable -- see starts_atom's comment */
-            /* M80: `__curPos` -- a genuine special FORM in real Nix's own
+        case TOK_OR: { /* bare `or` as an ordinary (deprecated/"cursed") variable -- see starts_atom's comment */
+            /* `__curPos` is a genuine special FORM in real Nix's own
              * grammar (`parser.y`'s `IND_STRING | ... | '__curPos'`
              * production builds an `ExprPos` node directly, not an
-             * ordinary variable reference, confirmed: `nix-instantiate
-             * --eval -E 'let __curPos = 1; in __curPos'` still evaluates
-             * to the POSITION of that `__curPos` token, never binding to
-             * the shadowing `let`), so it's intercepted here, before
-             * ever becoming an ordinary AST_VAR, exactly like real Nix's
-             * own grammar treats it as a distinct token/production
-             * rather than a lexically-rebindable identifier. */
+             * ordinary variable reference -- `let __curPos = 1; in
+             * __curPos` still evaluates to the POSITION of that
+             * `__curPos` token, never binding to the shadowing `let`),
+             * so it's intercepted here, before ever becoming an ordinary
+             * AST_VAR. */
             if (t.kind == TOK_IDENT && tok_len(t) == 8 && memcmp(tok_text(p, t), "__curPos", 8) == 0) {
                 advance(p);
                 Ast *n = ll_ast_new_at(AST_CURPOS, cur(p).start);
@@ -1380,7 +1254,7 @@ static Ast *parse_atom(Parser *p) {
         }
         case TOK_PATH: {
             advance(p);
-            /* M64: the lexer only ever follows a TOK_PATH with
+            /* The lexer only ever follows a TOK_PATH with
              * TOK_DOLLAR_LBRACE when this chunk is the first (possibly
              * only) part of a path literal that continues into
              * interpolation (`./${foo}`, `~/${foo}`, ...) -- see
@@ -1395,7 +1269,7 @@ static Ast *parse_atom(Parser *p) {
             n->as.path.text = tok_text(p, t);
             n->as.path.len = tok_len(t);
             n->as.path.is_search = 0;
-            n->as.path.is_home = (p->src[t.start] == '~'); /* M141: derived, see lexer.h */
+            n->as.path.is_home = (p->src[t.start] == '~'); /* derived, see lexer.h */
             n->as.path.interp_parts = NULL;
             n->as.path.interp_count = 0;
             return n;
@@ -1466,7 +1340,7 @@ static Ast *parse_atom(Parser *p) {
             n->as.attrset.bindings = bindings.items;
             n->as.attrset.count = bindings.len;
             n->as.attrset.is_rec = 0;
-            merge_bt_dyn_into(&bt, &dyn); /* M67 */
+            merge_bt_dyn_into(&bt, &dyn);
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
             ll_ast_leave_retained(lt_prev_lbrace);
@@ -1487,7 +1361,7 @@ static Ast *parse_atom(Parser *p) {
             n->as.attrset.bindings = bindings.items;
             n->as.attrset.count = bindings.len;
             n->as.attrset.is_rec = 1;
-            merge_bt_dyn_into(&bt, &dyn); /* M67 */
+            merge_bt_dyn_into(&bt, &dyn);
             n->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             n->as.attrset.dyn_count = dyn.len;
             ll_ast_leave_retained(lt_prev_rec);
@@ -1509,49 +1383,44 @@ static Ast *parse_select(Parser *p) {
         n->as.select.default_ = NULL;
         /* Dynamic attribute name, `.${expr}` or an interpolated quoted
          * string (real Nix's grammar for a computed-at-runtime attrpath
-         * segment, e.g. `set.${name}` -- found needed evaluating real
-         * nixpkgs, pkgs/top-level/default.nix), or a plain identifier/
-         * static quoted-string segment (`x."a b"`, verified against
-         * `nix-instantiate --eval`: `let x = { "a b" = 5; }; in x."a
-         * b"` => `5`) -- see parse_attr_segment's comment. `or` after a
-         * dynamic segment (`set.${name} or default`) is a real,
-         * supported combination (M28) -- handled uniformly below by the
-         * same `had_select && TOK_OR` check a static segment uses,
-         * compiler.c's AST_SELECT case picks OP_SELECT_DYNAMIC_OR
-         * instead of the static OP_SELECT_OR when attr_expr is set. */
+         * segment, e.g. `set.${name}`), or a plain identifier/static
+         * quoted-string segment (`x."a b"`) -- see parse_attr_segment's
+         * comment. `or` after a dynamic segment (`set.${name} or
+         * default`) is a real, supported combination -- handled
+         * uniformly below by the same `had_select && TOK_OR` check a
+         * static segment uses, compiler.c's AST_SELECT case picks
+         * OP_SELECT_DYNAMIC_OR instead of the static OP_SELECT_OR when
+         * attr_expr is set. */
         AttrSeg seg = parse_attr_segment(p, "an attribute name");
         set_select_segment(n, seg);
         e = n;
         had_select = 1;
     }
     /* `expr.attr or default` -- real Nix's grammar attaches `or` to the
-     * whole preceding `expr '.' attrpath`, not per-segment (confirmed
-     * against nix-instantiate's own parser.y: `expr_simple '.' attrpath
-     * OR_KW expr_select`), and `ExprSelect::eval` (eval.cc) evaluates
-     * that whole multi-segment attrpath in ONE loop, falling through to
-     * `default` the instant ANY segment is missing or the current value
-     * isn't an attrset -- not just the last one. asnix's parser instead
-     * builds a chain of nested single-segment AST_SELECT nodes (one per
-     * `.segment`, `target` pointing at the previous node), so matching
-     * that semantics means sharing the SAME `default_` Ast* across every
-     * node of this one unbroken chain, not just the outermost (last) one
-     * -- walk back down `target` while it's itself a freshly-built
-     * AST_SELECT (default_ == NULL, true for every node of THIS chain
-     * and only this chain, by construction: an earlier chain's `or`
-     * would already have set it, and this loop built every node here
-     * from scratch) and stamp all of them with the same pointer. Sharing
-     * one Ast* subtree across multiple parent nodes is safe here --
-     * compiler.c only ever READS `default_` to emit a fresh, independent
-     * copy of its bytecode at each compile site, never mutates the AST --
-     * verified by testing a chain with a side-effecting default
-     * (`a.x.y or (builtins.trace "eval" default)`) evaluates it exactly
-     * once, not once per missing segment. `default` itself is parsed at
-     * this same parse_select tightness (matching real Nix: the default
-     * is NOT a full `expr`, e.g. `+`/`==` outside are not absorbed into
-     * it), recursively, so `a.b or c.d or e` chains sensibly. No `or` is
-     * possible without at least one preceding `.select` (real Nix's
-     * grammar agrees -- a bare `x or y` is the separate, unsupported
-     * "cursed or" rule). */
+     * whole preceding `expr '.' attrpath`, not per-segment, and
+     * `ExprSelect::eval` (eval.cc) evaluates that whole multi-segment
+     * attrpath in ONE loop, falling through to `default` the instant ANY
+     * segment is missing or the current value isn't an attrset -- not
+     * just the last one. This parser instead builds a chain of nested
+     * single-segment AST_SELECT nodes (one per `.segment`, `target`
+     * pointing at the previous node), so matching that semantics means
+     * sharing the SAME `default_` Ast* across every node of this one
+     * unbroken chain, not just the outermost (last) one -- walk back down
+     * `target` while it's itself a freshly-built AST_SELECT (default_ ==
+     * NULL, true for every node of THIS chain and only this chain, by
+     * construction: an earlier chain's `or` would already have set it)
+     * and stamp all of them with the same pointer. Sharing one Ast*
+     * subtree across multiple parent nodes is safe here -- compiler.c
+     * only ever READS `default_` to emit a fresh, independent copy of
+     * its bytecode at each compile site, never mutates the AST, so a
+     * side-effecting default (`a.x.y or (builtins.trace "eval"
+     * default)`) still evaluates exactly once, not once per missing
+     * segment. `default` itself is parsed at this same parse_select
+     * tightness (matching real Nix: the default is NOT a full `expr`,
+     * e.g. `+`/`==` outside are not absorbed into it), recursively, so
+     * `a.b or c.d or e` chains sensibly. No `or` is possible without at
+     * least one preceding `.select` (real Nix's grammar agrees -- a bare
+     * `x or y` is the separate, unsupported "cursed or" rule). */
     if (had_select && cur(p).kind == TOK_OR) {
         advance(p);
         Ast *default_ast = parse_select(p);
@@ -1581,16 +1450,13 @@ static Ast *parse_app(Parser *p) {
 /* Unary `-` (negate): binds tighter than every binary/`?`/`++` operator
  * but looser than application/select -- `-f 3` == `-(f 3)` (not `(-f)
  * 3`), `-x ? "a"` == `(-x) ? "a"` (not `-(x ? "a")`), `-2 + 3` == `(-2) +
- * 3` == `1` -- all cross-checked against `nix-instantiate --eval` before
- * writing this (found entirely missing while chasing real nixpkgs:
- * `lib/trivial.nix` has `bitNot = builtins.sub (-1);`). Matches real
- * Nix's grammar (`~/nix/src/libexpr/parser.y`: `'-' expr_op %prec
- * NEGATE` desugars to `sub 0 $2`, i.e. `0 - expr_op` -- NEGATE is the
- * single tightest-declared operator in the whole table, but still
- * looser than implicit application/select, which aren't part of that
- * table at all). Reuses the existing binary `-` (AST_BINOP op='-') with
- * a literal `0` lhs, same desugaring real Nix itself uses -- no new AST
- * node or IR op needed. */
+ * 3` == `1`. Matches real Nix's grammar (`~/nix/src/libexpr/parser.y`:
+ * `'-' expr_op %prec NEGATE` desugars to `sub 0 $2`, i.e. `0 - expr_op`
+ * -- NEGATE is the single tightest-declared operator in the whole
+ * table, but still looser than implicit application/select, which
+ * aren't part of that table at all). Reuses the existing binary `-`
+ * (AST_BINOP op='-') with a literal `0` lhs, same desugaring real Nix
+ * itself uses -- no new AST node or IR op needed. */
 static Ast *parse_binop(Parser *p, int min_prec); /* forward decl -- see parse_negate's own `!` case below */
 #define PREC_ADD 6 /* must match TOK_PLUS/TOK_MINUS's own `prec` entry in the BINOPS table, further down this file -- moved up here (not duplicated) since parse_negate's own `!`-operand case below needs it */
 static Ast *parse_negate(Parser *p) {
@@ -1639,17 +1505,14 @@ static Ast *parse_has_attr(Parser *p) {
         /* `expr ? attrpath`, real Nix's grammar for the right-hand side
          * (`~/nix/src/libexpr/parser.y`: `expr_op '?' attrpath`) is a
          * full DOTTED chain, not a single segment -- `x ? a.b.c` checks
-         * nested existence, confirmed against `nix-instantiate --eval`
-         * (found needed evaluating real nixpkgs: `lib/systems/
-         * default.nix` has `platform ? gcc.arch`). Each segment may be a
-         * plain identifier, a static quoted-string, or a dynamic
-         * `${expr}` (see parse_attr_segment/AttrSeg above). Desugars
-         * directly to `x ? a && (x.a or {}) ? b && ((x.a or {}).b or {})
-         * ? c ...` -- reusing the already-correct AST_HAS_ATTR/
-         * AST_SELECT-with-`or`/AST_AND nodes, no new AST node needed
-         * (dynamic segments needed one new IR op, OP_HAS_ATTR_DYNAMIC,
-         * since AST_SELECT already had its own dynamic op). Verified
-         * this desugaring matches real Nix exactly for the three cases
+         * nested existence. Each segment may be a plain identifier, a
+         * static quoted-string, or a dynamic `${expr}` (see
+         * parse_attr_segment/AttrSeg above). Desugars directly to `x ? a
+         * && (x.a or {}) ? b && ((x.a or {}).b or {}) ? c ...` -- reusing
+         * the already-correct AST_HAS_ATTR/AST_SELECT-with-`or`/AST_AND
+         * nodes, no new AST node needed (dynamic segments needed one new
+         * IR op, OP_HAS_ATTR_DYNAMIC, since AST_SELECT already had its
+         * own dynamic op). This matches real Nix for the three cases
          * that actually distinguish it from a naive "just select, no
          * fallback" version: a missing intermediate attr, an
          * intermediate value that exists but isn't an attrset, and a
@@ -1692,20 +1555,14 @@ static Ast *parse_has_attr(Parser *p) {
 /* `++`/`*`//`+`/`-` (list concat, mul/div, add/sub): folded into the
  * table-driven `parse_binop` climbing loop below, alongside `//`/`==`/
  * `!=`/`<`/`>`/`<=`/`>=`/`&&`/`||`/`->` -- see that function's own header
- * comment for the precedence table and the perf rationale for collapsing
- * these 9 levels into one. `?` (has-attr, tighter than `++`) keeps its
- * own real grammar in `parse_has_attr` below, unchanged. */
+ * comment for the precedence table. `?` (has-attr, tighter than `++`)
+ * keeps its own real grammar in `parse_has_attr` below, unchanged. */
 
 /* Operator precedence below `parse_expr`'s keyword forms (`let`/`if`/
- * lambda/`assert`), lowest to highest, verified directly against real
- * `nix-instantiate` (see docs/architecture.md's "operators" milestone
- * notes -- this is NOT the same ordering a literal reading of the Nix
- * manual's summary table might suggest for `!`, which binds looser than
- * `+`/`-` but tighter than `//`; confirmed with
- * `! 1 + 1` (parses as `!(1 + 1)`, confirmed by the runtime type error
- * complaining about `2`, not `1`) and `! true // {}` (parses as
- * `(!true) // {}`, confirmed by the runtime error naming `false`, the
- * result of the `!`, not `true`)):
+ * lambda/`assert`), lowest to highest. This is NOT the same ordering a
+ * literal reading of the Nix manual's summary table might suggest for
+ * `!`, which binds looser than `+`/`-` but tighter than `//`: `! 1 + 1`
+ * parses as `!(1 + 1)`, and `! true // {}` parses as `(!true) // {}`:
  *
  *   ->           right-assoc, chainable, LOWEST of all of these
  *   ||           left-assoc, chainable
@@ -1714,40 +1571,21 @@ static Ast *parse_has_attr(Parser *p) {
  *   < > <= >=    non-assoc (single occurrence only)
  *   //           right-assoc, chainable
  *   ! (prefix)   binds the rest of this chain down to PREC_ADD
- *   + -          (already existed, M4)
- *   * /          (already existed, M4)
+ *   + -
+ *   * /
  *   ++           right-assoc, chainable -- binds TIGHTER than
- *                 * / + -, looser than ? and application (M23)
+ *                 * / + -, looser than ? and application
  *
- * `->`'s precedence/associativity (lowest, right-assoc) cross-checked
- * against cppnix's real grammar (~/nix/src/libexpr/parser.y: `%right
- * IMPL`, declared before `%left OR`, i.e. binding looser).
+ * `->`'s precedence/associativity (lowest, right-assoc) matches cppnix's
+ * real grammar (~/nix/src/libexpr/parser.y: `%right IMPL`, declared
+ * before `%left OR`, i.e. binding looser).
  *
- * perf: this whole chain used to be 9 separate, mostly-non-inlined
- * recursive-descent functions (parse_impl -> parse_or -> parse_and ->
- * parse_eq -> parse_cmp -> parse_update -> parse_not -> parse_add ->
- * parse_mul -> parse_concat), each a trivial "lhs = parse_NEXT(p); if/
- * while (match(op)) {...}" with no fast path for the overwhelming
- * majority of leaf expressions that touch NONE of these operators --
- * every single leaf still paid all 9 call/ret pairs to find that out.
- * Measured via `perf record -g` on a real nixpkgs closure: these 9
- * functions showed up together at nearly identical cumulative cost (they
- * fire in lockstep on virtually every parse), consistent with
- * `ll_lex`/`compile_expr`-adjacent lex+parse+compile work eating a
- * disproportionate, not-yet-addressed share of total cycles relative to
- * a comparable evaluator's own single-function precedence-climbing
- * parser (iets, ~/gnix/iets/src/eval/parser*.rs's `parse_op(min_bp)`).
- * Collapsed into ONE table-driven climbing loop (`parse_binop`) below --
- * same exact precedence/associativity/AST-node-shape as the 9 functions
- * it replaces, verified via the project's own full e2e + nix-conformance
- * + nixpkgs-hash suites, just 1 call instead of up to 9 for any leaf that
- * touches none of this chain's operators (the common case), and for any
- * operator chain, the loop itself replaces what used to be `N` nested
- * call frames with one frame plus `N` loop iterations / RHS recursions.
+ * This whole chain is a single table-driven climbing loop (`parse_binop`)
+ * rather than one recursive-descent function per precedence level --
  * `parse_has_attr` and everything tighter (`?`, unary `-`/negate,
  * application, select, atom) keep their own real, non-table grammar as
- * separate functions, unchanged below -- only the 9 "plain binary
- * operator" levels collapse. */
+ * separate functions, unchanged below -- only the "plain binary
+ * operator" levels are table-driven. */
 typedef enum { BINOP_K_BINOP, BINOP_K_AND, BINOP_K_OR, BINOP_K_IMPL } BinOpKind;
 typedef struct {
     TokKind tok;
@@ -1839,15 +1677,13 @@ static Ast *parse_binop(Parser *p, int min_prec);
  * table drives at `+`'s own precedence or tighter (+/-, * /, ++), so
  * `!1 + 1` consumes the whole `1 + 1` as one operand (matching real Nix,
  * see the comment above), while `!a // b` stops before `//` (prec 5 <
- * PREC_ADD) and parses as `(!a) // b`, not `!(a // b)` -- both cross-
- * checked against real Nix before this rewrite, same as the original
- * parse_not/parse_update pair enforced structurally. A second `!` is
+ * PREC_ADD) and parses as `(!a) // b`, not `!(a // b)`. A second `!` is
  * caught the same way regardless of nesting depth, since this function
  * re-checks TOK_BANG on every call, including the recursive one for the
- * operand -- `!!x` works via that re-entry, not a dedicated loop.
- * Falls through to `parse_has_attr` (its own real, non-table grammar:
- * `?`'s dotted-chain desugaring, then unary negate, application, select,
- * atom) for everything else -- unchanged, unaffected by this rewrite. */
+ * operand -- `!!x` works via that re-entry, not a dedicated loop. Falls
+ * through to `parse_has_attr` (its own real, non-table grammar: `?`'s
+ * dotted-chain desugaring, then unary negate, application, select,
+ * atom) for everything else. */
 static Ast *parse_binop_primary(Parser *p) {
     if (cur(p).kind == TOK_BANG) {
         advance(p);
@@ -1870,9 +1706,7 @@ static Ast *parse_binop_primary(Parser *p) {
  * `(a+b)+c`). `non_assoc` breaks the loop immediately after firing once
  * -- the leftover token (e.g. the second `==` in `1==2==3`) is simply
  * never consumed by anything in this chain, surfacing as a parse error
- * wherever control eventually returns to (exactly matching the original
- * separate-function design's own behavior for this case, just reached
- * via a different code path). */
+ * wherever control eventually returns to. */
 static Ast *parse_binop(Parser *p, int min_prec) {
     Ast *lhs = parse_binop_primary(p);
     /* Tracks the precedence of the last NON-ASSOC operator fired in THIS
@@ -1882,11 +1716,10 @@ static Ast *parse_binop(Parser *p, int min_prec) {
      * must still parse as `(1 == 2) && true` (&&'s own looser precedence
      * is a perfectly valid continuation), and `1 < 2 == 3` must still
      * parse as `(1 < 2) == 3` (== and < are DIFFERENT precedences, so
-     * neither blocks the other) -- both cross-checked against real Nix.
-     * A plain `break` here (this function's first draft) over-blocked
-     * both of those, found by the project's own test-e2e suite
-     * (ops_precedence_add_eq_and.nix) failing with a parse error on
-     * exactly the first case. */
+     * neither blocks the other). Do NOT replace this with a plain
+     * `break`: that over-blocks both of those cases, caught by the
+     * project's own test-e2e suite (ops_precedence_add_eq_and.nix)
+     * failing with a parse error on the first one. */
     int last_non_assoc_prec = -1;
     for (;;) {
         const BinOpInfo *info = lookup_binop(cur(p).kind);
@@ -1914,17 +1747,12 @@ static Ast *parse_let_bindings(Parser *p) {
     advance(p); /* 'in' */
     Ast *body = parse_expr(p);
 
-    /* M67: `let` has nowhere to put a dynamic binding absorbed via
+    /* `let` has nowhere to put a dynamic binding absorbed via
      * reopen_attrset_into (AST_LET has no dyn_bindings field at all,
      * unlike AST_ATTRSET) -- fatal here with the same message a direct
      * top-level `let ${k} = v;` already gets (parse_binding_stmt's own
      * `dyn_out == NULL` check), rather than silently dropping it. Not
-     * believed reachable today (every path into this would need a `let`
-     * binding whose attrpath has a dynamic *non-first* segment that then
-     * collides with a sibling attrpath statement -- e.g. `let a.${k} =
-     * 1; a.b = 2; in ...` -- a shape nothing in this project's own
-     * fixtures or numtide/nix-conformance exercises), kept purely as a
-     * loud-not-silent guard. */
+     * believed reachable today, kept purely as a loud-not-silent guard. */
     if (bt.dyn.len > 0) {
         fprintf(stderr, "ll: parse error: dynamic attributes not allowed in let\n");
         exit(1);
@@ -1948,39 +1776,21 @@ static Ast *parse_let_bindings(Parser *p) {
     return n;
 }
 
-/* Decides whether a TOK_LBRACE at `open_idx` opens a lambda-pattern formals
- * list (`{...}: body` / `{...}@name: body`) or an ordinary attrset-literal
- * expression, using only the next 1-2 tokens -- never scanning ahead to the
- * matching '}'. A prior version (`find_matching_rbrace`) scanned the ENTIRE
- * `{...}` span counting brace depth just to peek at what follows the close
- * brace; profiling against a real nixpkgs eval found that scan responsible
- * for the single largest self-time share in the whole program (~7% of
- * total instructions, via lex_until -- it was usually the first code to
- * reach not-yet-lexed source text, since it runs ahead of the parser's own
- * position). `iets` (a sibling evaluator, ~/gnix/iets/src/syntax/parser.rs
- * `is_formals`) resolves the identical grammar ambiguity with a bounded
- * lookahead instead, ported directly here: a lambda pattern's own grammar
- * is fully determined by its first one or two tokens --
+/* Decides whether a TOK_LBRACE opens a lambda-pattern formals list
+ * (`{...}: body` / `{...}@name: body`) or an ordinary attrset-literal
+ * expression, using only the next 1-2 tokens -- never scanning ahead to
+ * the matching '}'. A lambda pattern's own grammar is fully determined
+ * by its first one or two tokens --
  *   `{ ...`                    -- ellipsis-only or ellipsis-leading formals
  *   `{ }` followed by ':'/'@'  -- empty formals
  *   `{ IDENT` followed by ','/'?'/'}' -- a formals entry (name[, ...] /
  *                                        name?default / the sole formal)
  * -- anything else is an attrset literal (a bare identifier followed by
- * '=' or '.', a string/dynamic key, `inherit`, etc., none of which share a
- * prefix with a valid formals list). This also sidesteps the old function's
- * own `${`-depth-counting special case entirely -- there is nothing to
- * miscount when only 1-2 tokens are ever inspected. Open/malformed input
- * (e.g. `{` at EOF) now surfaces its own "expecting '}'"-style error from
- * the normal attrset-literal/formals parse path instead of this function's
- * own dedicated check -- matching this project's standing convention of
- * matching an error's class, not its exact wording (see Makefile's
- * test-nix-conformance target comment). M175: ported onto the new
- * tok/next lookahead buffer -- `p` is always positioned with `cur(p)`
- * exactly AT the `{` itself, so `t1` is just `peek2(p)`; the one
+ * '=' or '.', a string/dynamic key, `inherit`, etc., none of which share
+ * a prefix with a valid formals list). `p` is always positioned with
+ * `cur(p)` exactly AT the `{` itself, so `t1` is just `peek2(p)`; the one
  * occasional third token of lookahead (`t2`) goes through `peek3()`
- * (parser.c's own save/probe/rewind helper, see its comment), never a
- * direct array index the way `lexcur_tok(p->lc, open_idx + N)` used to
- * read. */
+ * (parser.c's own save/probe/rewind helper, see its comment). */
 static int is_formals_pattern(Parser *p) {
     TokKind t1 = peek2(p).kind;
     if (t1 == TOK_ELLIPSIS) return 1;
@@ -2049,7 +1859,7 @@ static Ast *parse_expr(Parser *p) {
             attrs->as.attrset.bindings = bindings.items;
             attrs->as.attrset.count = bindings.len;
             attrs->as.attrset.is_rec = 1;
-            merge_bt_dyn_into(&bt, &dyn); /* M67 */
+            merge_bt_dyn_into(&bt, &dyn);
             attrs->as.attrset.dyn_bindings = finalize_dyn_vec(&dyn);
             attrs->as.attrset.dyn_count = dyn.len;
             ll_ast_leave_retained(lt_prev_letbrace);
@@ -2177,15 +1987,11 @@ static Ast *parse_expr(Parser *p) {
     return parse_impl(p);
 }
 
-/* M135: fuses lexing and parsing -- src is lexed on demand through a
- * Lexer instead of being fully lexed into an array before this function
- * is ever called (that was the old ll_lex(src,&n)+ll_parse(toks,n,
- * src) two-call pattern every caller used; see docs/architecture.md
- * M134/M135). M175: that on-demand `Lexer` is now a true pull cursor
- * (lexer.h) with no backing Token array at all -- `p.tok`/`p.next` are
- * primed here by calling lexer_next() twice up front, mirroring the old
- * invariant that `peek2()` is always valid even right at TOK_EOF (lexing
- * an empty file primes both slots to TOK_EOF, same as before). */
+/* Fuses lexing and parsing -- src is lexed on demand through a Lexer, a
+ * true pull cursor (lexer.h) with no backing Token array at all.
+ * `p.tok`/`p.next` are primed here by calling lexer_next() twice up
+ * front, so `peek2()` is always valid even right at TOK_EOF (lexing an
+ * empty file primes both slots to TOK_EOF). */
 Ast *ll_parse(const char *src) {
     Lexer *lx = lexer_new(src);
     Parser p = { .lx = lx, .src = src, .curpos_base = src };

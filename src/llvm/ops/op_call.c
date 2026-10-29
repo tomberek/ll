@@ -3,13 +3,11 @@
  * The closure branch is inlined here (RetFrame push + musttail into
  * the callee's own body) rather than routed through ll_apply,
  * specifically so native-stack depth never tracks ordinary Nix-level
- * call depth -- see the M10 plan's own "alternative rejected" note.
- * The __functor branch (an attrset with a __functor attribute is
- * callable, real nixpkgs's lib.fix/lib.extends/overlay machinery uses
- * this pervasively) is a genuine C call, not a tail call -- control
- * needs to come back here to push the result and continue dispatch,
- * matching op_call.S's own .Lop_call_is_attrs (a real `call`, not a
- * tail `jmp`, for exactly that reason). */
+ * call depth. The __functor branch (an attrset with a __functor
+ * attribute is callable, real nixpkgs's lib.fix/lib.extends/overlay
+ * machinery uses this pervasively) is a genuine C call, not a tail
+ * call -- control needs to come back here to push the result and
+ * continue dispatch. */
 #include "ops.h"
 
 #include "builtins_shared.h"
@@ -52,7 +50,7 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
             ll_fatal(msg, sizeof(msg) - 1);
         }
         Value *args = callee_slot + 1;
-        /* M25: force each argument before handing it to the native C
+        /* Force each argument before handing it to the native C
          * function -- primops read args[i]'s raw tag directly and
          * can't force a thunk themselves. Skipped when NOFORCE is set
          * (tryEval's own convention; not otherwise used in this
@@ -62,9 +60,8 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
         }
         Value (*fn)(const Value *, int64_t) = (Value(*)(const Value *, int64_t))p->fn;
         Value result = fn(args, argc);
-        /* M23: force the primop's raw return value too (a lazy-
-         * passthrough primop like getAttr deliberately returns an
-         * unforced entry). */
+        /* Force the primop's raw return value too (a lazy-passthrough
+         * primop like getAttr deliberately returns an unforced entry). */
         result = ll_force_for_print(result);
 
         vs = callee_slot;
@@ -93,46 +90,27 @@ LL_OP_ATTR Value ll_op_call(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFra
  * a = n (>= 2), VALSTACK holds [callee, arg0, ..., arg(n-1)] same as an
  * ordinary n-arg OP_CALL would.
  *
- * Phase 1 is a pure, read-only walk -- no allocation, no side effects --
- * checking whether `callee` is the head of a plain one-slot-per-level
- * curry chain at least n-1 levels deep. Every such link (an ordinary
- * non-pattern lambda's own curry stage, AND every curried-native-
- * builtin stage ll_bshared_make_curried_native builds, both use the
- * exact same `ib_lambda(..., 1, ...); ib_ret(...)` shape) compiles to
- * exactly two ops: OP_LAMBDA(arity=1, pidx) then OP_RET, with nothing
- * else -- `level_prog->pool[pidx]` is the next level's own IrProgram*,
- * read directly, without ever constructing the intermediate Closure
- * object that running OP_LAMBDA for real would have built. A level
- * that doesn't match this shape (arity != 1, or its own body is
- * anything other than exactly those two ops -- i.e. real content, the
- * point where the chain's actual work begins) stops the walk.
+ * Phase 1 is a pure, read-only walk checking whether `callee` is the
+ * head of a plain one-slot-per-level curry chain at least n-1 levels
+ * deep: each matching level's body is compiled to exactly two ops,
+ * OP_LAMBDA(arity=1, pidx) then OP_RET, with nothing else. A level
+ * that doesn't match this exact shape (arity != 1, or any other body)
+ * stops the walk.
  *
  * If the walk reaches n-1 links deep, phase 2 builds all n of this
- * call's 1-slot Env frames in ONE bump allocation (same per-frame size
- * ll_env_alloc_fast computes for nslots=1, just n of them back to back,
- * each one's `up` pointing at the previous -- bit-for-bit the same
- * frame CHAIN n separate ll_env_alloc_fast(.., 1) calls would have produced,
- * just one arena bump instead of n), then runs the n-th level's own
- * body (`level_prog` after the walk) with env = the last frame built --
- * identical in every observable way to what n chained ordinary calls
- * would have produced, including a real Closure result when n lands
- * short of the chain's own full depth (partial application: the n-th
- * level's body is then ITSELF exactly `[OP_LAMBDA, OP_RET]`, which
- * runs completely normally, unmodified, and correctly captures the
- * fused frame chain as that new Closure's `up`).
+ * call's 1-slot Env frames in ONE bump allocation (bit-for-bit the
+ * same frame chain n separate ll_env_alloc_fast(.., 1) calls would
+ * have produced), then runs the n-th level's own body with env = the
+ * last frame built -- identical in every observable way to n chained
+ * ordinary calls, including a real Closure result on partial
+ * application.
  *
- * Whenever phase 1's walk comes up short (not a Closure, arity != 1 at
- * some level, a level's body isn't that exact two-op shape, or the
- * fused allocation wouldn't fit in the fast env arena) this falls back
- * to n ordinary, sequential single-argument applications via
- * ll_apply -- byte-identical in behavior to the n separate OP_CALL
- * ops this call site would have compiled to before this op existed
- * (ll_apply's own Closure/PrimOp/__functor dispatch is exactly
- * ll_op_call's, just reached by a real C call instead of a tail-jump).
- * Re-entering synchronously here grows the native stack by at most
- * n-1 frames, which is safe: n is bounded by this call site's own
- * SOURCE SYNTAX (how many arguments appear at one application
- * expression in the program text), never by Nix-level, data-dependent
+ * Whenever phase 1's walk comes up short this falls back to n
+ * ordinary, sequential single-argument applications via ll_apply --
+ * byte-identical in behavior to what n separate OP_CALL ops would
+ * have compiled to. Re-entering synchronously here grows the native
+ * stack by at most n-1 frames, which is safe: n is bounded by this
+ * call site's own SOURCE SYNTAX, never by Nix-level, data-dependent
  * recursion depth -- the invariant threaded dispatch exists to
  * protect is about the latter, not a handful of frames bounded by
  * what a human wrote at one call site. */
@@ -194,21 +172,18 @@ LL_OP_ATTR Value ll_op_call_chain(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
 
     Value result = callee;
     for (int64_t i = 0; i < n; i++) {
-        /* A NOFORCE PrimOp (e.g. foldl''s own intermediate stages,
-         * builtins_list.c) reads its captured values via
-         * self_captures(args), which assumes `args[-1]` is the PrimOp
-         * Value itself -- an invariant ll_op_call's own direct dispatch
-         * gives for free (callee always sits immediately before its
-         * args on VALSTACK there), but ll_apply's generic (fn, args,
-         * argc) signature does NOT guarantee for an arbitrary caller
-         * (it only copies into a safe scratch buffer when the PrimOp
-         * forces its args -- see ll_apply_primop_slow). `callee_slot[1+i]`
-         * is NOT immediately preceded by `result` on this call site's
-         * own VALSTACK (it is preceded by the PREVIOUS argument, or by
-         * the original callee), so this step must copy both into a
-         * local 2-slot buffer to restore that adjacency, matching
-         * exactly what n separate ordinary OP_CALL(1) ops would have
-         * had. */
+        /* A NOFORCE PrimOp (e.g. foldl''s own intermediate stages)
+         * reads its captured values via self_captures(args), which
+         * assumes `args[-1]` is the PrimOp Value itself -- an
+         * invariant ll_op_call's own direct dispatch gives for free
+         * (callee always sits immediately before its args on VALSTACK
+         * there), but ll_apply's generic (fn, args, argc) signature
+         * does NOT guarantee this for an arbitrary caller.
+         * `callee_slot[1+i]` is NOT immediately preceded by `result`
+         * on this call site's own VALSTACK, so this step must copy
+         * both into a local 2-slot buffer to restore that adjacency,
+         * matching exactly what n separate ordinary OP_CALL(1) ops
+         * would have had. */
         Value step[2];
         step[0] = result;
         step[1] = callee_slot[1 + i];
@@ -230,11 +205,11 @@ LL_OP_ATTR Value ll_op_ret(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFram
     if (f.force_target) {
         /* This frame was pushed to force a thunk (OP_VAR_REF), not an
          * ordinary call -- memoize the body's result (already on top
-         * of VALSTACK) into the thunk cell before resuming. M82: this
-         * thunk is always the current head of ll_inprogress_head
-         * (forcing is strictly LIFO) -- pop it (read its "prev" link,
-         * stashed in `env` while IN_PROGRESS) before overwriting `env`
-         * with the cached result. */
+         * of VALSTACK) into the thunk cell before resuming. This thunk
+         * is always the current head of ll_inprogress_head (forcing is
+         * strictly LIFO) -- pop it (read its "prev" link, stashed in
+         * `env` while IN_PROGRESS) before overwriting `env` with the
+         * cached result. */
         Thunk *t = (Thunk *)f.force_target;
         ll_inprogress_head = (void *)(uintptr_t)t->env;
         t->env = vs[-1].raw;

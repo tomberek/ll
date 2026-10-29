@@ -8,22 +8,14 @@
 
 extern void ll_fatal(const char *msg, uint64_t len) __attribute__((noreturn));
 
-/* Inlined, header-only on purpose: asnix's own op_var_ref.S/force.S once
- * called ll_value_is_cell (which itself called ll_tag_of) to probe
- * for a Cell, then switched to a direct tag-bit test after profiling
- * showed the two stacked real calls were measurable on every var-ref and
- * every force -- see those files' own comments. ll_resolve_indirection
- * hit the exact same cost (confirmed via callgrind on a real nixpkgs
- * eval: this function alone was 1.67% of total instructions, almost
- * entirely call/ret overhead around single tag-bit checks), so it gets
- * the same fix here: a `static inline` function every call site compiles
- * in directly, falling back to a real call only for the actual
- * (comparatively rare) LazyApp/ThunkMap resolution work.
+/* Inlined, header-only on purpose: a `static inline` function every
+ * call site compiles in directly, falling back to a real call only for
+ * the actual (comparatively rare) LazyApp/ThunkMap resolution work.
  *
  * LL_PTR_BASE_MASK must match value_util.c's own LL_PTR_BASE_MASK
- * exactly (same heap layout, same ThunkMap packed-index bits to clear --
- * see that file's own comment on the constant). Not shared via a header
- * because value_util.c is vendored byte-identical from asnix. */
+ * exactly (same heap layout, same ThunkMap packed-index bits to
+ * clear). Not shared via a header because value_util.c is vendored
+ * byte-identical from asnix. */
 #define LL_PTR_BASE_MASK 0x0000FFFFFFFFFFF8ULL
 
 static inline Value ll_resolve_indirection(Value v) {

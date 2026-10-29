@@ -1,14 +1,3 @@
-/* M195/M198: see include/ll/art_sym.h for the full rationale and
- * measured numbers. Variable-size-per-kind nodes (Leaf/Node4/Node16/
- * Node48/Node256 each their own struct, not one union sized for the
- * largest), mutable in-place insertion (no copy-on-write -- nothing
- * needs an old root to stay valid), allocated via ll_arena_alloc
- * (never individually freed, same as every other scratch allocation in
- * this codebase). M198 added a `Value` field to the leaf, written only
- * on first insert of a given sym (never on a duplicate), so this
- * structure can serve as a real sym->Value map with "first occurrence
- * wins" semantics for free -- see art_sym.h's header comment.
- */
 #include "ll/art_sym.h"
 
 #include <string.h>
@@ -43,12 +32,9 @@ static ArtNode4 *art_make_node4(uint8_t prefix_len, const uint8_t *prefix) {
 }
 
 /* Mutable insert: `ref` is the address of the pointer slot currently
- * holding this subtree's root (a field inside the parent node, or the
- * caller's own root). Every write either mutates the existing node in
- * place (room available) or allocates exactly one new node and
- * overwrites *ref -- no cloning of untouched ancestors. A duplicate key
- * (leaf already present) returns immediately without touching `val` at
- * all -- the stored value is always the one from the FIRST insert. */
+ * holding this subtree's root. A duplicate key returns immediately
+ * without touching `val` -- the stored value is always the one from
+ * the first insert. */
 static void art_insert(LlArtSymNode **ref, uint32_t key, Value val, int depth) {
     LlArtSymNode *n = *ref;
     if (!n) { *ref = (LlArtSymNode *)art_make_leaf(key, val); return; }
@@ -56,7 +42,7 @@ static void art_insert(LlArtSymNode **ref, uint32_t key, Value val, int depth) {
     ArtHdr *h = (ArtHdr *)n;
     if (h->kind == ART_LEAF) {
         ArtLeaf *lf = (ArtLeaf *)n;
-        if (lf->key == key) return; /* duplicate: no-op, first-inserted val kept */
+        if (lf->key == key) return;
         uint32_t other = lf->key;
         int d = depth, common = 0;
         while (common < 3 && art_key_byte(key, d + common) == art_key_byte(other, d + common)) common++;
@@ -65,14 +51,13 @@ static void art_insert(LlArtSymNode **ref, uint32_t key, Value val, int depth) {
         ArtNode4 *parent = art_make_node4((uint8_t)common, pfx);
         int bd = d + common;
         uint8_t b_old = art_key_byte(other, bd), b_new = art_key_byte(key, bd);
-        parent->keys[0] = b_old; parent->children[0] = n; /* reuse existing leaf verbatim */
+        parent->keys[0] = b_old; parent->children[0] = n;
         parent->keys[1] = b_new; parent->children[1] = (LlArtSymNode *)art_make_leaf(key, val);
         parent->hdr.count = 2;
         *ref = (LlArtSymNode *)parent;
         return;
     }
 
-    /* internal node: check/consume compressed prefix */
     int mismatch = -1;
     for (int i = 0; i < h->prefix_len; i++) if (h->prefix[i] != art_key_byte(key, depth + i)) { mismatch = i; break; }
     if (mismatch >= 0) {
@@ -81,8 +66,7 @@ static void art_insert(LlArtSymNode **ref, uint32_t key, Value val, int depth) {
         ArtNode4 *parent = art_make_node4((uint8_t)mismatch, pfx);
         uint8_t b_old = h->prefix[mismatch];
         uint8_t b_new = art_key_byte(key, depth + mismatch);
-        /* truncate the existing node's prefix IN PLACE -- mutable, safe,
-         * nothing else aliases it -- and reuse it as a child. */
+        /* truncate the existing node's prefix in place -- nothing else aliases it. */
         int newlen = h->prefix_len - mismatch - 1;
         for (int i = 0; i < newlen; i++) h->prefix[i] = h->prefix[mismatch + 1 + i];
         h->prefix_len = (uint8_t)newlen;
@@ -152,12 +136,10 @@ void ll_art_sym_insert(LlArtSymSet *set, uint32_t sym, Value val) {
     art_insert(&set->root, sym, val, 0);
 }
 
-/* In-order traversal: Node4/16 store children in append order, not byte
- * order, so sort the small local (byte,child) list before recursing;
- * Node48/256 are already byte-indexed so iterating byte 0..255 is free
- * and already sorted (art_key_byte is MSB-first, so trie order == numeric
- * ascending key order). `out_vals` is optional (NULL skips writing
- * values entirely, for callers that only need the sorted sym list). */
+/* Node4/16 store children in append order, not byte order, so sort the
+ * small local (byte,child) list before recursing; Node48/256 are already
+ * byte-indexed, so iterating byte 0..255 is already sorted. `out_vals`
+ * is optional (NULL skips writing values). */
 static void art_collect_sorted(const LlArtSymNode *n, uint32_t *out_syms, Value *out_vals, int64_t *out_n) {
     if (!n) return;
     const ArtHdr *h = (const ArtHdr *)n;

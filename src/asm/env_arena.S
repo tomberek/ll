@@ -1,5 +1,5 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-// M118: dedicated, bounded arena for Env objects only, enabling Env.up to
+// Dedicated, bounded arena for Env objects only, enabling Env.up to
 // be stored as a 32-bit offset instead of a 64-bit pointer (env.h).
 // Deliberately SEPARATE from the general, unbounded ll_arena
 // (arena.S): a compressed offset is only valid if every object it can
@@ -15,17 +15,10 @@
 // every OTHER heap kind that goes through ll_arena_alloc), so it
 // never needs Value.raw's 3 free low tag bits -- the only thing that
 // ever needs ANY free low bits on an Env address is env.h's own
-// LL_ENV_WITH_TAG (one bit). Rounding to 4 instead of 8 is what lets
-// Env.up's compression actually shrink Env's total allocated size
-// instead of being clawed straight back by rounding, the same way a
-// naive reuse of the general arena's own round_up_8 would (see
-// docs/architecture.md's M118 section for the exact arithmetic -- this
-// is the fix for the blind spot M117's first pass missed).
+// LL_ENV_WITH_TAG (one bit).
 //
 // Lazily self-initializes on first call (checked via the bump cursor
-// being exactly 0, which it only ever is before the one-time mmap) so
-// no caller anywhere -- production or test -- needs to remember to
-// call an explicit init function before the first Env allocation.
+// being exactly 0, which it only ever is before the one-time mmap).
 #include "ll/arena.h"
 #include "ll/env.h"
 
@@ -47,13 +40,9 @@ ll_env_arena_base:
     .size ll_env_arena_base, 8
 
     .align 8
-    // M8 perf work: exported (.globl) so both op_dispatch.h's ll_env_alloc
-    // and closure_helpers.c's ll_env_alloc_fast can inline this allocator's
-    // bump-pointer fast path directly from C (same precedent as arena.h's
-    // LlArenaState.cur/end, which ll_arena_alloc already reads this way)
-    // -- previously file-local, since only ll_env_arena_alloc itself
-    // (this file) needed them. Purely additive; asnix's own asm callers
-    // are unaffected.
+    // Exported (.globl) so op_dispatch.h's ll_env_alloc and
+    // closure_helpers.c's ll_env_alloc_fast can inline this allocator's
+    // bump-pointer fast path directly from C.
     .globl ll_env_arena_cur
     .type ll_env_arena_cur, @object
 ll_env_arena_cur:
@@ -126,25 +115,18 @@ ll_env_arena_do_init:                // internal, called exactly once (from ll_e
     jl .Lenv_arena_abort_mmap
 
     // ll_huge_pages_available() -- gate the hint below on this, same
-    // reason and same helper as arena.S's own general-arena fix (see
-    // that file's own comment): avoid ever hinting MADV_HUGEPAGE when
-    // the kernel has no free 2 MiB+ block, which under defrag=madvise
-    // would otherwise be assembled by synchronous compaction at fault
-    // time. rax (the mmap result) must survive the call.
+    // as arena.S's general-arena fix. rax (the mmap result) must
+    // survive the call.
     pushq %rax
     call ll_huge_pages_available
     popq %rax
     testl %eax, %eax
     jz .Lno_env_hugepage_hint
 
-    // madvise(base, LL_ENV_ARENA_SIZE, MADV_HUGEPAGE) -- same hint and
-    // same rationale as arena.S's own general-arena fix: this kernel's
-    // transparent_hugepage/enabled is "madvise", not "always", so this
-    // 1 GiB NORESERVE reservation -- backing EVERY Env object this
-    // evaluator ever allocates -- would otherwise fault in one 4 KiB
-    // page at a time as the bump cursor advances, instead of one 2 MiB
-    // page per 512 Envs. Return value ignored (hint only); rax (the
-    // mmap result, needed right below) must survive the syscall.
+    // madvise(base, LL_ENV_ARENA_SIZE, MADV_HUGEPAGE) -- same hint as
+    // arena.S's general-arena fix. Return value ignored (hint only);
+    // rax (the mmap result, needed right below) must survive the
+    // syscall.
     pushq %rax
     movq %rax, %rdi
     movq $LL_ENV_ARENA_SIZE, %rsi

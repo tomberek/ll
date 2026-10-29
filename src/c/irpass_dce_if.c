@@ -51,7 +51,7 @@
 static int op_is_jump(int op_id) {
     return op_id == OP_IF || op_id == OP_JMP || op_id == OP_WITH_TRY || op_id == OP_SELECT_OR ||
            op_id == OP_SELECT_DYNAMIC_OR || op_id == OP_EQ_IF || op_id == OP_NEQ_IF || op_id == OP_LT_IF ||
-           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF; /* M162 */
+           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF;
 }
 
 /* Mirrors ll_irpass_remove's own internal safety scan (irpass.c) so we
@@ -71,9 +71,7 @@ static int range_has_incoming_jump(IrOp *ops, size_t len, size_t start, size_t c
 static int dce_if(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size_t *pool_cap) {
     (void)pool;
     (void)pool_len;
-    (void)pool_cap; /* M118 strconcat-fold extension widened LlIrPass's signature for every
-                      * pass uniformly (see irpass.h) -- this pass only removes dead-branch ops,
-                      * never touches the constant pool. */
+    (void)pool_cap;
     size_t n = *len;
     for (size_t i = 0; i + 1 < n; i++) {
         int id = (int)(intptr_t)ops[i].handler;
@@ -81,18 +79,11 @@ static int dce_if(IrOp *ops, size_t *len, int64_t **pool, size_t *pool_len, size
         if ((int)(intptr_t)ops[i + 1].handler != OP_IF) continue;
 
         if (id == OP_PUSH_TRUE) {
-            /* Remove just the [PUSH_TRUE, OP_IF] pair -- execution then
-             * falls straight through into the existing "then" branch. */
             if (range_has_incoming_jump(ops, n, i, 2)) continue;
             ll_irpass_remove(ops, len, i, 2);
             return 1;
         }
 
-        /* OP_PUSH_FALSE: resolve OP_IF's own else-target (self-relative to
-         * the IF op's own index, i + 1) and remove
-         * [i, else_start) -- PUSH_FALSE, OP_IF, the whole "then" branch,
-         * and its trailing OP_JMP -- all in one shot, so execution falls
-         * straight into what's left: the "else" branch. */
         int64_t else_start = (int64_t)(i + 1) + ops[i + 1].a / LL_IROP_SIZE;
         if (else_start <= (int64_t)(i + 1)) continue; /* malformed/degenerate -- never emitted by compiler.c, skip defensively */
         size_t count = (size_t)else_start - i;

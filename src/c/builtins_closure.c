@@ -1,47 +1,19 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
 /*
- * builtins.genericClosure { startSet; operator; } -- arity 1 (a single
- * attrset argument, exactly like real Nix -- no currying needed).
+ * builtins.genericClosure { startSet; operator; } -- arity 1.
  *
- * Semantics verified directly against real `nix-instantiate --eval`
- * (2.35.2) before writing any code, per this project's standing "verify
- * against the real oracle before trusting it" discipline -- the exact
- * scenarios the task flagged as uncertain:
- *
- *   - Processing order is breadth-first (a FIFO work queue), not
- *     depth-first: `genericClosure { startSet=[{key=1;}];
- *     operator = item: if item.key==1 then [{key=2;}{key=3;}] else
- *     if item.key==2 then [{key=4;}] else if item.key==3 then [{key=5;}]
- *     else []; }` => `[ {key=1;} {key=2;} {key=3;} {key=4;} {key=5;} ]`,
- *     not `[1,2,4,3,5]` (which a DFS/recursive-first-child-first strategy
- *     would produce).
- *   - Dedup is by `key`, checked at the moment an item is popped off the
- *     work queue (not when it's pushed): an `operator` that returns an
- *     item whose key is already in `startSet` (or already produced by an
- *     earlier `operator` call) is silently dropped, never re-added to the
- *     output and never re-visited by `operator` a second time. Confirmed:
- *     `startSet = [{key=1;}{key=1;}]` with a no-op operator => only one
- *     `{key=1;}` in the output; `operator = item: [{key=1;}{key=3;}]`
- *     from `startSet=[{key=1;}{key=2;}]` adds `{key=3;}` but not a second
- *     `{key=1;}`.
- *   - Non-`key` fields on each item are preserved verbatim in the output
- *     (an item is its own whole self, not just its key).
- *   - Real Nix's dedup set uses `builtins.lessThan`-style ordering
- *     (`CompareValues`, via a `std::map`) and genuinely errors if two
- *     encountered keys aren't comparable (e.g. mixing int and string
- *     keys: "cannot compare a string with an integer") -- confirmed this
- *     throws even when the two keys are *otherwise equal*, e.g. two
- *     `{key = true;}` items throw "cannot compare a Boolean with a
- *     Boolean; values of that type are incomparable", because the
- *     dedup set's ordering comparator is consulted on every insertion
- *     attempt regardless of value equality. This implementation still
- *     dedups by *equality* (ll_bshared_value_eq), but now gates every
- *     such comparison on `value_key_comparable` below first (same
- *     int/string/list scope `ll_bshared_value_lt`, M57a, supports --
- *     bool/null/attrs/function keys, or a mismatched pair like int-vs-
- *     string, are rejected) so a key-comparability violation is still
- *     caught and still fatal, just via an equality-based dedup loop
- *     instead of a real ordered map.
+ * Processing order is breadth-first (a FIFO work queue), not depth-first.
+ * Dedup is by `key`, checked at the moment an item is popped off the work
+ * queue (not when it's pushed): an `operator` that returns an item whose
+ * key is already in `startSet` (or already produced by an earlier
+ * `operator` call) is silently dropped, never re-added to the output and
+ * never re-visited by `operator` a second time. Non-`key` fields on each
+ * item are preserved verbatim in the output. Real Nix's dedup set also
+ * errors if two encountered keys aren't comparable (e.g. mixing int and
+ * string keys, or two booleans) even when otherwise equal -- this
+ * implementation dedups by *equality* (ll_bshared_value_eq), but gates
+ * every such comparison on `value_key_comparable` first so a
+ * key-comparability violation is still caught and still fatal.
  */
 #include "builtins_closure.h"
 
@@ -68,63 +40,16 @@ static void vv_push(ValueVec *v, Value x) {
     v->data[v->len++] = x;
 }
 
-/* Same type scope as ll_bshared_value_lt (M57a): int-vs-int,
- * string-vs-string, list-vs-list (checked shallowly here -- a `key`
- * made of lists-of-incomparable-elements will still get caught, just
- * one level later, by this same check on the next insertion attempt
- * that actually walks into the mismatched elements via value_lt itself
- * were it ever invoked; for the dedup-by-equality loop below, a shallow
- * tag check is enough to reject the two kinds of input the two
- * conformance cases exercise: an incompatible type mix, and a type
- * that's never comparable at all, e.g. an attrset).
- *
- * perf (plasma-system-eval cluster): a fresh profile on a full NixOS
- * module-system eval (nixos/lib/eval-config.nix with Plasma 6 enabled)
- * found nixpkgs's own `lib.modules.filterModules` calling this builtin
- * with `startSet` = the full collected module list and `operator =
- * attrs: attrs.modules` -- real measured shape on that benchmark:
- * ONE call with startSet of 2,116 items popping ~3,967 total work-queue
- * items, almost all of them DISTINCT keys (module file paths), which is
- * the worst case for the old O(n) linear `seen_keys` scan below: ~n^2/2
- * comparisons with almost no early-exit hits, measured directly via
- * callgrind at ~7.96 million ll_bshared_value_eq calls from this one
- * call site alone (confirmed by temporarily instrumenting with an
- * fprintf before writing the fix). Replaced the O(n) linear scan with
- * an open-addressing hash set (closure_key_hash below) keyed on the
- * SAME three type classes value_key_comparable already recognizes
- * (int/non-path-string/list), giving O(1)-average dedup instead of
- * O(n) per item. The comparability-error contract is preserved exactly
- * (see key_class/KeyClass below) without needing a pairwise scan: the
- * ORIGINAL loop's `value_key_comparable(seen_keys.data[i], key)` check
- * only ever depends on the two values' own type classes, never on the
- * VALUE of any other previously-seen key, so establishing a single
- * "class" from the first-ever key and checking every subsequent key's
- * class against it reproduces the identical fire/no-fire decision on
- * the identical iteration as the old pairwise scan (by induction: every
- * previously-accepted key already shares the established class, or the
- * loop would have already thrown before accepting it). */
 typedef enum { KC_INT, KC_STR, KC_LIST, KC_FLOAT, KC_OTHER } KeyClass;
 
-/* M-closure-hash-float-fix: value_key_comparable's ORIGINAL check (now
- * removed above) classified a Float -- tagged LL_TAG_PTR same as a
- * string, distinguished only by an internal marker (see value_util.h's
- * own ll_value_is_float comment) -- into the SAME "comparable" bucket
- * as a real string, simply because it never excluded `ll_value_is_
- * float` the way it excluded `ll_value_is_path`. That was harmless in
- * the original code because the actual EQUALITY check was always a
- * separate, correct call to ll_bshared_value_eq (which checks
- * is_float first and does a real numeric double compare). This hash-set
- * replacement would NOT be harmless if it inherited the same
- * misclassification: closure_key_hash's STR case hashes raw PTR bytes,
- * and two numerically-equal doubles are not always byte-identical (0.0
- * and -0.0 differ only in the sign bit) -- hashing them as opaque bytes
- * would put them in different buckets and the hash set would never even
- * call ll_bshared_value_eq to notice they're equal, silently failing
- * to dedupe a case the original O(n) scan handled correctly. Giving
- * Float its own class with a hash that normalizes -0.0 to +0.0 (see
- * closure_key_hash below) closes that gap -- same observable dedup
- * behavior as the original scan for every key type, not just the ones
- * exercised by this session's own test corpus. */
+/* Float is tagged LL_TAG_PTR like a string but must get its own
+ * KeyClass: closure_key_hash's STR case hashes raw PTR bytes, and two
+ * numerically-equal doubles are not always byte-identical (0.0 and -0.0
+ * differ only in the sign bit) -- hashing them as opaque bytes would put
+ * them in different buckets and the hash set would never call
+ * ll_bshared_value_eq to notice they're equal, silently failing to
+ * dedupe. Giving Float its own class with a hash that normalizes -0.0 to
+ * +0.0 (below) closes that gap. */
 static KeyClass key_class(Value v) {
     int t = ll_tag_of(v);
     if (t == LL_TAG_INT) return KC_INT;
@@ -134,30 +59,23 @@ static KeyClass key_class(Value v) {
     return KC_OTHER;
 }
 
-/* classes_comparable mirrors value_key_comparable's original allowed
- * pairs exactly (both int, both non-path non-float string, both list,
- * both float) -- KC_OTHER never matches anything, including itself
- * (matches value_key_comparable's own (IMM,IMM)/(ATTRS,ATTRS)/etc.
- * "never comparable" behavior, which is why two `{key = true;}` items
- * still throw -- see the long comment above prim_genericClosure). Note
- * KC_INT and KC_FLOAT are NOT mutually comparable here even though
- * ll_bshared_value_eq itself allows numeric int/float equality --
- * this matches value_key_comparable's own original behavior exactly
- * (its first check requires BOTH sides tagged LL_TAG_INT, so an
- * int key mixed with a float key already threw "cannot compare" before
- * this fix existed; not something this fix changes either way). */
+/* Mirrors value_key_comparable's allowed pairs: both int, both string,
+ * both list, both float -- KC_OTHER never matches anything, including
+ * itself (so two `{key = true;}` items still throw). Note KC_INT and
+ * KC_FLOAT are NOT mutually comparable here even though
+ * ll_bshared_value_eq itself allows numeric int/float equality -- an int
+ * key mixed with a float key must still throw "cannot compare". */
 static int classes_comparable(KeyClass a, KeyClass b) {
     return (a == KC_INT && b == KC_INT) || (a == KC_STR && b == KC_STR) || (a == KC_LIST && b == KC_LIST) ||
            (a == KC_FLOAT && b == KC_FLOAT);
 }
 
 /* FNV-1a-style mix, folded recursively over a LIST key's elements (each
- * forced first, exactly like ll_bshared_value_eq's own LIST case
- * forces each element via its recursive call -- so two keys that are
- * equal per ll_bshared_value_eq always hash equal here too, which is
- * the only correctness requirement a hash-set dedup has). Only ever
- * called on a key whose class is KC_INT/KC_STR/KC_LIST/KC_FLOAT
- * (KC_OTHER keys are never hashed -- see prim_genericClosure below). */
+ * forced first). Two keys that are equal per ll_bshared_value_eq must
+ * always hash equal here too -- the only correctness requirement a
+ * hash-set dedup has. Only ever called on a key whose class is
+ * KC_INT/KC_STR/KC_LIST/KC_FLOAT (KC_OTHER keys are never hashed -- see
+ * prim_genericClosure below). */
 static uint64_t closure_key_hash(Value v) {
     uint64_t h = 1469598103934665603ULL;
     int t = ll_tag_of(v);
@@ -293,8 +211,6 @@ static Value prim_genericClosure(const Value *args, int64_t argc) {
 
     size_t head = 0;
     while (head < queue.len) {
-        /* Lazy list elements (M23's `map`, etc.) -- force before checking
-         * the tag, same class of fix M23's own concatLists needed. */
         Value item = ll_force_for_print(queue.data[head++]);
         if (ll_tag_of(item) != LL_TAG_ATTRS) {
             ll_bshared_fatal("genericClosure", "a work-set element is not an attrset");

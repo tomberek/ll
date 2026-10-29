@@ -10,11 +10,7 @@
  * (%r14, the explicit call-frame stack
  * OP_CALL/OP_VAR_REF's and OP_SELECT's thunk-force path push a RetFrame
  * onto). Both buffers are single fixed-size bump-arena allocations (see
- * src/asm/dispatch.S and src/asm/force.S) with no dynamic growth -- before
- * this header existed, NOTHING checked whether a push still fit, so
- * exceeding either buffer silently corrupted whatever the shared arena
- * happened to allocate next instead of failing loudly (see
- * docs/architecture.md's "Known bugs" list).
+ * src/asm/dispatch.S and src/asm/force.S) with no dynamic growth.
  *
  * `ll_valstack_limit`/`ll_retsp_limit` (defined in
  * src/asm/stacklimits.S) hold "one past the last valid byte" of whichever

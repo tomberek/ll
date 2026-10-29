@@ -1,11 +1,8 @@
-/* M10: AOT threaded dispatch -- the handler signature and VM-state
- * shape every op handler (src/llvm/ops) and the dispatch-table
- * linker (dispatch_table.c) share. Mirrors asnix's own dispatch.S
- * register convention (%rsi=IP, %rdi=ENV, %r12=VALSTACK, %r13=POOL,
- * %r14=RETSP) as five plain C arguments instead -- see
- * ~/.claude/plans/soft-wishing-engelbart.md's M10 section for the full
- * design rationale (musttail-guaranteed tail calls in place of asm's
- * `jmp *%rax`). */
+/* AOT threaded dispatch -- the handler signature and VM-state shape
+ * every op handler (src/llvm/ops) and the dispatch-table linker
+ * (dispatch_table.c) share. Mirrors asnix's own dispatch.S register
+ * convention (%rsi=IP, %rdi=ENV, %r12=VALSTACK, %r13=POOL, %r14=RETSP)
+ * as five plain C arguments instead. */
 #ifndef LL_OP_DISPATCH_H
 #define LL_OP_DISPATCH_H
 
@@ -77,17 +74,17 @@ _Static_assert(offsetof(PrimOp, noforce) == LL_PRIMOP_OFF_NOFORCE, "PrimOp.nofor
 _Static_assert(sizeof(PrimOp) == LL_PRIMOP_SIZE, "PrimOp size");
 
 /* Every op handler is declared and defined with this attribute --
- * `preserve_none`, first available in clang 19 (see flake.nix's own
- * comment on why), tells the compiler these five arguments are the
- * ENTIRE live state threaded through dispatch; nothing else needs to
- * survive a hop. Concretely, this lets the compiler assign vs/pool/rs
- * to registers that are callee-saved under the PLAIN C functions this
- * code calls out to (ll_arena_alloc, ll_force_for_print, ...),
- * so a real (non-tail) call mid-handler no longer needs to spill and
- * reload all five -- the same property asnix's own hand-written asm
- * gets by manually pinning its five dispatch registers across the
- * ABI's callee-saved set. A hard requirement for musttail regardless
- * (the callee's type, attribute included, must match the caller's). */
+ * `preserve_none`, first available in clang 19, tells the compiler
+ * these five arguments are the ENTIRE live state threaded through
+ * dispatch; nothing else needs to survive a hop. Concretely, this lets
+ * the compiler assign vs/pool/rs to registers that are callee-saved
+ * under the PLAIN C functions this code calls out to (ll_arena_alloc,
+ * ll_force_for_print, ...), so a real (non-tail) call mid-handler no
+ * longer needs to spill and reload all five -- the same property
+ * asnix's own hand-written asm gets by manually pinning its five
+ * dispatch registers across the ABI's callee-saved set. A hard
+ * requirement for musttail regardless (the callee's type, attribute
+ * included, must match the caller's). */
 #define LL_OP_ATTR __attribute__((preserve_none))
 
 typedef LL_OP_ATTR Value (*LLOpFn)(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs);
@@ -126,22 +123,16 @@ static inline void ll_check_retsp(RetFrame *rs) {
 }
 
 /* Inlined fast path for arena.S's own bump allocator (same rounding,
- * same cap check, same field layout -- see arena.h's own comment on
- * why the C struct and the asm share field offsets). Every op handler
- * that allocates (OP_LAMBDA, OP_MK_THUNK, OP_MK_ATTRS, ...) is one of
- * this file's five-argument LLOpFn handlers, and the SysV ABI puts all
- * five of ip/env/vs/pool/rs in CALLER-saved registers (rdi/rsi/rdx/
- * rcx/r8) -- unlike asnix's own hand-written asm, which deliberately
- * pins vs/pool/rs in CALLEE-saved registers (%r12/%r13/%r14) so a real
- * `call ll_arena_alloc` only has to spill the two caller-saved ones
- * it actually uses (ip, env). A plain `call ll_arena_alloc` from a C
- * handler has no such luck: the compiler must spill and reload all
- * five around the call (confirmed via `objdump -d`: 7 register pushes
- * in ll_op_mk_thunk's compiled code vs 2 in ll_op_mk_thunk's hand-
- * written asm). Inlining the bump-pointer fast path here removes the
- * call (and thus the spills) from the overwhelmingly common case;
- * growth/cap-exceeded still falls back to the real, out-of-line
- * ll_arena_alloc, unchanged. */
+ * same cap check, same field layout as the real, out-of-line
+ * ll_arena_alloc extern, declared in include/ll/arena.h). Deliberately
+ * a SEPARATE, differently-named function -- NOT a drop-in replacement
+ * for ll_arena_alloc, and must never be given that same name: a prior
+ * attempt at that caused infinite recursion (the "fast" copy ended up
+ * calling itself instead of the real slow path). This build has no
+ * LTO, so a cross-TU call to the real ll_arena_alloc never inlines on
+ * its own; op handlers that allocate on the hot path should call this
+ * inline copy instead, which itself falls back to the real
+ * ll_arena_alloc, unchanged, when the allocation doesn't fit. */
 static inline void *ll_arena_alloc_fast(uint64_t n) {
     uint64_t n8 = (n + 7) & ~(uint64_t)7;
     if (ll_arena.max_memory != 0 && ll_arena.total_allocated + n8 > ll_arena.max_memory) {
@@ -171,23 +162,23 @@ extern uint64_t ll_stats_env;
 extern uint64_t ll_stats_env_elements;
 
 /* Inlined fast path for env_arena.S's own bump allocator -- the
- * SEPARATE, dedicated, bounded Env arena (env_arena.S/env.h's own
- * comment on why Env gets its own arena instead of sharing the general
- * ll_arena ll_arena_alloc above wraps), mirroring ll_env_alloc's
- * (env.S) logic exactly: size = LL_ENV_OFF_VALUES + nslots*8, rounded
- * up to 4 (NOT 8 -- Env is never a tagged Value, env.h/env_arena.S's own
- * comments), bump-allocate from ll_env_arena_cur/_end, bump
- * ll_stats_env/_elements, then compress (NULL-safe) and write `up`
- * into the new Env's LL_ENV_OFF_UP field. OP_FRAME_ALLOC (op_frame.c),
- * OP_CALL's closure branch (op_call.c), and OP_WITH (op_with.c) all call
- * this as a real, non-tail call mid-handler -- same register-spill
- * problem ll_arena_alloc above fixes for the general arena (confirmed
- * via `objdump -d --disassemble=ll_op_frame_alloc`). The slow path
- * (arena not yet lazily initialized -- cur==0 -- or this allocation
- * doesn't fit before `end`) falls back to the real, unchanged
- * ll_env_alloc, so the one-time lazy init (mmap'ing the arena) and
- * the hard LL_ENV_ARENA_SIZE cap-exceeded abort stay centralized
- * there exactly as before. */
+ * SEPARATE, dedicated, bounded Env arena env.h/env_arena.S describe.
+ * Mirrors the real, out-of-line ll_env_alloc extern's (declared in
+ * include/ll/env.h) logic exactly: size = LL_ENV_OFF_VALUES +
+ * nslots*8, rounded up to 4 (NOT 8 -- Env is never a tagged Value),
+ * bump-allocate from ll_env_arena_cur/_end, bump ll_stats_env/
+ * _elements, then compress (NULL-safe) and write `up` into the new
+ * Env's LL_ENV_OFF_UP field. Deliberately a SEPARATE, differently-
+ * named function from ll_env_alloc, for the same reason as
+ * ll_arena_alloc_fast above (no LTO means a cross-TU call never
+ * inlines on its own, and giving the fast path the real function's
+ * name causes infinite recursion) -- OP_FRAME_ALLOC, OP_CALL's
+ * closure branch, and OP_WITH all call this inline copy on the hot
+ * path. The slow path (arena not yet lazily initialized -- cur==0 --
+ * or this allocation doesn't fit before `end`) falls back to the
+ * real, unchanged ll_env_alloc, so the one-time lazy init (mmap'ing
+ * the arena) and the hard LL_ENV_ARENA_SIZE cap-exceeded abort stay
+ * centralized there exactly as before. */
 static inline Env *ll_env_alloc_fast(Env *up, int64_t nslots) {
     uint8_t *cur = ll_env_arena_cur;
     if (cur == NULL) {
@@ -207,20 +198,17 @@ static inline Env *ll_env_alloc_fast(Env *up, int64_t nslots) {
     return e;
 }
 
-/* Inlined fast path for env.S's own ll_env_lookup (De Bruijn
- * depth/slot walk) -- env.S's OWN header comment says the hot
- * dispatch path is supposed to "inline the same logic directly...
- * rather than paying a `call` per use" (same precedent as this
- * file's own ll_env_alloc above, and matching asnix's own
- * op_var_ref.S, which inlines this exact walk and never calls
- * ll_env_lookup at all) -- op_var_ref.c's two handlers previously
- * called the real, non-tail ll_env_lookup on every variable
- * reference instead, missing that precedent. Decompress `up` (base +
- * offset), then mask off LL_ENV_WITH_TAG from the DECOMPRESSED
- * POINTER (not from `up` itself) -- same order ll_env_lookup/
- * op_var_ref.S both use, needed so a hop that happens to pass through
- * a with-frame on its way to an outer lexical binding still lands on
- * the right address (env.h's own LL_ENV_WITH_TAG comment). */
+/* Inlined fast path for the real, out-of-line ll_env_lookup extern
+ * (declared in include/ll/env.h; De Bruijn depth/slot walk) --
+ * deliberately a SEPARATE, differently-named function, for the same
+ * no-LTO / no-self-naming reason as ll_arena_alloc_fast and
+ * ll_env_alloc_fast above. Callers on the hot dispatch path (e.g.
+ * op_var_ref.c's handlers) should call this inline copy directly
+ * rather than the real ll_env_lookup. Decompress `up` (base +
+ * offset), THEN mask off LL_ENV_WITH_TAG from the DECOMPRESSED
+ * POINTER (not from `up` itself) -- this order is required so a hop
+ * that happens to pass through a with-frame on its way to an outer
+ * lexical binding still lands on the right address. */
 static inline Value ll_env_lookup_fast(Env *env, int64_t depth, int64_t slot) {
     for (; depth > 0; depth--) {
         uintptr_t decompressed = (uintptr_t)ll_env_arena_base + env->up;

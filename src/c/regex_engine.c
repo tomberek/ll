@@ -1,21 +1,18 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
 /*
- * A small, hand-written POSIX ERE backtracking matcher -- see
- * docs/architecture.md's M68 scope notes for the full story. Short
- * version: `builtins.match`/`builtins.split` (builtins_regex.c) were
- * wired onto glibc's <regex.h>, but real Nix's `primops.cc` uses
- * libstdc++'s `std::regex` (built with `std::regex::extended`), and the
- * two engines disagree on two specific things glibc itself cannot be
- * talked out of:
+ * A small, hand-written POSIX ERE backtracking matcher. `builtins.match`/
+ * `builtins.split` (builtins_regex.c) were wired onto glibc's <regex.h>,
+ * but real Nix's `primops.cc` uses libstdc++'s `std::regex` (built with
+ * `std::regex::extended`), and the two engines disagree on two specific
+ * things glibc itself cannot be talked out of:
  *
  *  - Which capture a repeated/optional subexpression gets when the same
  *    overall match is reachable via more than one decomposition (e.g.
  *    `(a*)*` against "aa": glibc's regexec reports group 1 as "aa",
- *    libstdc++ reports "" -- confirmed directly against both engines,
- *    see M55's scope notes). This is NOT about *whether* a match
- *    exists, or how long it is -- glibc's own leftmost-longest
- *    whole-match-finding is correct and unaffected; only the
- *    subexpression bookkeeping differs.
+ *    libstdc++ reports "" -- confirmed directly against both engines).
+ *    This is NOT about *whether* a match exists, or how long it is --
+ *    glibc's own leftmost-longest whole-match-finding is correct and
+ *    unaffected; only the subexpression bookkeeping differs.
  *  - A handful of POSIX bracket-expression extensions: multi-character
  *    named collating symbols (`[.hyphen.]`), equivalence classes
  *    (`[=a=]`, which needs case-fold semantics glibc's own matching
@@ -60,9 +57,8 @@
  * Virtual Machine Approach" for the general family; this is the
  * simplest member of it, recursive-descent-over-the-AST rather than a
  * compiled bytecode VM, since none of this project's regex inputs are
- * large/adversarial enough to need the latter's guarantees -- see the
- * "performance" paragraph in M68's scope notes for the actual numbers
- * checked). Every AST node's `m()` case calls into its continuation `k`
+ * large/adversarial enough to need the latter's guarantees). Every AST
+ * node's `m()` case calls into its continuation `k`
  * (a tiny linked stack of "what to try matching next", built on the C
  * call stack as ordinary recursion -- no heap allocation in the match
  * path at all) exactly once per candidate way of matching itself, in
@@ -201,9 +197,9 @@ static int collate_lookup(const char *name, int64_t namelen, unsigned char *out)
 }
 
 /* POSIX character class test, case-insensitive on the class name (real
- * Nix/libstdc++ accepts `[:Alpha:]`/`[:ALPHA:]` etc, confirmed directly
- * -- see M68's scope notes), plus the GNU `[:w:]` ("word": alnum or
- * underscore) extension, also confirmed directly against real Nix.
+ * Nix/libstdc++ accepts `[:Alpha:]`/`[:ALPHA:]` etc, confirmed directly),
+ * plus the GNU `[:w:]` ("word": alnum or underscore) extension, also
+ * confirmed directly against real Nix.
  * `*recognized` reports whether `name` was a known class at all
  * (distinct from the per-byte true/false test), so callers can reject
  * truly unknown names (`[:foo:]`) instead of silently matching nothing. */
@@ -235,8 +231,8 @@ static int class_test(const char *name, int64_t namelen, unsigned char ch, int *
  * LOW endpoint -- plain byte or `[.name.]` collating symbol -- is parsed
  * directly in `parse_bracket` below). A named collating symbol
  * (`[.name.]`) is valid as a range's LOW endpoint (`[[.a.]-c]` --
- * confirmed directly against real Nix, see M68's scope notes) but is
- * NEVER valid as its HIGH endpoint, regardless of what the low endpoint
+ * confirmed directly against real Nix) but is NEVER valid as its HIGH
+ * endpoint, regardless of what the low endpoint
  * was: confirmed directly against real Nix/libstdc++, both
  * `[a-[.c.]]` and `[[.a.]-[.c.]]` are rejected ("Invalid end of '[x-x]'
  * range") while `[[.a.]-c]` (collating symbol as LOW, plain byte as
@@ -556,8 +552,8 @@ typedef struct {
      * inputs) come close to tripping this; nix-conformance's separate
      * "long inputs" corpus section does, deliberately, to stress
      * leftmost-longest whole-match-finding -- which glibc's regexec
-     * already handled correctly before this milestone for exactly this
-     * repeated-ambiguous-alternation shape (confirmed: it's only the
+     * already handles correctly for exactly this repeated-ambiguous-
+     * alternation shape (confirmed: it's only the
      * *unambiguous*-repetition-followed-by-something-optional shape,
      * e.g. `(x*)(xy)?`, where glibc and libstdc++'s choice of overall
      * match boundary itself actually differs -- see

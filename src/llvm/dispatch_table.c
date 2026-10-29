@@ -1,14 +1,3 @@
-/* M10: replaces backend_stub.c's no-op ir_link with a real one,
- * mapping each op-id (as emitted by the builder) to the address of
- * this backend's own AOT-compiled C handler (src/llvm/ops/*.c) --
- * the exact same role asnix's own dispatch_table.c plays for its
- * hand-written asm handlers, just pointing at different code.
- *
- * ib_finish() (src/c/irbuild.c, vendored unchanged) already calls
- * ir_link() unconditionally on every IrProgram it ever builds -- the
- * top-level program, every lambda/thunk body, and every curried-
- * native-builtin wrapper -- so this one file is the entire linking
- * story; no other call site needs to change. */
 #include "ops/ops.h"
 
 void *ll_handler_table[OP_COUNT] = {
@@ -89,39 +78,22 @@ void *ll_handler_table[OP_COUNT] = {
     [OP_HALT] = (void *)ll_op_halt,
 };
 
-/* M10 perf: a single forward-pass link + peephole fusion, not a
- * compiler.c change -- compiler.c (vendored, byte-identical to
- * asnix) stays untouched, and nothing it emits knows this fusion
- * exists. A literal list/attrset built entirely from plain integer
- * constants (list_build_large.nix, attrset_build_large.nix) compiles
- * to a long run of bare OP_PUSH_INT with nothing interleaved,
- * because `ib_pool_add` allocates pool slots in strict call order:
- * run detection just needs "N consecutive OP_PUSH_INT records whose
- * pool indices are consecutive integers," checked while `handler`
- * still holds the small op-id for the not-yet-visited lookahead
- * records -- safe because this loop only ever writes ops[i] (and,
- * for a fused run, the already-looked-ahead ops[i+1..j-1]), never
- * reads ahead into anything this same pass has already linked.
- * Runs of 4 or more get the first record linked straight to
- * ll_op_push_int_run (with `a` repurposed to hold the run length);
- * every other record in the run still gets linked to the ordinary
- * ll_op_push_int so it stays individually valid, just unreached in
- * the ordinary control flow (the fused handler's own ip += count
- * skips straight over them). This used to be two full passes over
- * `ops` (a separate fuse_push_int_runs pre-pass, then this linking
- * loop); merging them into one removes a full redundant scan of
- * every op in every compiled function body. */
+/* A single forward-pass link + peephole fusion: a run of N consecutive
+ * OP_PUSH_INT records whose pool indices are consecutive integers gets
+ * the first record linked to ll_op_push_int_run (with `a` repurposed to
+ * hold the run length); every other record in the run still gets linked
+ * to the ordinary ll_op_push_int so it stays individually valid, just
+ * unreached in the ordinary control flow (the fused handler's own
+ * ip += count skips straight over them). Checking this while `handler`
+ * still holds the small op-id for the not-yet-visited lookahead records
+ * is safe because this loop only ever writes ops[i] (and, for a fused
+ * run, the already-looked-ahead ops[i+1..j-1]), never reads ahead into
+ * anything this same pass has already linked. */
 #define LL_PUSH_INT_RUN_MIN 4
 
-/* No bounds check, no null-handler fatal: matches asnix's own
- * ir_link exactly (src/c/dispatch_table.c there), which trusts its
- * compiler to never emit an op id outside the handler table -- a
- * trust this backend has now earned the same way (M6/M7: every op
- * the compiler can emit has an AOT handler, confirmed against the
- * full real-nixpkgs correctness sweep). This dropped the two checks
- * that used to run on every op of every compiled function body,
- * closing roughly a third of ir_link's instruction-count gap to
- * asnix's own version -- see M8-findings.md's own section on this. */
+/* No bounds check, no null-handler fatal: matches asnix's own ir_link
+ * exactly, which trusts its compiler to never emit an op id outside
+ * the handler table -- a trust this backend has earned the same way. */
 void ir_link(IrOp *ops, size_t n) {
     for (size_t i = 0; i < n;) {
         intptr_t op_id = (intptr_t)ops[i].handler;

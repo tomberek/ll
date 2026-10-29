@@ -7,40 +7,24 @@
 #include "ll/value.h"
 
 /*
- * M76: real Nix string context -- an invisible dependency-provenance set
- * attached to a string *value*, surviving concatenation/coercion. Found
- * load-bearing (not just a nice-to-have introspection feature) chasing
- * d.nix past M74/M75: nixpkgs sets `builder = stdenvShell;`, which
- * traces back to `shell = "${stage0.bash}/bin/bash";` -- a STRING
- * INTERPOLATION of a derivation reference, concatenated with a literal
- * suffix, evaluated to a plain opaque string long before `derivation
- * {...}`'s primop ever sees it. M74's structural collector
- * (ll_collect_input_refs, derivation.c) walks an already-forced
- * Value looking for a bare derivation attrset/list/Path -- it is blind
- * to this by construction, since once a reference becomes a STRING via
- * interpolation, there's no structure left to walk. This is the same
- * feature M61 (and implicitly M45/M54/M60) already declined once, for
- * being disproportionate to its own user-facing payoff
- * (getContext/hasContext/addDrvOutputDependencies) -- revealed here to
- * also be load-bearing for hash parity, not just introspection.
+ * Real Nix string context -- an invisible dependency-provenance set
+ * attached to a string *value*, surviving concatenation/coercion. This
+ * is load-bearing for hash parity with real Nix, not just an
+ * introspection nicety: a derivation reference can reach a plain opaque
+ * string via interpolation (e.g. `shell = "${stage0.bash}/bin/bash";`)
+ * long before any structural collector that walks a derivation attrset/
+ * list/Path ever sees it -- once a reference becomes a STRING via
+ * interpolation, there's no structure left to walk, so the dependency
+ * has to be tracked out-of-band instead.
  *
- * Key simplification vs. that earlier, declined scope: that estimate
- * (~101 call sites, a new tagged Value kind touching the asm layer)
- * assumed context would be baked into the STRING HEAP LAYOUT itself
- * (like Path/Float's marker-byte trick, include/ll/heap.h). Instead,
- * this attaches context via a SIDE TABLE keyed by the string Value's
- * own arena pointer (a linear-scan array, same convention as
- * eval_file.c's import cache / derivation.c's masked-hash cache) --
- * ordinary string reads (every asm op: equality, printing, hashing,
- * OP_STR_CONCAT's own byte-copying) stay COMPLETELY untouched, since
- * they never need to know a context exists. Only the specific C-level
- * functions that *construct* a new string from existing string/attrs/
- * list inputs need to query-and-propagate.
- *
- * Reuses exactly M74's own BuiltRef/InputRefSet vocabulary (dedup-on-
- * insert growable arrays) -- this type replaces that derivation.c-local
- * struct, moved here since context needs to be readable from
- * value_util.c, builtins_m54.c, AND derivation.c.
+ * Context is attached via a SIDE TABLE keyed by the string Value's own
+ * arena pointer, NOT baked into the string heap layout (unlike Path/
+ * Float's marker-byte trick, include/ll/heap.h): ordinary string reads
+ * (every asm op: equality, printing, hashing, OP_STR_CONCAT's own
+ * byte-copying) stay COMPLETELY untouched, since they never need to
+ * know a context exists. Only the specific C-level functions that
+ * *construct* a new string from existing string/attrs/list inputs need
+ * to query-and-propagate.
  */
 
 typedef struct {
@@ -51,19 +35,17 @@ typedef struct {
 typedef struct {
     LlCtxBuiltRef *drvs;
     size_t ndrvs, drvs_cap;
-    /* perf: open-addressing dedup indexes for ll_ctx_add_built/
-     * ll_ctx_add_opaque/ll_ctx_add_deep (string_context.c) --
-     * parallel to drvs/srcs/deep below. Mirrors derivation.c's
-     * InputRefSet (drvs_index/srcs_index, same file's dcc_hash_str) --
-     * see string_context.c for why a per-add linear strcmp scan here
-     * was a measured O(n^2) anti-pattern. */
+    /* Open-addressing dedup indexes for ll_ctx_add_built/
+     * ll_ctx_add_opaque/ll_ctx_add_deep (string_context.c) -- parallel
+     * to drvs/srcs/deep below, giving O(1) amortized dedup-on-insert
+     * instead of a linear strcmp scan. */
     size_t *drvs_index;
     size_t drvs_index_cap;
     char **srcs;
     size_t nsrcs, srcs_cap;
     size_t *srcs_index;
     size_t srcs_index_cap;
-    /* M80: real Nix's third context-element kind, `NixStringContextElem::
+    /* Real Nix's third context-element kind, `NixStringContextElem::
      * DrvDeep` -- "this string refers to the WHOLE closure of this
      * derivation (all its outputs), not just one named output" -- the
      * kind attached to a derivation's own `.drvPath` string (see
@@ -73,18 +55,12 @@ typedef struct {
      * distinct from `drvs` above (a specific NAMED output, `{ outputs =
      * [...]; }`) and from `srcs` (a plain store-path reference with no
      * derivation relationship at all, `{ path = true; }`). Deliberately
-     * a separate bare `char *` array, not a 3rd field on
-     * LlCtxBuiltRef, since a DrvDeep element has no output name at
-     * all (unlike Built) -- reusing that struct with a NULL/sentinel
-     * output_name would make every existing `ndrvs`-only reader
-     * (derivation.c's ll_collect_input_refs) responsible for skipping
-     * it, which this keeps them oblivious to instead (that file is
-     * deliberately untouched by this milestone -- a DrvDeep-tagged
-     * string used directly as a derivation attribute's VALUE still
-     * collects zero input refs, exactly like before this milestone,
-     * when `.drvPath` carried no context at all; full "deep" closure
-     * dependency propagation is a separate, substantially larger
-     * feature -- see M80's own scope notes in docs/architecture.md). */
+     * a separate bare `char *` array, not a 3rd field on LlCtxBuiltRef,
+     * since a DrvDeep element has no output name at all (unlike Built)
+     * -- reusing that struct with a NULL/sentinel output_name would
+     * make every existing `ndrvs`-only reader (derivation.c's
+     * ll_collect_input_refs) responsible for skipping it, which this
+     * keeps them oblivious to instead. */
     char **deep;
     size_t ndeep, deep_cap;
     size_t *deep_index;
@@ -94,7 +70,7 @@ typedef struct {
 void ll_ctx_init(LlStringContext *ctx);
 void ll_ctx_add_built(LlStringContext *ctx, const char *drv_path, const char *output_name);
 void ll_ctx_add_opaque(LlStringContext *ctx, const char *path);
-/* M80: see LlStringContext's own `deep` field comment just above. */
+/* See LlStringContext's own `deep` field comment just above. */
 void ll_ctx_add_deep(LlStringContext *ctx, const char *drv_path);
 int ll_ctx_is_empty(const LlStringContext *ctx);
 /* dst |= src (deduped) -- a no-op if src is NULL or empty. */

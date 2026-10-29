@@ -641,27 +641,18 @@ static void input_ref_add_src(InputRefSet *s, const char *path) {
  *    drv's own (already-cached, already-flat) closure, so no recursion is
  *    needed at lookup time; each derivation's cache entry is already a
  *    fully expanded flat list by the time it's inserted. */
-/* Perf note (post-M86 profiling pass): `perf record -g` on `./asnix d.nix`
- * (ffmpeg's closure, ~100 derivations) showed 73%+ of ALL cycles in
- * `__strcmp_avx2`, almost entirely called (inlined) from
- * `cache_own_drv_closure` below. The reason: every one of the three
- * structures on this page -- `g_drv_outputs_cache`, `g_drv_closure_cache`,
- * and the per-call `DrvClosureStrSet` scratch set -- was a linear array
- * with an O(n) strcmp-based `find`/dedup-check. The two caches are
- * append-only across the WHOLE run (so lookups against them are O(total
- * derivations built so far)), and `DrvClosureStrSet` is rebuilt from
- * scratch for every single derivation by unioning each direct input's
- * already-flattened closure -- an O(closure_size) dedup-check performed
- * closure_size-ish times, i.e. O(closure_size^2) PER derivation, for
- * every derivation in the build (and real nixpkgs closures run into the
- * hundreds of members once glibc/gcc/stdenv are pulled in). Same
- * anti-pattern this project already fixed once in `string_context.c`
- * (ptr-keyed) and `intersectAttrs2_impl` (builtins_m23.c) -- here fixed
- * the same way: open-addressing hash tables/sets, keyed by the drv_path
- * (or member-path) string's own hash, FxHash-style mix matching
- * `symtab.c`'s `hash_bytes`. dcc_hash_str/DCC_EMPTY_SLOT (used by this
- * cache and the two below) now live above MaskedHashCacheEntry further
- * up this file, since that cache needs them too -- see there. */
+/* `g_drv_outputs_cache`/`g_drv_closure_cache` below and the per-call
+ * `DrvClosureStrSet` scratch set are all open-addressing hash tables/sets,
+ * keyed by the drv_path (or member-path) string's own hash (FxHash-style
+ * mix matching `symtab.c`'s `hash_bytes`), not a linear strcmp-scanned
+ * array: the two caches are append-only across the whole run, and
+ * `DrvClosureStrSet` is rebuilt from scratch for every single derivation
+ * by unioning each direct input's already-flattened closure, so a linear
+ * scan here would be quadratic in closure size per derivation -- real
+ * nixpkgs closures run into the hundreds of members once glibc/gcc/stdenv
+ * are pulled in. dcc_hash_str/DCC_EMPTY_SLOT (used by this cache and the
+ * two below) live above MaskedHashCacheEntry further up this file, since
+ * that cache needs them too. */
 
 typedef struct {
     char *drv_path;
@@ -850,27 +841,15 @@ static void drv_closure_cache_insert(const char *drv_path, char **direct_drvs, s
     g_drv_closure_index[slot] = idx;
 }
 
-/* M94 perf (chasing the user's "CPU/memory still ~2x real Nix" report):
- * `perf record -g` on `./asnix d.nix` (ffmpeg's ~100-derivation closure)
- * found `cache_own_drv_closure` (below) responsible for 43%+ of ALL
- * cycles, almost entirely in `drv_closure_strset_add`/`dcc_hash_str` --
- * it used to eagerly union EVERY direct input's own already-flattened
- * closure into a brand new hash set, for EVERY SINGLE derivation built,
- * unconditionally. That's O(direct_inputs x closure_size) hashing work
- * per derivation, repeated for every derivation in the build, even
- * though the ONLY real consumer of a flattened closure is a `DrvDeep`
- * context element actually being expanded (below) -- confirmed by
- * grepping every call site: `drv_closure_cache_find_materialized` is
- * called from exactly one place in this whole file, and `DrvDeep` is a
- * rare feature (M86) only exercised when a derivation's own `drvPath`
- * gets embedded into another derivation via string interpolation.
- * `cache_own_drv_closure` now stores ONLY the direct layer (O(1) per
- * direct input, no hashing); this function does the real flattening,
- * lazily, memoized via `materialized` so a shared sub-closure reached
- * from multiple derivations is still only ever flattened once no matter
- * how many times it's reached -- turning total flattening work from
- * O(derivations_built x average_direct_closure_size) into O(size of
- * whatever closures are actually ever demanded). */
+/* `cache_own_drv_closure` stores ONLY the direct layer (O(1) per direct
+ * input, no hashing) for every derivation built; this function does the
+ * real flattening, lazily, since the only real consumer of a flattened
+ * closure is a `DrvDeep` context element actually being expanded
+ * (below) -- a rare case, only exercised when a derivation's own
+ * `drvPath` gets embedded into another derivation via string
+ * interpolation. Memoized via `materialized` so a shared sub-closure
+ * reached from multiple derivations is still only ever flattened once
+ * no matter how many times it's reached. */
 static void drv_closure_materialize(DrvClosureCacheEntry *e) {
     if (e->materialized) return;
     e->materialized = 1; /* set before recursing -- purely defensive: a derivation
@@ -1214,22 +1193,14 @@ static char *normalize_json_attr(const char *raw_json) {
     return normalized;
 }
 
-/* perf (M143): `ll_prim_derivation`'s own `LL_DRV_MAX_INPUT_DRVS`
- * (1024)-sized scratch arrays below (group_paths/group_outs/group_nouts/
- * group_order/masked_input_drvs/real_input_drvs/masked_hash_hex, plus
- * drv_refs) used to be malloc'd fresh and free'd again at the end of
- * EVERY single call to this function -- one derivation, one round-trip.
- * `group_outs` alone is `1024 * LL_DRV_MAX_OUTPUTS * sizeof(char *)` =
- * 131072 bytes, exactly glibc's default `mmap_threshold` (128 KiB), so
- * that one malloc/free pair went through a real `mmap`/`munmap` syscall
- * round-trip on every derivation forced -- and a full nixpkgs eval
- * forces thousands. Found profiling asnix against iets's mimalloc (see
- * docs/architecture.md's M143 entry): ptmalloc's `_int_malloc`/
- * `unlink_chunk`/`cfree` family cost asnix a disproportionate, diffuse
- * share of cycles relative to iets's allocator, and this call site's
- * same-size-every-time malloc/free churn is one of the few NAMEABLE,
- * targetable pieces of that cost (unlike the generic small-string
- * churn spread across the whole C tree).
+/* `ll_prim_derivation`'s own `LL_DRV_MAX_INPUT_DRVS` (1024)-sized
+ * scratch arrays below (group_paths/group_outs/group_nouts/group_order/
+ * masked_input_drvs/real_input_drvs/masked_hash_hex, plus drv_refs) are
+ * NOT malloc'd fresh and freed again on every call: `group_outs` alone
+ * is `1024 * LL_DRV_MAX_OUTPUTS * sizeof(char *)` = 131072 bytes, over
+ * glibc's default `mmap_threshold` (128 KiB), so a malloc/free pair at
+ * that size would cost a real `mmap`/`munmap` syscall round-trip on
+ * every derivation forced -- and a full nixpkgs eval forces thousands.
  *
  * This function is genuinely recursive -- forcing one derivation's own
  * attribute values (the per-attribute loop above, `ll_force_for_print`)
@@ -1881,16 +1852,15 @@ Value ll_prim_derivation(const Value *args, int64_t argc) {
     }
     qsort(masked_outs, noutputs, sizeof(masked_outs[0]), atermoutput_cmp);
 
-    /* M151: `ll_build_derivation_aterm` runs up to 3 times for this one
+    /* `ll_build_derivation_aterm` runs up to 3 times for this one
      * derivation below (masked/real/cache-hash passes) over the SAME
      * `system`/`builder`/`arg_strs`/`refs.srcs`/`env` arrays each time --
      * only the `outputs`/`input_drvs` sections actually vary between
-     * passes (see this function's own M73/M74 comments above for why all
-     * 3 are needed). A fresh profiling pass found `buf_put_escaped`
-     * (`aterm.c`) re-escaping that unchanged majority of the content from
-     * scratch on every pass -- real, redundant work, not the "unavoidable
-     * per-byte escaping cost" M140 found for the scan itself. `aterm_cache`
-     * memoizes each string's escaped form by POINTER across all 3 calls
+     * passes (see this function's own comments above for why all 3 are
+     * needed), so `buf_put_escaped` (`aterm.c`) re-escaping that
+     * unchanged majority of the content from scratch on every pass would
+     * be real, redundant work. `aterm_cache` memoizes each string's
+     * escaped form by POINTER across all 3 calls
      * below, so only the first pass to see a given `system`/`builder`/
      * arg/env-key/env-value/src/output-name/masked-input-drv-path pointer
      * pays the real cost; every later pass that reuses the SAME pointer

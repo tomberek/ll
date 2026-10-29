@@ -1,14 +1,12 @@
-/* M10: ll_eval's AOT entry point -- replaces jit_driver.c's
- * per-invocation JIT-compile-and-run implementation. Mirrors
- * asnix's own dispatch.S prologue/epilogue: allocate/reuse this
- * depth's VALSTACK+RETSP buffers (ll_eval_scratch_*, already
- * vendored in force_scratch.c), save/restore the enclosing context's
- * limits (so a nested ll_eval, e.g. import, doesn't clobber an
- * outer invocation's bounds checks), and make exactly one real C
- * call into the program's first op handler -- every op after that
- * tail-calls the next one (op_dispatch.h's LL_NEXT) until OP_HALT
- * does a plain `return`, which unwinds straight back to the one real
- * call below. */
+/* ll_eval's AOT entry point. Mirrors asnix's own dispatch.S
+ * prologue/epilogue: allocate/reuse this depth's VALSTACK+RETSP
+ * buffers (ll_eval_scratch_*, force_scratch.c), save/restore the
+ * enclosing context's limits (so a nested ll_eval, e.g. import,
+ * doesn't clobber an outer invocation's bounds checks), and make
+ * exactly one real C call into the program's first op handler --
+ * every op after that tail-calls the next one (op_dispatch.h's
+ * LL_NEXT) until OP_HALT does a plain `return`, which unwinds
+ * straight back to the one real call below. */
 #include "op_dispatch.h"
 #include "ll/force_scratch.h"
 

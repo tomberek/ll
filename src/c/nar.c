@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "derivation.h" /* M80: ll_compute_fixed_output_path, shared with builtins.path's formula */
+#include "derivation.h" /* ll_compute_fixed_output_path, shared with builtins.path's formula */
 #include "hash_shim.h"
 #include "store_path.h"
 
@@ -64,7 +64,7 @@ static int name_cmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* M80: real Nix's `FileType` names (~/nix/src/libutil/file-system.hh's
+/* Real Nix's `FileType` names (~/nix/src/libutil/file-system.hh's
  * `InputAccessor::Type` -> `dumpPath`'s own filter calls), used both for
  * `nar_dump`'s own filter calls below and matching exactly what a Nix-
  * level `filter = path: type: ...` function receives. */
@@ -145,9 +145,8 @@ static void nar_dump(NarBuf *b, const char *path, int depth, LlNarFilter filter,
         for (size_t i = 0; i < nnames; i++) {
             char child[4096];
             snprintf(child, sizeof(child), "%s/%s", path, names[i]);
-            /* M80: `filter` (NULL from `ll_copy_path_to_store`'s own
-             * call below -- behaviorally IDENTICAL to this function's
-             * pre-M80 self, every "entry"/"node" pair still emitted
+            /* `filter` (NULL from `ll_copy_path_to_store`'s own call
+             * below, in which case every "entry"/"node" pair is emitted
              * unconditionally) decides whether this child (and, if it's
              * a directory, its ENTIRE subtree -- simply never recursed
              * into, same as real Nix's own `PathFilter`) appears in the
@@ -200,18 +199,12 @@ typedef struct {
 static CopyCacheEntry *g_copy_cache = NULL;
 static size_t g_copy_cache_count = 0, g_copy_cache_cap = 0;
 
-/* perf: open-addressing dedup index parallel to g_copy_cache, same shape
- * as derivation.c's input_ref_add_src/InputRefSet.srcs_index fix (which
- * itself cites this exact anti-pattern) -- ll_copy_path_to_store is
- * called once per Path-coerced value across a whole eval (M80's
- * `builtins.path`-shaped fixed-output formula plus every bare Path
- * string-context element), so a linear strcmp scan here was O(n) per
- * call / O(n^2) over one eval's full set of distinct copied paths. Local
- * copy of derivation.c's dcc_hash_str (not shared via a header -- this
- * file and derivation.c, and symtab.c's own separate hash_bytes, each
- * keep their own copy of the same small hash already; pure
- * internal bucket-placement hash, never persisted, so each copy is free
- * to diverge). */
+/* Open-addressing dedup index parallel to g_copy_cache, giving O(1)
+ * amortized lookup instead of a linear strcmp scan over every distinct
+ * path copied so far this eval. Local copy of derivation.c's
+ * dcc_hash_str (not shared via a header -- pure internal
+ * bucket-placement hash, never persisted, so each copy is free to
+ * diverge). */
 static uint64_t copy_cache_hash_str(const char *s, size_t len) {
     uint64_t h = 0;
     size_t i = 0;
@@ -300,11 +293,10 @@ void ll_copy_path_to_store(const char *path, char *out, size_t out_cap) {
     free(b.buf);
 
     /* Real Nix's `baseNameOf` -- the last '/'-separated component,
-     * same as every other `name` this project derives from a path
-     * (e.g. M46's fetchurl-shaped fixed-output derivations use the
-     * URL's own last segment). A trailing slash isn't expected here:
-     * every path reaching this function was already canonicalized by
-     * the parser/OP_PATH_CONCAT (M64) before being coerced. */
+     * same as every other `name` this project derives from a path. A
+     * trailing slash isn't expected here: every path reaching this
+     * function was already canonicalized by the parser/OP_PATH_CONCAT
+     * before being coerced. */
     const char *slash = strrchr(path, '/');
     const char *name = slash ? slash + 1 : path;
 
@@ -393,7 +385,6 @@ void ll_copy_path_to_store_ext(const char *path, const char *name, int recursive
                                      effective_name, out, out_cap);
 }
 
-/* M82: see nar.h's own comment. */
 int ll_hash_path_nar_sha256(const char *path, LlNarFilter filter, void *filter_ctx, uint8_t out[32]) {
     NarBuf b = { 0 };
     nb_cstr(&b, "nix-archive-1");

@@ -16,15 +16,13 @@
 #include "value_util.h"
 
 /* ---------------------------------------------------------------------
- * M66: builtins.parseFlakeRef / builtins.flakeRefToString.
+ * builtins.parseFlakeRef / builtins.flakeRefToString.
  *
- * This is pure syntax (no filesystem/network/registry access) -- see
- * docs/architecture.md's M66 scope notes for the full spec derivation and
- * every deliberate scope cut. All intermediate scratch buffers in this
- * file use plain malloc/free (freed before returning), the same pattern
- * builtins_m54.c's toXML uses for its open_memstream buffer -- final
- * results are always copied into a fresh arena-backed Value via
- * ll_make_string_value/ll_bshared_make_attrs before returning.
+ * This is pure syntax (no filesystem/network/registry access). All
+ * intermediate scratch buffers in this file use plain malloc/free (freed
+ * before returning) -- final results are always copied into a fresh
+ * arena-backed Value via ll_make_string_value/ll_bshared_make_attrs
+ * before returning.
  * --------------------------------------------------------------------- */
 
 static void fr_fatal(const char *who, const char *msg) { ll_bshared_fatal(who, msg); }
@@ -76,8 +74,7 @@ static Value sb_finish(SB *sb) {
  * Percent-decoding / percent-encoding. Three distinct "safe" charsets,
  * reverse-engineered by sweeping every printable ASCII byte through real
  * `nix-instantiate --eval -E 'builtins.flakeRefToString { ... }'` and
- * comparing which bytes survive bare vs get escaped (see M66 scope notes
- * for the full table):
+ * comparing which bytes survive bare vs get escaped:
  *   CS_SEGMENT: a single opaque path segment (owner/repo/ref/id) --
  *     unreserved (A-Za-z0-9-._~) plus ':' '@' survive bare; EVERYTHING
  *     else (including '/' and '%') is escaped. This is deliberately
@@ -337,9 +334,7 @@ static char *fr_normalize_rev(const char *s, int64_t len, int64_t *outlen) {
  * ...; narHash=""; }` -> "...?narHash=sha256-AAAA...A%3D" byte for byte.
  * Any other value is passed through as-is (this project does not
  * implement real Nix's full `Hash::parseAny`/SRI validation for narHash
- * -- a deliberate, narrower scope cut, see M66 scope notes: every
- * fixture this project must match only ever gives narHash as either ""
- * or an already-correct SRI string). */
+ * -- a deliberate, narrower scope cut). */
 static const char FR_DUMMY_SHA256_SRI[] = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 static void fr_narhash_or_dummy(const char *s, int64_t len, const char **out, int64_t *outlen) {
     if (len == 0) {

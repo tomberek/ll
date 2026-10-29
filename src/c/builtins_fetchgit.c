@@ -1,118 +1,4 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-/* M82: `builtins.fetchGit` -- cppnix's `prim_fetchGit`/`fetchTree`
- * (~/nix/src/libexpr/primops/fetchTree.cc, isFetchGit=true) wrapping
- * libfetchers' "git" input type (~/nix/src/libfetchers/git.cc), read in
- * full before writing this. Found needed chasing `d.nix` past M81:
- * `pkgs/build-support/rust/import-cargo-lock.nix` (reached transitively
- * through ffmpeg's rust-toolchain dependency chain) references the bare
- * top-level `fetchGit` identifier inside one branch of an `if`
- * (`else if allowBuiltinFetchGit then fetchGit {...} else missingHash`)
- * -- and this codebase COMPILES an entire imported file's whole AST
- * up front (compiler.c's `compile_expr`, called once per file from
- * `ll_eval_file`), including both arms of every `if`, not just the
- * one that ends up running. compiler.c's AST_VAR case resolves every
- * free variable against the static scope chain *at compile time*
- * (confirmed: that's a direct port of real Nix's own `bindVars`, which
- * is equally whole-file/static there -- see compiler.c's own "undefined
- * variable" fprintf site) -- so merely COMPILING this file (which
- * happens for every package that transitively imports it, regardless of
- * whether `allowBuiltinFetchGit` is ever true at runtime) already needs
- * `fetchGit` to resolve to *something* as a known bare-global name, same
- * as `import`/`throw`/`derivation`/etc (builtins.h's own comment on real
- * Nix's "every primop registered without a `__` prefix is a bare
- * global" rule -- `fetchGit` is explicitly on that grepped list).
- *
- * Confirmed by grepping the actual reachable nixpkgs tree
- * (`/home/tbereknyei/nixpkgs`) for every call site of `importCargoLock`/
- * `allowBuiltinFetchGit`: nothing anywhere sets `allowBuiltinFetchGit =
- * true` (it only ever takes its own `? false` default), so the
- * `fetchGit {...}` *call* itself is never actually reached at runtime
- * while evaluating `(import nixpkgs {}).ffmpeg.outPath` -- the crash
- * this milestone fixes is a pure static-name-resolution problem, not a
- * "the fetch itself needs to actually run and produce a real result"
- * problem. That said, this milestone implements a REAL, working
- * `fetchGit` (not just a stub that satisfies the static check) per this
- * project's standing discipline of not leaving a builtin half-real when
- * a reasonably-scoped genuine implementation is reachable -- verified
- * directly against `nix-instantiate --eval --strict` with a throwaway
- * local git repo (see docs/architecture.md's M82 notes for the exact
- * transcript) before being trusted at all, same as every other hash/
- * path-formula milestone in this project's history.
- *
- * Shells out to a real `git` binary (popen/pclose, "a plain external
- * process", same category of escape hatch this project's own
- * docs/abi.md already describes for primop calls in general) to do a
- * REAL bare clone + `git archive` of the requested rev -- there is no
- * git-object-store implementation in this codebase and building one
- * would be wildly disproportionate to this feature's actual payoff here.
- * The fetched tree is then run through M75/M80's existing NAR-hash
- * store-copy machinery (`nar.c`'s `ll_copy_path_to_store_ext`/the new
- * `ll_hash_path_nar_sha256`, nar.h) -- the exact same formula a
- * fixed-output derivation or `builtins.path` already uses, not a
- * separately-derived one, so `outPath`/`narHash` here are genuinely
- * real, byte-for-byte-verifiable store paths/hashes, not placeholders.
- *
- * Supported, real, and verified against `nix-instantiate --eval
- * --strict`:
- *   - Bare string/path shorthand (`fetchGit "/local/repo"`,
- *     `fetchGit "https://example.com/foo.git"`) -- resolves to the
- *     clone's default branch HEAD, same as real Nix.
- *   - Attrset form: `url` (required), `ref`, `rev`, `shallow`
- *     (`--depth 1` on the clone), `submodules` (accepted and echoed
- *     back in the result attrset, matching real Nix's own always-
- *     present `submodules` field for the "git" input type -- see the
- *     scope cut below for what's NOT real about it).
- *   - Result attrset: `outPath` (real store path, with the same Opaque
- *     string-context tag `builtins.path`'s result carries), `narHash`
- *     (real SRI `sha256-<base64>`, from actually NAR-hashing the fetched
- *     tree), `rev`, `shortRev` (first 7 hex chars, matching real Nix's
- *     `Hash::gitShortRev`), `revCount` (`git rev-list --count`),
- *     `lastModified`/`lastModifiedDate` (the resolved commit's own
- *     author... actually committer time, `%ct`, formatted exactly like
- *     real Nix's `std::put_time(gmtime(...), "%Y%m%d%H%M%S")`).
- *   - A `rev` not reachable from any default-cloned branch/tag is
- *     retried once via `git fetch origin <rev>` (works against modern
- *     GitHub-style servers that allow fetching an arbitrary reachable
- *     SHA) before giving up -- a real, if best-effort, stand-in for
- *     real Nix's own `allRefs`-driven "fetch everything" behavior,
- *     without this codebase needing to replicate libfetchers' exact
- *     refspec/cache logic.
- *
- * Deliberate, documented scope cuts (none of these are exercised by
- * anything this project has actually needed to evaluate so far --
- * confirmed by the "nothing sets allowBuiltinFetchGit=true" grep above
- * -- so, per this project's standing "support what's actually
- * reachable" convention, left as real gaps rather than guessed at):
- *   - `submodules = true` does NOT actually recurse into/fetch
- *     submodule content -- the returned `submodules` field is just
- *     echoed from the argument, same shape as real Nix's attrset, but
- *     the hashed/copied tree itself won't contain real submodule
- *     content the way real Nix's `GitRepo::getSubmodules` would fetch.
- *   - Local *dirty* working trees (real Nix's `fetchGit ./work-dir`
- *     with no `ref`/`rev`, hashing whatever uncommitted changes are
- *     currently on disk and returning an empty-sha1 `rev`/`dirtyRev`
- *     pair) aren't modeled -- every repo this fetches from (local path
- *     or remote URL) is treated as a plain clone target and always
- *     resolves to a real committed rev, never "the literal working
- *     directory's current (possibly dirty) state".
- *   - `verifyCommit`/`publicKeys` (signed-commit verification),
- *     `exportIgnore` as an explicit override (real Nix's default-true
- *     behavior for non-submodule fetches IS honored here for free,
- *     since `git archive` itself already honors `export-ignore`
- *     `.gitattributes` entries -- only an explicit `exportIgnore =
- *     false` override to SUPPRESS that isn't), `lfs` smudging, a
- *     pinned `narHash`/`lastModified` argument to skip re-fetching, and
- *     the registry-lookup/flake-ref-shorthand forms (`"github:..."`)
- *     are all accepted-and-ignored or simply not special-cased --
- *     unknown attrset keys besides the handful above are silently
- *     accepted (not validated against real Nix's own fetcher-specific
- *     `allowedAttrs` schema).
- *   - Network/offline failures from the underlying `git` invocation are
- *     reported as a plain fatal error (this project's standing
- *     convention for every other builtin), not real Nix's own
- *     catchable `EvalError` class.
- */
-
 #define _POSIX_C_SOURCE 200809L /* strndup, mkdtemp -- same macro builtins_path.c/nar.c already use */
 
 #include "builtins_fetchgit.h"
@@ -242,8 +128,7 @@ Value ll_prim_fetchGit(const Value *args, int64_t argc) {
             }
             /* Everything else (allRefs, exportIgnore, verifyCommit,
              * publicKeys, narHash, lastModified, lfs, ...) is accepted
-             * and ignored -- see this file's header comment's scope-cut
-             * list. */
+             * and ignored. */
         }
         if (!url) fg_fatal("argument 'url' is missing in call to 'fetchGit'");
     } else {
@@ -278,7 +163,7 @@ Value ll_prim_fetchGit(const Value *args, int64_t argc) {
         if (fg_run(check_cmd) != 0) {
             /* Not reachable from the default clone's fetched branches/
              * tags -- best-effort retry, fetching that exact commit by
-             * SHA directly (see header comment's allRefs note). */
+             * SHA directly. */
             char fetch_cmd[700];
             snprintf(fetch_cmd, sizeof(fetch_cmd), "git --git-dir=%s fetch --quiet origin %s 2>/dev/null", clonedir_q,
                       rev_q);

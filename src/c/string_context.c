@@ -16,20 +16,12 @@ void ll_ctx_init(LlStringContext *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
-/* perf: dedup indexes for add_built/add_opaque/add_deep below. Before this
- * fix, each of the three did an unconditional linear strcmp scan over the
- * growing ctx->drvs/srcs/deep array with NO size threshold and no index at
- * all -- and ll_ctx_union_into (further below) calls these once PER
- * SOURCE ENTRY on every context union, so repeated string concatenation
- * that accumulates many distinct store-path references (e.g. a wrapper
- * script interpolating dozens of runtime deps, one `+`/`"${a}${b}..."` at
- * a time) made this O(n^2) in the number of distinct entries accumulated.
- * Fixed the identical way derivation.c's InputRefSet already fixed the
- * same shape of problem (input_ref_add_built/input_ref_add_src, this
- * file's own hash function ported verbatim from that one as dcc_hash_str):
- * open addressing, linear probing, power-of-two capacity, grow-and-rehash
- * at 3/4 load factor, no deletions (nothing in this codebase ever removes
- * a context entry). */
+/* Dedup indexes for add_built/add_opaque/add_deep below, giving O(1)
+ * amortized dedup-on-insert instead of a linear strcmp scan -- matters
+ * because ll_ctx_union_into (further below) calls these once PER SOURCE
+ * ENTRY on every context union. Open addressing, linear probing,
+ * power-of-two capacity, grow-and-rehash at 3/4 load factor, no
+ * deletions (nothing in this codebase ever removes a context entry). */
 static uint64_t dcc_hash_str(const char *s, size_t len) {
     uint64_t h = 0;
     size_t i = 0;
@@ -53,25 +45,16 @@ static uint64_t dcc_hash_str(const char *s, size_t len) {
 
 #define DCC_EMPTY_SLOT SIZE_MAX
 
-/* perf (follow-up): the unconditional hash-index-for-everything version of
- * this fix measured as a real, reproducible REGRESSION on this project's
- * own ffmpeg-full/plasma-system benchmarks (+0.45% instructions, callgrind,
- * isolated from the removeAttrs/rec_overrides_merge fixes) -- the
- * overwhelming common case is a context with a handful of entries (a
- * single coercion's worth), where building/maintaining a 16-slot hash
- * table costs strictly more than the 1-3 strcmp comparisons it replaces.
- * Gated the same way this session's OTHER sort-based fixes gate their
- * "small N" fast path (see builtins_shared.c's
- * LL_MAKE_ATTRS_SORT_INSERTION_MAX): below this many entries, add_*
- * does the exact original linear scan (zero index overhead, byte-for-
- * byte the old cost); the index is built lazily, covering all existing
- * entries at once, the first time a given array's count reaches this
- * threshold, and kept up to date (same growth policy) from then on --
- * so the only structures that ever pay the index's overhead are the
- * pathological ones this fix targets (dozens+ of distinct store-path
- * references accumulated via repeated unions), exactly the shape real
- * `derivation.c` InputRefSet contexts hit and small per-call scratch
- * contexts never do. */
+/* Below this many entries, add_* does a plain linear scan instead of
+ * building/maintaining a hash index: the overwhelming common case is a
+ * context with just a handful of entries (a single coercion's worth),
+ * where the index's own overhead costs strictly more than the 1-3
+ * strcmp comparisons it would replace. The index is built lazily,
+ * covering all existing entries at once, the first time a given array's
+ * count reaches this threshold, and kept up to date from then on -- so
+ * only the pathological, dozens-plus-entries contexts (real
+ * `derivation.c` InputRefSet-shaped ones) ever pay the index's
+ * overhead. */
 #define SC_INDEX_THRESHOLD 16
 
 static void ctx_drvs_index_rehash(LlStringContext *ctx, size_t new_cap) {
@@ -176,7 +159,7 @@ static void ctx_deep_index_rehash(LlStringContext *ctx, size_t new_cap) {
     ctx->deep_index_cap = new_cap;
 }
 
-/* M80: see string_context.h's own `deep` field comment. */
+/* See string_context.h's own `deep` field comment. */
 void ll_ctx_add_deep(LlStringContext *ctx, const char *drv_path) {
     size_t slot = 0;
     int have_slot = 0;
@@ -217,19 +200,13 @@ void ll_ctx_union_into(LlStringContext *dst, const LlStringContext *src) {
     for (size_t i = 0; i < src->ndeep; i++) ll_ctx_add_deep(dst, src->deep[i]);
 }
 
-/* Perf note (post-M76 profiling pass): this table is NOT "small N" like
- * eval_file.c's import cache / derivation.c's masked-hash cache / nar.c's
- * copy cache -- on a real nixpkgs eval (`d.nix`,
- * `(import nixpkgs {}).hello.outPath`) it grows to ~4,500 entries, and
- * `ll_string_context_of` is called ~34,000 times from hot string-
- * construction call sites (concat_strings_impl, ll_coerce_to_string,
- * ll_coerce_to_string_for_derivation). A plain linear scan here is
- * O(entries) per lookup against a table that itself grows across the
- * run, i.e. effectively O(n^2) overall -- measured at 62 MILLION scan
- * steps for that one run, ~11% of total self-time in `perf record`
- * (the single hottest leaf symbol in the whole profile). So unlike this
- * project's other side tables, this one is a measured hot path and
- * earns the hash table the "small N" convention elsewhere declines.
+/* Unlike this project's other side tables (eval_file.c's import cache /
+ * derivation.c's masked-hash cache / nar.c's copy cache), this one is a
+ * measured hot path on a real nixpkgs eval -- `ll_string_context_of` is
+ * called from hot string-construction call sites (concat_strings_impl,
+ * ll_coerce_to_string, ll_coerce_to_string_for_derivation) against a
+ * table that itself grows across the run, so it earns a real hash table
+ * instead of the "small N, plain linear scan" convention used elsewhere.
  *
  * Open addressing, linear probing, power-of-two capacity, no deletions
  * (nothing in this codebase ever un-attaches a context) so no tombstones

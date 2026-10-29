@@ -524,14 +524,12 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope);
  * matter how many of that file's own deferred fields eventually get
  * forced, instead of once per force -- and, more importantly, lets a
  * cache HIT whose program contains such stubs skip reading the source
- * file at all for every field that's NEVER forced (this project's own
- * measured norm: 90.7% of real ffmpeg-closure thunk bodies, per asnix's
- * own lazy-thunk-compile-proposal.md) -- reading it eagerly at cache-
- * load time, the way eval_file.c keeps a LIVE compile's `src` alive,
- * would defeat that laziness and much of the fast cache-hit path's own
- * "no source-file I/O at all" benefit (bytecode_cache.c's own M102
- * comment) for every file that has at least one deferred field, which
- * is most of them. A simple linked list, not a hash table: the number
+ * file at all for every field that's NEVER forced -- reading it eagerly
+ * at cache-load time, the way eval_file.c keeps a LIVE compile's `src`
+ * alive, would defeat that laziness and much of the fast cache-hit
+ * path's own "no source-file I/O at all" benefit for every file that
+ * has at least one deferred field, which is most of them. A simple
+ * linked list, not a hash table: the number
  * of DISTINCT files whose deferred fields actually get forced in one
  * process is small (bounded by the closure's own file count, at most a
  * few thousand on a real nixpkgs eval) and this is only ever consulted
@@ -782,52 +780,18 @@ static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value
  * cuts in this project, e.g. M6's non-recursive `let`). */
 #define LL_MAX_WITH_CHAIN 64
 
-/* perf: profiled directly (callgrind on real nixpkgs ffmpeg-full/plasma
- * evals) as the dominant self-cost inside compile_expr's own body -- the
- * AST_VAR/try_cell_ref scope-chain walk (compiler.c's `scope_find_lexical`
- * and AST_VAR's own copy of the same loop) calls this on average ~16
- * times per enclosing frame actually walked, ~357,000 frame-visits on the
- * real ffmpeg-full eval alone. A first real `rec {}` scope this project's
- * own M142 comment already measured at thousands of bindings (nixpkgs's
- * all-packages.nix) was the obvious first suspect for an O(log n)
- * bsearch-over-pre-sorted-symbol-ids rewrite (reusing AST_ATTRSET's
- * already-computed `sorted_syms`/`order`) -- tried, built, verified
- * correct (44/44 difftest, 148/148 nixpkgs-hash), but MEASURED a net
- * REGRESSION on real ffmpeg-full (+18.8M of 5.77B instructions, +0.33%):
- * direct instrumentation showed that path's own bsearch fires only ~2,100
- * times against ~357,000 ordinary small-frame linear-scan visits
- * (average 16.25 slots/frame) -- the rare big-frame win doesn't come
- * close to paying for the extra branch+lazy-intern cost paid on every
- * other (small, common) frame. Reverted in favor of this instead: almost
- * every one of those ~5.8M comparisons across the many small frames is a
- * MISMATCH (wrong sibling name), and a mismatch's first byte differs from
- * the target's far more often than not for arbitrary Nix identifiers --
- * rejecting on that alone, before ever calling memcmp, skips the
- * libc-call overhead for the overwhelming majority of comparisons,
- * without touching ScopeFrame, AST_VAR, or any other call site at all.
+/* Deliberately a simple linear byte-compare, not a bsearch over sorted
+ * symbol ids: real scope frames are almost always small, so a rare
+ * big-frame win doesn't pay for the extra branching cost on every other
+ * (small, common) frame. The first-byte check before memcmp rejects the
+ * common "wrong sibling name" case cheaply for arbitrary Nix identifiers.
  *
- * Considered, built, and REJECTED: a real 128-bit SSE/AVX load instead
- * of memcmp for the common <=8/<=16-byte case (real Nix identifiers are
- * almost all this short). Two separate problems, confirmed by direct
- * measurement, not assumption: (1) unsafe as a literal wide load --
- * `name`/`a`/`b` here point into the source buffer `eval_file.c`'s
+ * Do NOT replace this with a wide SSE/AVX load for the common short-name
+ * case: `name`/`a`/`b` here point into the source buffer `eval_file.c`'s
  * `read_file` allocates via `malloc(size + 1)` (padding for exactly one
  * NUL byte, nothing more), so an unaligned 16-byte `_mm_loadu_si128` for
  * an identifier in the file's last ~15 bytes would read past that
- * allocation -- a real heap-buffer-overflow. (2) even the SAFE version
- * (two bounded `memcpy`s into a zeroed `uint64_t` + one 8-byte compare,
- * never reading past `alen`) measured as a NET REGRESSION on real
- * ffmpeg-full (+0.21% instructions, confirmed via callgrind) versus this
- * 3-line version: the extra branch/locals pushed `name_eq` past the
- * compiler's inline-size threshold, so what used to be folded into every
- * caller for free (confirmed: this function has zero self-cost of its
- * own in the profile, below) became a real CALL at ~380,000 call sites
- * -- that overhead alone outweighed the memcmp calls it avoided. Also:
- * glibc's own `memcmp` already uses AVX2 on this machine for longer runs
- * (confirmed in the profile: `__memcmp_avx2_movbe`) -- the cost this
- * function's short-name case was paying was the call + internal
- * length-dispatch, not a lack of vectorization, so there was no missing
- * SIMD to add in the first place. */
+ * allocation -- a real heap-buffer-overflow. */
 static int name_eq(const char *a, size_t alen, const char *b, size_t blen) {
     if (a == NULL || alen != blen) return 0;
     if (alen == 0) return 1;
@@ -964,30 +928,16 @@ static SymIdxPair *merge_sort_symidxpairs(SymIdxPair *a, SymIdxPair *tmp, size_t
     }
     return src;
 }
-/* M146: compile_expr's AST_LET/AST_LAMBDA(pattern)/AST_ATTRSET cases each
- * malloc a handful of small scratch arrays -- sized by a purely
- * SOURCE-LEVEL count (`let` binding count, lambda-pattern formal count,
- * attrset literal binding count) -- fill them, use them for the span of
- * one compile_expr call, and free them again before returning. Real
- * nixpkgs compiles ~1057 imported files' worth of source for one `d.nix`
- * eval, and the overwhelming majority of these literals have a handful
- * of bindings/formals (a `{ lib, stdenv, fetchurl, ... }:` lambda pattern,
- * a small `let x = ...; in`, a package's attrset) -- a profiling pass
- * (instruction-sampled call-graph, M146) found `compile_expr`'s own
- * recursive descent responsible for a large, direct share of asnix's
- * malloc-family instruction cost, ahead of any single runtime call site.
- * A fixed-size stack array below this cap, used whenever the real count
- * fits, removes the malloc/free pair entirely for that overwhelmingly
- * common case; a literal with MORE bindings/formals than the cap (rare --
- * the known outlier, pkgs/top-level/all-packages.nix's ~4,280-binding
+/* compile_expr's AST_LET/AST_LAMBDA(pattern)/AST_ATTRSET cases each need
+ * a handful of small scratch arrays sized by a purely SOURCE-LEVEL count
+ * (`let` binding count, lambda-pattern formal count, attrset literal
+ * binding count), used for the span of one compile_expr call. A
+ * fixed-size stack array below this cap, used whenever the real count
+ * fits, avoids a malloc/free pair for the overwhelmingly common small
+ * case; a literal with MORE bindings/formals than the cap (rare -- the
+ * known outlier, pkgs/top-level/all-packages.nix's ~4,280-binding
  * attrset, already takes a dedicated large-n path for its OWN sort
- * algorithm below) falls back to the original malloc path unchanged. This
- * is NOT the depth-indexed pool M144 used for derivation.c's runtime
- * scratch arrays -- compile_expr's own recursion is plain, single-
- * threaded C call-stack recursion with no cross-call reuse opportunity
- * (each node is compiled exactly once), so a plain C-local array --
- * fresh, and automatically distinct, on every recursive activation -- is
- * simpler and sufficient; no pooling/indexing scheme is needed at all.
+ * algorithm below) falls back to the original malloc path unchanged.
  * Deliberately the SAME constant as the insertion-sort-vs-qsort threshold
  * right below (`#define`d FROM it, not just equal by coincidence) so the
  * two decisions -- "is this literal small enough to sort with plain
@@ -995,15 +945,12 @@ static SymIdxPair *merge_sort_symidxpairs(SymIdxPair *a, SymIdxPair *tmp, size_t
  * the stack" -- can never drift apart. */
 #define LL_COMPILE_SCRATCH_MAX 32
 /* Threshold below which plain insertion sort beats qsort's per-comparison
- * indirect-call overhead -- tuned empirically against the real d.nix eval,
- * see the AST_ATTRSET case's own comment. */
+ * indirect-call overhead. */
 #define LL_ATTRSET_SORT_INSERTION_MAX LL_COMPILE_SCRATCH_MAX
 /* Factored out of compile_expr's AST_ATTRSET case so the (astronomically
  * rare -- only literals bigger than the threshold above ever reach this)
  * qsort path doesn't grow compile_expr's own code size/layout for the
- * common case it's never taken in -- an earlier version inlined this
- * directly into the switch and measured a small but real regression on
- * the COMMON (small-n) path purely from compile_expr growing larger. */
+ * common case it's never taken in. */
 static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n) {
     SymIdxPair *pairs = ll_arena_alloc(n * sizeof(SymIdxPair));
     SymIdxPair *scratch = ll_arena_alloc(n * sizeof(SymIdxPair));
@@ -1012,50 +959,44 @@ static void sort_attrset_bindings_large(uint32_t *syms, size_t *order, size_t n)
     for (size_t i = 0; i < n; i++) order[i] = sorted[i].idx;
 }
 
-/* perf: these expression kinds already compile to a single zero-cost
+/* These expression kinds already compile to a single zero-cost
  * compile-time push (ib_push_int/true/false/null, or ib_push_const for a
  * pooled constant) -- no captured scope, no deferred work, no runtime
- * op beyond the push itself. Same reasoning as real Nix's own
- * `maybeThunk` overrides for ExprInt/ExprFloat/ExprString/ExprPath
- * (~/nix/gc-unlock/src/libexpr/eval.cc): wrapping one of these in a
- * Thunk (a 32-byte heap allocation plus a whole separate child
- * IrProgram, forced through the full OP_CALL/force machinery at every
- * point of use) is pure overhead for a value that costs nothing to
- * produce and never benefits from being deferred. Every call site that
- * thunks a list element / binding value / call argument already
- * tolerates either an already-forced Value or a Thunk there (that's
- * what `force` means), so substituting the immediate compile_expr()
- * output for a thunk wrapping the identical value is observably
- * identical, just cheaper -- not applicable to AST_VAR (a bare variable
- * reference): that's a distinct optimization (real Nix's own
- * `ExprVar::maybeThunk` slot-aliasing), out of scope here. */
-/* M136: compile-time constant folding for `AST_BINOP` when both operands
- * are int literals -- mirrors op_arith.S's own overflow-checked semantics
+ * op beyond the push itself. Wrapping one of these in a Thunk (a 32-byte
+ * heap allocation plus a whole separate child IrProgram, forced through
+ * the full OP_CALL/force machinery at every point of use) is pure
+ * overhead for a value that costs nothing to produce and never benefits
+ * from being deferred. Every call site that thunks a list element /
+ * binding value / call argument already tolerates either an
+ * already-forced Value or a Thunk there (that's what `force` means), so
+ * substituting the immediate compile_expr() output for a thunk wrapping
+ * the identical value is observably identical, just cheaper -- not
+ * applicable to AST_VAR (a bare variable reference): that's a distinct
+ * optimization (slot-aliasing, see try_cell_ref above), out of scope
+ * here. */
+/* Compile-time constant folding for `AST_BINOP` when both operands are
+ * int literals -- mirrors op_arith.S's own overflow-checked semantics
  * EXACTLY (both the true int64-overflow check via `__builtin_*_overflow`
  * AND the narrower LL_INT_MIN/MAX tagged-value window `+`/`-`/`*` are
- * additionally bounded to there, see op_arith.S's own M56 comment) --
- * any case that would abort at runtime (overflow, division by zero, the
- * `LL_INT_MIN / -1` edge) is deliberately left unfolded, so the
- * ordinary runtime op still reaches the exact same abort with the exact
- * same message, never silently wrapping or producing a different result
- * than an unoptimized build would. `>`/`<=` (`'g'`/`'L'`) compute the
- * same boolean real Nix's own operand-swap desugaring produces (see this
- * file's AST_BINOP case's own M51 comment for why the swap exists in the
- * *compiled* form) directly from the source-level operands here, since
- * this function never emits IR, only a final bool/int/float. `//`/`++`
- * (`'u'`/`'c'`) fall through to `default` and are never folded: those
- * operators are for attrsets/lists, so two numeric literals on either
- * side is always a runtime type error this function must not mask by
- * computing a bogus int/bool/float result for it. Called both from the
- * AST_BINOP case of `compile_expr` below (to actually fold) and from
- * `is_thunk_free_literal` immediately below (so a foldable binop is ALSO
- * recognized as thunk-free, exactly like any other literal -- M92's
- * `maybeThunk` reasoning applies identically once this function has
- * reduced the node to a single zero-cost push).
+ * additionally bounded to there) -- any case that would abort at runtime
+ * (overflow, division by zero, the `LL_INT_MIN / -1` edge) is
+ * deliberately left unfolded, so the ordinary runtime op still reaches
+ * the exact same abort with the exact same message, never silently
+ * wrapping or producing a different result than an unoptimized build
+ * would. `>`/`<=` (`'g'`/`'L'`) compute the same boolean real Nix's own
+ * operand-swap desugaring produces directly from the source-level
+ * operands here, since this function never emits IR, only a final
+ * bool/int/float. `//`/`++` (`'u'`/`'c'`) fall through to `default` and
+ * are never folded: those operators are for attrsets/lists, so two
+ * numeric literals on either side is always a runtime type error this
+ * function must not mask by computing a bogus int/bool/float result for
+ * it. Called both from the AST_BINOP case of `compile_expr` below (to
+ * actually fold) and from `is_thunk_free_literal` immediately below (so
+ * a foldable binop is ALSO recognized as thunk-free, exactly like any
+ * other literal).
  *
- * <follow-on to M136>: extended to AST_FLOAT operands (and mixed int/
- * float pairs), the first of M136's own two explicitly-scoped-out
- * follow-ons. Int/int (both operands AST_INT) keeps the EXACT path
+ * Also handles AST_FLOAT operands (and mixed int/float pairs). Int/int
+ * (both operands AST_INT) keeps the EXACT path
  * above unchanged -- a pure-int fold must keep its exact int64 overflow
  * semantics, not get silently rerouted through double arithmetic (which
  * would both lose precision for large ints near LL_INT_MAX/MIN and
@@ -1148,7 +1089,7 @@ static int try_fold_const_binop(Ast *node, int *out_is_bool, int *out_is_float, 
 static int is_thunk_free_literal(Ast *node) {
     switch (node->kind) {
         case AST_INT:
-            /* M-range-fix: an out-of-range int literal must NOT be
+            /* An out-of-range int literal must NOT be
              * eagerly inlined here -- unlike every other case in this
              * function, pushing it has an observable side effect
              * (ib_push_int's own runtime range check fatals). Inlining
@@ -1180,7 +1121,7 @@ static int is_thunk_free_literal(Ast *node) {
         case AST_PATH:
             return !node->as.path.is_search && node->as.path.interp_count == 0;
         case AST_LIST:
-            /* M101-era find: real Nix's own `ExprList::maybeThunk`
+            /* Real Nix's own `ExprList::maybeThunk`
              * (~/nix/gc-unlock/src/libexpr/eval.cc) special-cases ONLY
              * the empty list -- it returns a shared singleton Value,
              * never allocating a Thunk for `[]` wherever it appears as a
@@ -2227,27 +2168,17 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 syms[i] = ll_intern(node->as.attrset.bindings[i].name, node->as.attrset.bindings[i].name_len);
                 order[i] = i;
             }
-            /* perf (M142): was an unconditional O(n^2) insertion sort on the
-             * claim "n is a source-level binding count, always tiny" --
-             * false for real nixpkgs (pkgs/top-level/all-packages.nix is a
-             * single ~4,280-binding rec {} literal). A naive global switch
-             * to qsort for every n REGRESSED (+0.65% instructions on the
-             * real d.nix eval, measured directly): qsort's per-comparison
-             * indirect-call overhead costs more than insertion sort's
-             * O(n^2) saves across the overwhelming majority of small
-             * literals, and even a second attempt that built a {sym,idx}
-             * pairs array unconditionally (to make insertion sort's own
-             * comparisons branch-direct instead of double-indirected
-             * through order[]/syms[]) still regressed (+0.24%), from the
-             * extra malloc/free pair that version paid on every single
-             * call regardless of n. Hybrid, below: insertion sort directly
-             * on order[]/syms[] (byte-for-byte the original, zero-extra-
-             * allocation algorithm) below the threshold; a {sym,idx} pairs
-             * array + qsort, built and freed ONLY on this branch, for the
-             * rare large literal. Names are already unique here (duplicate-
-             * key literals are merged earlier via reopen_attrset_into), so
-             * no two syms ever compare equal and stability is a non-issue
-             * either way. */
+            /* `n` is a source-level binding count, usually tiny, but not
+             * always (pkgs/top-level/all-packages.nix is a single
+             * ~4,280-binding rec {} literal) -- so this is a hybrid, not a
+             * flat choice: plain insertion sort directly on order[]/syms[]
+             * below the threshold (cheap, no extra allocation); a
+             * {sym,idx} pairs array + qsort, built and freed ONLY on this
+             * branch, for the rare large literal, where qsort's per-
+             * comparison overhead is worth paying to avoid O(n^2). Names
+             * are already unique here (duplicate-key literals are merged
+             * earlier via reopen_attrset_into), so no two syms ever
+             * compare equal and stability is a non-issue either way. */
             if (small_n) {
                 for (size_t i = 1; i < n; i++) {
                     size_t j = i;
@@ -2292,7 +2223,7 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                 size_t hidden_count = 0;
                 for (size_t i = 0; i < n; i++) if (node->as.attrset.bindings[i].is_hidden) hidden_count++;
                 if (hidden_count == 0) {
-                    /* M114: the overwhelming common case -- no `inherit
+                    /* The overwhelming common case -- no `inherit
                      * (expr) a b;` clause needs a shared hidden slot, so
                      * NOTHING here needs its own frame at all. Real Nix's
                      * own non-recursive ExprAttrs::eval (eval.cc, ~line
@@ -2300,13 +2231,8 @@ static void compile_expr(IrBuilder *b, Ast *node, ScopeFrame *scope) {
                      * literal: every binding's value is bound directly
                      * against the ENCLOSING scope, because non-`rec`
                      * siblings never see each other -- there is no shared
-                     * scope for a frame to provide. Before this case
-                     * existed, `ib_frame_alloc(b, 0)` ran unconditionally
-                     * here, costing one real (if zero-slot) Env allocation
-                     * per plain attrset literal evaluated, for nothing
-                     * (confirmed: 189,914 of these on real nixpkgs's
-                     * ffmpeg.outPath, 20% of asnix's total env-count gap
-                     * against real Nix for the same evaluation). This
+                     * scope for a frame to provide, so allocating a
+                     * zero-slot Env frame here would be pure waste. This
                      * mirrors the `hidden_count > 0` branch below exactly,
                      * minus the hidden frame itself -- every binding/
                      * dyn-binding value compiles straight against `scope`,

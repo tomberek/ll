@@ -1,8 +1,7 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-// M3: Env frame allocation and De Bruijn lookup. Tested, C-callable
-// primitives -- op_var_ref/op_let/op_call inline the same logic directly
-// in the hot dispatch path rather than paying a `call` per use (same
-// precedent as src/asm/value.S).
+// Env frame allocation and De Bruijn lookup. C-callable primitives --
+// op_var_ref/op_let/op_call inline the same logic directly in the
+// hot dispatch path rather than paying a `call` per use.
 #include "ll/env.h"
 
     .text
@@ -19,11 +18,11 @@ ll_env_alloc:                        // Env *ll_env_alloc(Env *up, int64_t nslot
     call ll_env_arena_alloc
     incq ll_stats_env(%rip)
     addq %rbp, ll_stats_env_elements(%rip)
-    // M118: compress `up` -- NULL-safe, unlike the hot-path-inlined
+    // Compresses `up` -- NULL-safe, unlike the hot-path-inlined
     // allocation sites (op_frame.S/op_let.S/op_with.S), which only ever
     // see a live, non-NULL current ENV and skip this check; this is a
     // general-purpose entry point genuinely called with up=NULL (every
-    // root Env, see eval_file.c/builtins_shared.c/builtins_attrs.c).
+    // root Env).
     testq %rbx, %rbx
     jz .Lenv_alloc_up_null
     subq ll_env_arena_base(%rip), %rbx
@@ -42,7 +41,7 @@ ll_env_lookup:                       // Value ll_env_lookup(Env *env, int64_t de
 .Lenv_lookup_walk:
     testq %rsi, %rsi
     jz .Lenv_lookup_done
-    movl LL_ENV_OFF_UP(%rdi), %edi   // M118: zero-extends into %rdi; decompress below
+    movl LL_ENV_OFF_UP(%rdi), %edi   // zero-extends into %rdi; decompress below
     addq ll_env_arena_base(%rip), %rdi
     andq $-2, %rdi                      // mask off LL_ENV_WITH_TAG in case this hop is a with-frame
     decq %rsi

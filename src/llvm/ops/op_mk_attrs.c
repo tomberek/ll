@@ -3,17 +3,14 @@
 #include "builtins_shared.h"
 
 /* Fixed-size scratch, not a VLA: a variably-modified local would block
- * musttail at the end of this function. Covers every realistic
- * literal attrset (bench/workloads/attrset_build_large.nix's ~2,000
- * entries included) with room to spare; a literal larger than this
- * falls back to a one-shot, never-freed arena scratch buffer instead
- * (this evaluator's existing allocation philosophy, see arena.h). */
+ * musttail at the end of this function. A literal larger than this
+ * falls back to a one-shot, never-freed arena scratch buffer instead. */
 #define LL_MK_ATTRS_FIXED_SYMS 8192
 
 LL_OP_ATTR Value ll_op_mk_attrs(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     int64_t pidx = ip->b;
-    Value *vals = vs - count; /* the popped values already sit contiguously here */
+    Value *vals = vs - count;
 
     uint32_t fixed_syms[LL_MK_ATTRS_FIXED_SYMS];
     uint32_t *syms = fixed_syms;

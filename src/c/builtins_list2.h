@@ -4,34 +4,14 @@
 
 #include <stddef.h>
 
-#include "builtins_misc.h" /* shared LlBuiltinMiscDef/-Builder {name, build()} shape */
-
-/*
- * Second round of list builtins, added alongside genericClosure
- * (builtins_closure.c): elem, any, all, concatMap, sort, genList,
- * partition, foldl, foldr, catAttrs. Kept separate from M17's
- * builtins_list.c (map/filter/foldl'/elemAt/concatLists/tail/head) rather
- * than appended to it, matching this project's existing one-feature-batch-
- * per-file convention for builtins modules.
- *
- * All of these are true arity>=2 builtins, so this module uses the
- * {name, build()} shape (builtins_misc.h) rather than plain
- * {name, fn, arity} -- see builtins_shared.h's make_curried_native, the
- * mechanism every entry's `build()` uses.
- */
+#include "builtins_misc.h"
 
 extern const LlBuiltinMiscDef LL_LIST2_BUILTINS[];
 extern const size_t LL_LIST2_BUILTINS_COUNT;
 
-#include "ll/value.h" /* Value */
-#include <stdint.h>       /* int64_t */
+#include "ll/value.h"
+#include <stdint.h>
 
-/* M110: exported so compiler.c's try_fused_native_call2 can fuse a
- * statically-recognized, fully-saturated `builtins.<name> a b` call site
- * into one direct native call, skipping the curried-native Closure/Env
- * hops -- see compiler.c's own comment for the recognition + safety
- * conditions. `elem`'s is NOFORCE (see its own comment above); `any`/
- * `all` are ordinary force-by-default natives. */
 Value ll_prim_elem2_impl(const Value *args, int64_t argc);
 Value ll_prim_any2_impl(const Value *args, int64_t argc);
 Value ll_prim_all2_impl(const Value *args, int64_t argc);

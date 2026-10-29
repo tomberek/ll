@@ -1,70 +1,41 @@
-# ll: AOT threaded-dispatch port of asnix. See
-# ~/.claude/plans/soft-wishing-engelbart.md's M10 section for the
-# design and what is/isn't vendored from asnix.
+# ll: AOT threaded-dispatch port of asnix.
 #
-# M10: no LLVM code is linked into `ll` at runtime anymore. The op
-# handlers (src/llvm/ops/*.c) are plain C, compiled once, ahead of
-# time, into this binary -- the same role asnix's own hand-written
-# asm handlers (src/asm/ops/*.S) play in asnix's own binary. clang is
-# used (not gcc) specifically for its `[[clang::musttail]]` attribute
-# (a hard, compile-time-checked guarantee that a handler-to-handler
-# dispatch compiles to a real tail call, never a nested one) --
-# that's the mechanism that keeps a deep Nix call/force chain from
-# growing the native C stack, in place of asm's `jmp *%rax`. Every
-# other file here is plain, portable C and would build equally well
-# under gcc; using clang uniformly avoids a two-compiler build and
-# matches the "convert ASM to LLVM, not JIT" thesis this port is
-# testing (LLVM's own compiler producing the op handlers' machine
-# code, ahead of time, rather than hand-written asm).
+# No LLVM code is linked into `ll` at runtime. The op handlers
+# (src/llvm/ops/*.c) are plain C, compiled once, ahead of time, into
+# this binary -- the same role asnix's own hand-written asm handlers
+# (src/asm/ops/*.S) play in asnix's own binary. clang is used (not
+# gcc) specifically for its `[[clang::musttail]]` attribute (a hard,
+# compile-time-checked guarantee that a handler-to-handler dispatch
+# compiles to a real tail call, never a nested one) -- that's the
+# mechanism that keeps a deep Nix call/force chain from growing the
+# native C stack, in place of asm's `jmp *%rax`. Every other file
+# here is plain, portable C and would build equally well under gcc;
+# using clang uniformly avoids a two-compiler build.
 INC    := -Iinclude -Isrc/c -Isrc/llvm -Isrc/llvm/ops
 CC     ?= clang
-# FRONTEND_CC: the vendored frontend (src/c/*, byte-identical to
-# asnix's own lexer/parser/compiler/builtins) has no musttail
-# dependency at all -- it is ordinary, portable C. asnix's own
-# Makefile compiles the identical files with `cc` (this devShell
-# resolves that to gcc). Measured directly: compiling this same code
-# with clang instead of gcc is a real, measurable slowdown for at
-# least one workload (attrset_build_large's ~2,000-entry symbol
-# sort), unrelated to anything this port's own dispatch-layer work
-# controls -- using gcc here removes that confound rather than
-# attributing it to the AOT dispatch redesign by mistake.
+# FRONTEND_CC: the vendored frontend (src/c/*) has no musttail
+# dependency, so it is built with a separate, plain C compiler.
 FRONTEND_CC ?= cc
 OPT    ?= -O3
-# -fomit-frame-pointer: every op handler ends in a musttail tail call
-# (zero overhead already), but a handler with an internal fallback
-# `call` (ll_fatal/ll_valstack_overflow on the cold path) still
-# got a full `push %rbp; mov %rsp,%rbp`/`pop %rbp` frame-pointer
-# convention around it by default -- pure overhead on the hot path,
-# since nothing needs to walk frames through a tail-call chain that
-# never grows the stack in the first place.
+# -fomit-frame-pointer: every op handler ends in a musttail tail call,
+# so nothing needs to walk frames through it.
 #
 # -fno-zero-call-used-regs/-fno-stack-clash-protection: nixpkgs' own
 # clang wrapper injects -fzero-call-used-regs=used-gpr and
-# -fstack-clash-protection by default (confirmed via `clang -###`) --
-# hardening mitigations against register-based info leaks and stack-
-# clash attacks across a trust boundary. `ll` is a single-process,
-# trusted-input evaluator with no such boundary on its own dispatch
-# path; disassembly showed the register-zeroing specifically landing
-# on every op handler's tail-call site (two extra `xor` instructions
-# per op, real cost on the highest-repetition, lowest-work-per-op
-# workloads this dispatch design is already most sensitive to -- see
-# M10's own section below). Disabling both is a correctness-neutral,
-# pure-performance choice for this project's actual threat model.
+# -fstack-clash-protection by default -- hardening mitigations against
+# register-based info leaks and stack-clash attacks across a trust
+# boundary. `ll` is a single-process, trusted-input evaluator with no
+# such boundary on its own dispatch path, so disabling both is a
+# correctness-neutral choice for this project's actual threat model.
 CFLAGS = -std=c11 -Wall -Wextra -g $(OPT) $(INC) -MMD -MP -U_FORTIFY_SOURCE -fno-stack-protector -fomit-frame-pointer -fzero-call-used-regs=skip -fno-stack-clash-protection -Wa,--noexecstack
 LDFLAGS :=
 
-# M146 port (from asnix, never ported here before now): statically
-# link mimalloc into the final `ll` executable as a process-wide
-# override of malloc/free/calloc/realloc -- same mechanism, same
-# "no source change needed" proof (mimalloc's static archive already
-# exports standard-named malloc/free/calloc/realloc symbols) asnix's
-# own Makefile already uses in production. This project's own
-# flake.nix already exports `LL_MIMALLOC_LIB` for exactly this
-# (shellHook sets it, matching asnix's own devShell convention) --
-# this Makefile just never consumed it. Falls back to a portable
-# system-mimalloc link probe outside the flake's devShell, then to
-# plain glibc malloc if neither is available -- never a hard build
-# failure either way.
+# Statically links mimalloc into the final `ll` executable as a
+# process-wide override of malloc/free/calloc/realloc. Uses
+# LL_MIMALLOC_LIB if set (the flake's devShell sets this), falling
+# back to a portable system-mimalloc link probe, then to plain glibc
+# malloc if neither is available -- never a hard build failure either
+# way.
 ifdef LL_MIMALLOC_LIB
 MIMALLOC_LDLIBS := $(LL_MIMALLOC_LIB) -lpthread
 else
@@ -100,11 +71,9 @@ test: ll
 # header comment for the protocol). Clone the corpus to
 # NIX_CONFORMANCE_DIR first (default /tmp/nix-conformance), or pass
 # NIX_CONFORMANCE_DIR=/path/to/it. tests/nix-conformance-known-failures.txt
-# lists the (currently 3) cases this evaluator fails on purpose -- `run
-# --known` counts those as "known" rather than "fail" and, conversely,
-# fails the build if one of them starts PASSING (a sign the list is
-# stale), so this target's exit code is a real pass/fail gate, suitable
-# for CI, unlike test-nixpkgs-hash's deliberately non-gating sweep.
+# lists cases this evaluator fails on purpose -- `run --known` counts
+# those as "known" rather than "fail" and fails the build if one of them
+# starts PASSING (a sign the list is stale).
 NIX_CONFORMANCE_DIR ?= /tmp/nix-conformance
 test-nix-conformance: ll
 	@if [ ! -d "$(NIX_CONFORMANCE_DIR)/lang" ]; then \
@@ -140,20 +109,15 @@ clean:
 
 # --- Profile-Guided Optimization (PGO): opt-in, NOT part of `make ll`/`all` ---
 #
-# Why opt-in: profile data goes stale as code changes, and baking a
-# multi-step, training-data-dependent pipeline into the default build is
-# the wrong default for a project still under active development. Run
-# `make pgo` by hand (and re-run it after any change to src/llvm/** worth
+# Opt-in because profile data goes stale as code changes. Run `make pgo`
+# by hand (and re-run it after any change to src/llvm/** worth
 # re-training on); it is not wired into `all`/`test`/CI.
 #
 # What gets instrumented/optimized: ONLY the clang-compiled files that
 # $(CC) builds under the generic `%.o: %.c`/`%.o: %.S` rules above
-# (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c) -- i.e. exactly the
-# files `-fprofile-instr-generate`/`-fprofile-instr-use` can apply to in
-# the first place. The vendored frontend (src/c/*.c, FRONTEND_CC/gcc) and
-# the asm shims (src/asm/*.S, also built with FRONTEND_CC) don't go
-# through clang's `-fprofile-instr-*` machinery at all -- gcc doesn't
-# understand those flags -- so they're compiled identically to the normal
+# (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c). The vendored
+# frontend (src/c/*.c, FRONTEND_CC/gcc) and the asm shims (src/asm/*.S,
+# also built with FRONTEND_CC) are compiled identically to the normal
 # `make ll` build in both PGO passes below, just mirrored into their own
 # object directories so `make ll` and `make pgo` never clobber each
 # other's .o files.
@@ -161,18 +125,17 @@ clean:
 # Pipeline (standard clang PGO recipe), all driven by `make pgo`:
 #   1. pgo-instrumented: build $(PGO_GEN_BIN) with -fprofile-instr-generate
 #   2. pgo-train:        run it over the training set (bench/workloads/*.nix
-#                         + a fixed, deliberately-mixed set of real nixpkgs
-#                         attrs -- see PGO_TRAIN_ATTRS below), each run
-#                         writing its own *.profraw via LLVM_PROFILE_FILE's
-#                         %p (pid)/%m (per-binary signature) so concurrent
-#                         runs never clobber each other
+#                         + a fixed set of real nixpkgs attrs -- see
+#                         PGO_TRAIN_ATTRS below), each run writing its own
+#                         *.profraw via LLVM_PROFILE_FILE's %p (pid)/%m
+#                         (per-binary signature) so concurrent runs never
+#                         clobber each other
 #   3. pgo-merge:         llvm-profdata merge *.profraw -> merged.profdata
 #   4. pgo-build:         rebuild $(PGO_BIN) with -fprofile-instr-use=...
 #
 # Training set is deliberately NOT ffmpeg-full.outPath -- that is this
 # project's held-out correctness/performance target; training on it would
-# make any speedup an overfitting artifact rather than a real result. See
-# bench/results/M8-findings.md for how $(PGO_BIN) compared to plain `ll`.
+# make any speedup an overfitting artifact rather than a real result.
 PGO_DIR        := .pgo
 PGO_RAW_DIR    := $(PGO_DIR)/profraw
 PGO_PROFDATA   := $(PGO_DIR)/merged.profdata
@@ -301,30 +264,20 @@ pgo-clean:
 
 # --- -march=native (opt-in, for ll's own clang-compiled code only) -----
 #
-# Measured: a real, modest wall-clock win on pkgs.ffmpeg-full.outPath --
-# but this machine is shared, and plain, unpinned `hyperfine` runs on it
-# were noisy enough to flip sign run to run (one pair of early runs
-# showed a misleadingly large ~1.09x-1.11x; later unpinned runs under
-# heavier load showed ~1.02x the WRONG way). Pinning both sides to the
-# same core (`taskset -c N`) to remove scheduling noise gave a
-# consistent, repeatable ~1.04x speedup in both A/B orderings -- that's
-# the number to trust, not the first noisy one. No correctness
-# regression (44/44 difftest, byte-identical ffmpeg-full output vs
-# asnix). Scoped the same way thin-LTO was tried (and reverted, see
-# below): only the clang-compiled files under the generic `%.o: %.c`/
+# Scoped to only the clang-compiled files under the generic `%.o: %.c`/
 # `%.o: %.S` rules (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c),
 # NOT the FRONTEND_CC(gcc)-compiled vendored frontend.
 #
 # Why this is its OWN opt-in target (`make ll-native`) rather than a
 # default-on flag on `ll` itself: -march=native bakes in the BUILD
 # machine's exact CPU feature set -- the resulting binary can SIGILL on
-# any other CPU. That's a correctness-adjacent tradeoff (not just a
-# staleness one like PGO's), so it must never be silently the default.
-# Builds into its own object directory/binary name, same reasoning as
-# PGO above: a plain CFLAGS override on the existing `ll`/libll.a object
-# paths would silently mix native and non-native .o's across successive
-# `make ll` / `make ll-native` runs without a `make clean` in between,
-# since make only tracks file mtimes, not which flags produced them.
+# any other CPU. That's a correctness-adjacent tradeoff, so it must
+# never be silently the default. Builds into its own object
+# directory/binary name since make only tracks file mtimes, not which
+# flags produced them -- a plain CFLAGS override on the existing
+# `ll`/libll.a object paths would silently mix native and non-native
+# .o's across successive `make ll` / `make ll-native` runs without a
+# `make clean` in between.
 #
 # IMPORTANT, nix-specific gotcha: nixpkgs' own clang wrapper treats
 # `-march=native`/`-mtune=native` as an "impure flag" and SILENTLY DROPS
@@ -372,24 +325,10 @@ native-clean:
 
 # --- Full LTO (make ll-flto): opt-in, NOT part of `make ll`/`all` -------
 #
-# `-flto=thin` (the parallelized, summary-based cross-TU analysis) was
-# tried first and found nothing: passed both correctness gates but gave
-# no measurable win on pkgs.ffmpeg-full.outPath, if anything a ~1.03x
-# slowdown within hyperfine's noise on this shared machine. `-flto=full`
-# (whole-program analysis, not just per-TU summaries) found a real one:
-# 0.41% fewer instructions on the same held-out expression (callgrind,
-# deterministic, reproduced on rerun), ~1.01x wall-clock -- directionally
-# consistent with the Ir count but not independently conclusive on its
-# own given hyperfine's noise floor on this machine. Full LTO's usual
-# slow-monolithic-link downside doesn't bite at this codebase's size
-# (link time here is a fraction of a second).
-#
 # Same scope as -march=native above: only the clang-compiled files
 # (src/llvm/*.c, src/llvm/ops/*.c, src/llvm/ll_main.c) get -flto=full;
 # the FRONTEND_CC(gcc)-compiled vendored frontend (src/c/*.c, src/asm/*.S)
-# is compiled identically to `make ll`, same reasoning as PGO/native
-# above (gcc doesn't emit LLVM bitcode, so there's nothing to LTO there
-# even if it understood the flag). The LINK step mixes LLVM-bitcode .o's
+# is compiled identically to `make ll`. The LINK step mixes LLVM-bitcode .o's
 # (from the clang+flto compiles) with plain ELF .o's (from the gcc
 # compiles) -- clang's own flto driver logic handles that mix correctly,
 # but the link itself needs `-fuse-ld=lld`: neither gold nor bfd (the

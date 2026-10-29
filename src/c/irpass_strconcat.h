@@ -2,8 +2,6 @@
 #ifndef LL_IRPASS_STRCONCAT_H
 #define LL_IRPASS_STRCONCAT_H
 
-/* Registers the "strconcat" bytecode pass -- see irpass_strconcat.c's own
- * header comment for what it does. */
 void ll_irpass_register_strconcat(void);
 
 #endif /* LL_IRPASS_STRCONCAT_H */

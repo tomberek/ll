@@ -8,9 +8,9 @@
 
 #include "ll/arena.h"
 #include "ll/heap.h"
-#include "ll/stats.h" /* M112: visibility into this call site's real byte cost */
-#include "builtins_shared.h" /* ll_bshared_type_name, see M50 */
-#include "string_context.h" /* M80: dynamic attr-name context rejection */
+#include "ll/stats.h"
+#include "builtins_shared.h"
+#include "string_context.h"
 #include "symtab.h"
 #include "value_util.h"
 
@@ -30,20 +30,6 @@ Value ll_attrs_eager_merge(Value lhs, Value rhs) {
     void *mem = ll_arena_alloc(8 + (uint64_t)(acount + bcount) * LL_ATTR_SIZE);
     char *out_entries = (char *)mem + LL_ATTRS_OFF_ENTRIES;
 
-    /* M143: walk with running byte pointers instead of `i`/`j`/`k` indices
-     * recomputed via `idx * LL_ATTR_SIZE` every iteration. The index
-     * form looked equivalent to the compiler but wasn't: GCC couldn't
-     * prove it could hoist the index->address multiply out of the loop
-     * (LL_ATTR_SIZE=12 isn't a shift), so the main merge loop's -O2
-     * codegen recomputed `base + idx*12` from scratch (two extra `lea`s
-     * per side, confirmed via `objdump -d` before this change) on EVERY
-     * iteration, while the tail loops below (which this file already
-     * wrote with a plain incrementing index multiplied once per access)
-     * got the same treatment. Advancing plain `const char *` pointers by
-     * a constant 12 each step needs no per-iteration multiply at all --
-     * same two-pointer merge, same memcpy-per-entry, fewer retired
-     * instructions in the loop iets's own `update_attrs` (see
-     * docs/architecture.md's M143) also has to run. */
     const char *pa = aentries;
     const char *pb = bentries;
     const char *aend = aentries + acount * LL_ATTR_SIZE;
@@ -84,42 +70,13 @@ Value ll_attrs_eager_merge(Value lhs, Value rhs) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_ATTRS };
 }
 
-/* `a // b`, matching iets's own `update_attrs`/`alloc_union` heuristic
- * (src/eval/mod.rs, src/runtime/value.rs) rather than asnix's original
- * M88 design -- three differences from a naive "just defer small RHS
- * onto big LHS" rule, all three needed together to pay off:
- *
- *   1. Empty-operand short circuit: `x // {}` and `{} // x` return the
- *      other side unchanged, with no allocation at all. Real nixpkgs/
- *      stdenv code does this constantly (optional overrides, `lib.
- *      optionalAttrs false {...}`, default-argument attrsets).
- *
- *   2. `rhs` is never eagerly resolved -- only flattened if deferring
- *      turns out not to fit the leaf budget below. A `//` whose RHS is
- *      itself a still-deferred union from an earlier expression (overlay
- *      composition) gets its own leaves folded in directly, unresolved.
- *
- *   3. On leaf-budget overflow, flatten ONLY `lhs` down to one leaf and
- *      retry as a fresh, short union, instead of resolving all of `lhs`
- *      and eager-merging both sides. This is the piece a naive port of
- *      iets's MAX_LEAVES=8 constant onto the OLD restart strategy didn't
- *      have -- measured clearly worse on its own (see git history), since
- *      it just paid the old expensive fallback 8x more often. With the
- *      cheap restart, the expensive two-sided eager merge below becomes
- *      rare: once every ~8 leaves lhs resolves itself to one leaf, not a
- *      full flatten-and-copy of both operands.
- *
- * Measured on the real ffmpeg-full.outPath benchmark against asnix's own
- * RHS_MAX=16/LHS_MIN=16/MAX_LEAVES=64 design: true attrset-byte total
- * 116.6MB -> 84.6MB, instructions +0.345%, peak RSS -6.3%, wall clock no
- * measured change. */
 #define LL_UNION_A_SMALL_MAX 8
 #define LL_UNION_MAX_LEAVES 8
 
 /* Combines lhs's own leaves (if lhs is a union) or lhs itself (if flat)
- * with rhs's own leaves (if rhs is a union, unpacked the same way --
- * matching iets's `for_each_leaf`) or rhs itself (if flat), in priority
- * order (lhs's leaves first, rhs's leaves last -- rhs wins ties). */
+ * with rhs's own leaves (if rhs is a union, unpacked the same way) or
+ * rhs itself (if flat), in priority order (lhs's leaves first, rhs's
+ * leaves last -- rhs wins ties). */
 static Value make_union_from_both(Value lhs, Value rhs) {
     const char *lbase = (const char *)(lhs.raw & ~0x7ULL);
     int64_t lraw = *(const int64_t *)(lbase + LL_ATTRS_OFF_COUNT);
@@ -179,7 +136,7 @@ Value ll_attrs_update(Value lhs, Value rhs) {
 }
 
 Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
-    /* M88: `attrs` is always the direct output of a prior OP_MK_ATTRS or a
+    /* `attrs` is always the direct output of a prior OP_MK_ATTRS or a
      * prior insert_dynamic call within the SAME `{...}`/`rec {...}`
      * literal (compiler.c's AST_ATTRS case) -- a `//` never runs in
      * between, so this is never actually a union header in practice.
@@ -187,14 +144,14 @@ Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
      * holds even if that invariant ever changes, rather than relying on
      * an unchecked assumption. */
     attrs = ll_bshared_attrs_resolve(attrs);
-    /* `${null} = value;` is silently omitted, not an error -- a real,
-     * deliberate nixpkgs idiom for a conditionally-present key
+    /* `${null} = value;` is silently omitted, not an error -- a real
+     * nixpkgs idiom for a conditionally-present key
      * (`${if cond then "key" else null} = value;`), confirmed against
-     * both real `nix-instantiate --eval` (`{ ${null} = 1; }` == `{}`,
-     * while `{ ${1} = 1; }` IS a hard error) and cppnix's own source
+     * real `nix-instantiate --eval` (`{ ${null} = 1; }` == `{}`, while
+     * `{ ${1} = 1; }` IS a hard error) and cppnix's own source
      * (`~/nix/src/libexpr/eval.cc`'s attrset-construction loop: `if
      * (nameVal.type() == nNull) continue;`, checked *before* the
-     * string-force/type-check below). Found via d.nix. */
+     * string-force/type-check below). */
     if (ll_tag_of(name_val) == LL_TAG_IMM && ll_imm_subtag(name_val) == LL_IMM_NULL) {
         return attrs;
     }
@@ -203,7 +160,7 @@ Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
                 ll_bshared_type_name(name_val));
         exit(1);
     }
-    /* M80: a `${...}` attribute name cannot carry string context -- real
+    /* A `${...}` attribute name cannot carry string context -- real
      * Nix's own `ExprAttrs::eval` calls `state.forceStringNoCtx` on a
      * dynamic attribute name (~/nix/src/libexpr/eval.cc), which hard-
      * errors ("the string '...' is not allowed to refer to a store path")
@@ -211,9 +168,7 @@ Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
      * `{ ${"${derivation {...}}"} = 1; }` fails on real
      * `nix-instantiate --eval` even though the same string, used as an
      * ordinary VALUE, is perfectly fine. Only this one call site is
-     * patched (not e.g. `listToAttrs`) -- see this project's own
-     * standing scope-cut convention of fixing exactly the call site a
-     * failing fixture needs, not every symbol-from-string site at once. */
+     * patched (not e.g. `listToAttrs`). */
     const LlStringContext *name_ctx = ll_string_context_of(name_val);
     if (!ll_ctx_is_empty(name_ctx)) {
         fprintf(stderr, "ll: the string used as a dynamic '${...}' attribute name is not allowed to refer to a "
@@ -244,7 +199,7 @@ Value ll_attrs_insert_dynamic(Value attrs, Value name_val, Value value) {
     void *mem = ll_arena_alloc(8 + (uint64_t)(acount + 1) * LL_ATTR_SIZE);
     char *out_entries = (char *)mem + LL_ATTRS_OFF_ENTRIES;
     if (pos > 0) memcpy(out_entries, aentries, (size_t)pos * LL_ATTR_SIZE);
-    /* M103: must be a 4-byte write -- entry's value bytes now start right after sym (no pad),
+    /* must be a 4-byte write -- entry's value bytes start right after sym (no pad),
      * so an 8-byte write here would clobber them. */
     *(uint32_t *)(out_entries + pos * LL_ATTR_SIZE + LL_ATTR_OFF_SYM) = sym;
     *(Value *)(out_entries + pos * LL_ATTR_SIZE + LL_ATTR_OFF_VALUE) = value;

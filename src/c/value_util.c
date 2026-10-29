@@ -17,29 +17,29 @@
 #include "ll/stats.h"
 #include "builtins_shared.h"
 #include "nar.h"
-#include "string_context.h" /* M76 */
+#include "string_context.h"
 #include "symtab.h"
 
-/* M118: clears both the low 3 tag bits AND the high 16 index bits a packed
+/* Clears both the low 3 tag bits AND the high 16 index bits a packed
  * ThunkMap word (heap.h's LL_THUNKMAP_MARKER comment) carries in its
  * OWN 8-byte Value -- a no-op on every other LL_TAG_PTR kind (String/
  * Path/Float/Cell/LazyApp), whose own pointers always have zero there
- * already (confirmed for this evaluator's actual arena allocations -- see
- * heap.h's comment), so EVERY function below that derives a dereferenceable
- * base pointer from an LL_TAG_PTR Value uses this mask unconditionally,
- * not just the ones that already know `v` is specifically a ThunkMap --
- * using the narrower `~0x7ULL` mask anywhere one of these functions might
- * be handed an unresolved ThunkMap word (e.g. ll_value_is_cell probing
- * a value that turns out to be a ThunkMap, main.c's printer walking
- * through is_cell/is_lazyapp/is_thunkmap in sequence) would leave the
- * packed index bits in the computed "base" pointer and crash dereferencing
- * it -- caught directly: an early version of this milestone that only
- * widened the mask at the force-chokepoint Cell/LazyApp checks (not here)
- * segfaulted in ll_value_is_cell on the very first `mapAttrs` print.
+ * already (see heap.h's comment), so EVERY function below that derives
+ * a dereferenceable base pointer from an LL_TAG_PTR Value uses this
+ * mask unconditionally, not just the ones that already know `v` is
+ * specifically a ThunkMap -- using the narrower `~0x7ULL` mask anywhere
+ * one of these functions might be handed an unresolved ThunkMap word
+ * (e.g. ll_value_is_cell probing a value that turns out to be a
+ * ThunkMap, main.c's printer walking through is_cell/is_lazyapp/
+ * is_thunkmap in sequence) would leave the packed index bits in the
+ * computed "base" pointer and crash dereferencing it -- confirmed: an
+ * earlier version that only widened the mask at the force-chokepoint
+ * Cell/LazyApp checks (not here) segfaulted in ll_value_is_cell on the
+ * very first `mapAttrs` print.
  * NOTE: `ll_value_is_path`/`ll_value_is_float`/`ll_value_is_cell`
- * themselves moved to value_util.h as `static inline` (M-inline-predicates)
- * -- this macro moved with them; still used by every OTHER function below
- * that derives a base pointer the same way. */
+ * themselves moved to value_util.h as `static inline` -- this macro
+ * moved with them; still used by every OTHER function below that
+ * derives a base pointer the same way. */
 #define LL_PTR_BASE_MASK 0x0000FFFFFFFFFFF8ULL
 
 Value ll_make_string_value(const char *s, size_t len) {
@@ -84,13 +84,11 @@ Value *ll_cell_target(Value v) {
     return *(Value **)(base + LL_CELL_OFF_TARGET);
 }
 
-/* M92/M162: LL_CELL_CHASE_LIMIT now lives in heap.h -- shared with the
- * hand-inlined copies of this exact loop in op_var_ref.S/force.S so all
- * three stay in lock-step (see heap.h's own comment for the full
- * rationale). This out-of-line version remains the reference
- * implementation and is still called directly from op_select.S/
- * op_select_or.S/op_with.S, none of which were hot enough on d.nix to be
- * worth hand-inlining too. */
+/* LL_CELL_CHASE_LIMIT lives in heap.h -- shared with the hand-inlined
+ * copies of this exact loop in op_var_ref.S/force.S so all three stay
+ * in lock-step (see heap.h's own comment for the full rationale). This
+ * out-of-line version remains the reference implementation and is
+ * still called directly from op_select.S/op_select_or.S/op_with.S. */
 Value ll_resolve_cell_chain(Value v) {
     int64_t i = 0;
     while (ll_value_is_cell(v)) {
@@ -104,8 +102,7 @@ Value ll_resolve_cell_chain(Value v) {
     return v;
 }
 
-/* M113: see heap.h's LL_LAZYAPP_MARKER comment for the full
- * rationale/layout. */
+/* See heap.h's LL_LAZYAPP_MARKER comment for the full rationale/layout. */
 Value ll_make_lazyapp1(Value fn, Value arg1) {
     void *mem = ll_arena_alloc(LL_LAZYAPP_SIZE);
     ll_stats_lazyapp++;
@@ -153,9 +150,8 @@ Value ll_resolve_lazyapp(Value v) {
     return result;
 }
 
-/* M118: see heap.h's LL_THUNKMAP_MARKER comment for the full
- * rationale/layout -- uses the same LL_PTR_BASE_MASK defined near the
- * top of this file. */
+/* See heap.h's LL_THUNKMAP_MARKER comment for the full rationale/layout
+ * -- uses the same LL_PTR_BASE_MASK defined near the top of this file. */
 static void *thunkmap_desc_of(Value v) {
     return (void *)(uintptr_t)(v.raw & LL_PTR_BASE_MASK);
 }
@@ -345,7 +341,7 @@ Value ll_coerce_to_string(Value v) {
             }
             break;
         case LL_TAG_PTR: {
-            /* M51: a Float formats via the SAME rule real Nix's own
+            /* A Float formats via the SAME rule real Nix's own
              * `coerceToString` uses for `toString`/coerceMore (verified
              * against `nix-instantiate --eval`: `toString 1.5` ==
              * "1.500000", `toString (0.0 - 1.0/0.0 ... )`-style nan/inf
@@ -372,7 +368,7 @@ Value ll_coerce_to_string(Value v) {
         }
         case LL_TAG_ATTRS: {
             /* An attrset with a `__toString` or `outPath` attribute
-             * coerces to a string via that attribute (M23) -- real Nix's
+             * coerces to a string via that attribute -- real Nix's
              * own `coerceToString` checks exactly these two, in this
              * order, before giving up (e.g. a derivation attrset's
              * `outPath` is exactly how `"${someDerivation}"` and
@@ -384,7 +380,7 @@ Value ll_coerce_to_string(Value v) {
              * its one argument, matching real Nix; its result (and a
              * plain `outPath`'s value) is coerced recursively, since
              * either could itself be a path or another such object.
-             * M76: `outPath`/`__toString`'s own result may already carry
+             * `outPath`/`__toString`'s own result may already carry
              * attached string context (e.g. a derivation's own output
              * path, see derivation.c's ll_prim_derivation) -- forward
              * it unchanged, same pointer-identity preservation every
@@ -410,7 +406,7 @@ Value ll_coerce_to_string(Value v) {
         }
         case LL_TAG_LIST: {
             /* A list coerces to a string by recursively coercing each
-             * element and joining with a single space (M47) -- real
+             * element and joining with a single space -- real
              * Nix's own `coerceToString`'s `coerceMore` branch does the
              * same (`~/nix/src/libexpr/eval.cc`), found needed by
              * `<nix/fetchurl.nix>`'s own `urls = [ url ];` derivation
@@ -424,7 +420,7 @@ Value ll_coerce_to_string(Value v) {
              * calls it "not quite correct") -- not hit by anything this
              * project has evaluated so far.
              *
-             * M76: each element's own context (if any) unions into the
+             * Each element's own context (if any) unions into the
              * joined result's context -- same pattern as
              * `concat_strings_impl`'s propagation. */
             int64_t count = ll_bshared_list_count(v);
@@ -455,13 +451,13 @@ Value ll_coerce_to_string(Value v) {
     exit(1);
 }
 
-/* M75: `derivation {...}`'s own attribute coercion (derivation.c) --
+/* `derivation {...}`'s own attribute coercion (derivation.c) --
  * real Nix's `derivationStrictInternal` (`~/nix/src/libexpr/
  * primops.cc`) calls `coerceToString` with `coerceMore=true` (accept
  * int/bool/null, same permissiveness as `builtins.toString`) AND
  * `copyToStore=true` (a Path NOT already under `/nix/store/` gets
  * NAR-hashed and copied, same as genuine `"${...}"` string
- * interpolation, M75's `coerce_to_string_for_interp` above) -- a
+ * interpolation, `coerce_to_string_for_interp` above) -- a
  * combination NEITHER existing coercion function provides on its own
  * (`ll_coerce_to_string` has the former but not the latter;
  * `coerce_to_string_for_interp` has the latter but rejects int/bool/
@@ -478,12 +474,12 @@ Value ll_coerce_to_string_for_derivation(Value v) {
         char *nul_terminated = malloc((size_t)len + 1);
         memcpy(nul_terminated, bytes, (size_t)len);
         nul_terminated[len] = '\0';
-        /* M76: a bare Path, once coerced into a derivation attribute's
+        /* A bare Path, once coerced into a derivation attribute's
          * text, is exactly real Nix's `copyToStore=true` origin point
          * for an Opaque context entry -- whether it was ALREADY under
          * `/nix/store/` (a prior derivation's own output, reached as a
          * bare Path rather than through that derivation's attrset) or
-         * just got NAR-copied there by M75 below. This replaces M74's
+         * just got NAR-copied there below. This replaces
          * `ll_collect_input_refs`'s structural bare-Path detection
          * entirely: that walk is blind to a Path reached only AFTER a
          * prior string interpolation, this is not. */
@@ -565,22 +561,13 @@ Value ll_coerce_to_string_for_derivation(Value v) {
 }
 
 /* String *interpolation* coercion is strictly narrower than `toString`'s
- * (ll_coerce_to_string, above) -- verified directly against real Nix:
- * `nix-instantiate --eval -E '"${7}"'` and `'"${true}"'` and `'"${null}"'`
- * all fail with "cannot coerce ... to a string", even though
- * `builtins.toString 7`/`true`/`null` succeed. (Real Nix's own
- * EvalState::coerceToString has a `coerceMore` flag; `toString` passes
- * true, plain "${...}" interpolation passes false -- only strings, paths,
- * and sets with a `__toString`/`outPath` attr are accepted without it;
- * none of the latter exist in this project yet.) This is *not* the
- * function docs/architecture.md's Known Bugs entry is about -- that one
- * was about `ll_coerce_to_string` returning the wrong *string*
- * ("true"/"false" instead of "1"/""); this is a separate, stricter
- * function for a different call site, needed because the task's own
- * verification step (checked against real nix-instantiate before
- * trusting it) caught that bare interpolation of a non-string is
- * supposed to be a hard error, not silently stringified. */
-/* M67: `check_path_exists` -- true for genuine `"${...}"` string
+ * (ll_coerce_to_string, above): `"${7}"`/`"${true}"`/`"${null}"` all fail
+ * with "cannot coerce ... to a string", even though `builtins.toString
+ * 7`/`true`/`null` succeed. Real Nix's own EvalState::coerceToString has
+ * a `coerceMore` flag; `toString` passes true, plain "${...}"
+ * interpolation passes false -- only strings, paths, and sets with a
+ * `__toString`/`outPath` attr are accepted without it. */
+/* `check_path_exists` -- true for genuine `"${...}"` string
  * interpolation (OP_STR_CONCAT, via `ll_concat_strings` below), false
  * for the UNRELATED internal reuse of this same coercion logic by the
  * `+` operator's path-concat case (`ll_add_values`, via
@@ -624,7 +611,7 @@ static Value coerce_to_string_for_interp(Value v, int check_path_exists, int cop
          * function's own comment above), so reject isn't right either;
          * coerce it the same way `ll_coerce_to_string` does. */
         if (ll_value_is_path(v)) {
-            /* M67: real Nix additionally requires the path *exist* on
+            /* Real Nix additionally requires the path *exist* on
              * disk at this specific call site -- string interpolation of
              * a bare path triggers "copy to store" coercion (unlike
              * `builtins.toString`, which just formats the text and never
@@ -659,15 +646,15 @@ static Value coerce_to_string_for_interp(Value v, int check_path_exists, int cop
                     exit(1);
                 }
             }
-            /* M75: a path already under `/nix/store/` (e.g. a prior
+            /* A path already under `/nix/store/` (e.g. a prior
              * derivation's own output) is used verbatim -- real Nix
              * never re-copies something that's already in the store.
-             * Anything else is NAR-hashed and copied (M75's
+             * Anything else is NAR-hashed and copied (see
              * ll_copy_path_to_store), gated on `copy_to_store` -- see
              * this function's own header comment (follow-up): this flag
              * is real Nix's `copyToStore` exactly, independent of
              * `check_path_exists`. */
-            /* M76: same Opaque-context origin point as
+            /* Same Opaque-context origin point as
              * ll_coerce_to_string_for_derivation's identical Path
              * branch -- see its own comment. Only reached when
              * `copy_to_store`, matching exactly when the store-copy
@@ -691,7 +678,7 @@ static Value coerce_to_string_for_interp(Value v, int check_path_exists, int cop
             free(nul_terminated);
             return ll_coerce_to_string(v);
         }
-        /* M51: a bare Float is a THIRD such kind -- same memory-corruption
+        /* A bare Float is a THIRD such kind -- same memory-corruption
          * risk as Path if returned unchanged (its marker+double bytes
          * would be misread as a string length+content). Unlike Path, a
          * Float is REJECTED here, same as an int (verified against
@@ -715,7 +702,7 @@ static Value coerce_to_string_for_interp(Value v, int check_path_exists, int cop
     }
     if (ll_tag_of(v) == LL_TAG_ATTRS) {
         /* An attrset with `__toString`/`outPath` IS accepted here even
-         * though int/bool/null/list/plain-attrset aren't (M23) --
+         * though int/bool/null/list/plain-attrset aren't --
          * real Nix's own `coerceMore=false` path still special-cases
          * exactly this (verified: `"${derivation {...}}"` interpolates
          * fine via its `outPath`, while `"${{}}""` -- a plain attrset
@@ -812,7 +799,7 @@ static Value concat_strings_impl(const Value *parts, int64_t count, int check_pa
     }
     free(coerced);
     Value result = (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_PTR };
-    /* M76: `ll_concat_path` (M64, path-literal interpolation/`~`)
+    /* `ll_concat_path` (path-literal interpolation/`~`)
      * also calls this but then rewraps the result as a PATH, not a
      * string -- Paths never carry context in real Nix (only strings
      * do), so attaching here and letting canon_wrap_as_path's own
@@ -823,7 +810,7 @@ static Value concat_strings_impl(const Value *parts, int64_t count, int check_pa
 }
 
 /* Shared by ll_add_values (`path + string`) and ll_concat_path
- * (M64, `~`/path-literal interpolation): re-canonicalizes a plain String
+ * (`~`/path-literal interpolation): re-canonicalizes a plain String
  * Value's bytes (which must already start with '/' -- true for both
  * callers, since each only reaches this once it's established the
  * concatenation's first operand was already an absolute Path) and
@@ -841,15 +828,15 @@ static Value canon_wrap_as_path(Value string_result) {
     return out;
 }
 
-/* M64: the runtime half of path-literal interpolation (`./${foo}`,
+/* The runtime half of path-literal interpolation (`./${foo}`,
  * `~/${foo}`, `/${foo}`, ...) -- see OP_PATH_CONCAT's comment in ir.h for
  * why unconditionally canon-wrapping is safe here (compiler.c's AST_PATH
  * case only ever emits this op when `parts[0]` is already a Path
  * constant). Calls `concat_strings_impl` directly with
  * `check_path_exists=0` (NOT the public `ll_concat_strings` wrapper,
- * which since M67 defaults to `check_path_exists=1`) -- a path LITERAL's
+ * which defaults to `check_path_exists=1`) -- a path LITERAL's
  * interpolated parts are plain text being assembled into a new path, not
- * a Path VALUE being embedded in a string, so the M67 existence check
+ * a Path VALUE being embedded in a string, so the existence check
  * (which exists specifically for the latter, `"${somePath}"`) must not
  * apply here; same distinction `ll_add_values`'s own `path + string`
  * case (right below) already makes for the identical reason. Re-
@@ -875,7 +862,7 @@ Value ll_add_values(Value lhs, Value rhs) {
     if (lt == LL_TAG_INT && rt == LL_TAG_INT) {
         return ll_make_int(ll_int_value(lhs) + ll_int_value(rhs));
     }
-    /* M51: int/float or float/float -- promote and add as doubles, same
+    /* int/float or float/float -- promote and add as doubles, same
      * rule as real Nix's `+` (ExprConcatStrings::eval, ~/nix's eval.cc:
      * "Upgrade the type from int to float" once either operand is a
      * float). Checked BEFORE the plain-int-vs-non-int fatal below and
@@ -898,7 +885,7 @@ Value ll_add_values(Value lhs, Value rhs) {
         exit(1);
     }
     Value parts[2] = { lhs, rhs };
-    /* M67: `+` never requires a Path to exist (check_path_exists=0).
+    /* `+` never requires a Path to exist (check_path_exists=0).
      * Follow-up (chasing d.nix/nixpkgs-hash-parity): `copy_to_store`,
      * unlike `check_path_exists`, is NOT unconditionally 0 here -- real
      * Nix's `copyToStore = firstType == nString` (~/nix/src/libexpr/
@@ -917,20 +904,20 @@ Value ll_add_values(Value lhs, Value rhs) {
      * unconverted (copy_to_store was always 0 for `+` before this). */
     Value result = concat_strings_impl(parts, 2, 0, !ll_value_is_path(lhs));
     if (ll_value_is_path(lhs)) {
-        /* M57g: canonicalize `.`/`..`/doubled-slash segments the result
+        /* Canonicalize `.`/`..`/doubled-slash segments the result
          * may now have (e.g. `/foo/bar + "/../xyzzy/./foo.txt"` ==
          * `/foo/xyzzy/foo.txt`), same as a path *literal* already gets
          * at compile time (compiler.c's AST_PATH case) -- a runtime
          * `path + string` concatenation previously just kept the raw,
          * uncollapsed text. `result`'s bytes always start with '/'
-         * here since `lhs` is already an absolute Path. M64: shares
+         * here since `lhs` is already an absolute Path. Shares
          * canon_wrap_as_path with ll_concat_path now, same logic. */
         return canon_wrap_as_path(result);
     }
     return result;
 }
 
-/* M51: `-`/`*`'s slow-path fallback -- see value_util.h's comment. Only
+/* `-`/`*`'s slow-path fallback -- see value_util.h's comment. Only
  * ever called when at least one operand isn't a plain int (the all-int
  * case is already handled by op_arith.S's own fast path before this is
  * reached), so getting here with two non-floats is already a type
@@ -1057,7 +1044,7 @@ Value ll_concat_lists(Value lhs, Value rhs) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_LIST };
 }
 
-/* Moved here from compiler.c (M57g) so ll_add_values can reuse it for
+/* Moved here from compiler.c so ll_add_values can reuse it for
  * `path + string` concatenation -- see this function's own long comment
  * in value_util.h for why, and compiler.c's AST_PATH case for the
  * original, still-current, compile-time-literal use. */

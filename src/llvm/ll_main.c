@@ -1,12 +1,8 @@
-/* M10: end-to-end CLI: lexer -> parser -> compiler (src/c, vendored
- * from asnix) -> ir_link (dispatch_table.c) -> ll_eval (ll_eval.c's
- * AOT threaded dispatch over src/llvm/ops/*.c's handlers), with
+/* End-to-end CLI: lexer -> parser -> compiler (src/c, vendored from
+ * asnix) -> ir_link (dispatch_table.c) -> ll_eval (ll_eval.c's AOT
+ * threaded dispatch over src/llvm/ops/*.c's handlers), with
  * `builtins`/`map`/`import`/etc. bound via root_env.c's
- * ll_make_root_env. No LLVM involved at runtime at all -- see
- * ~/.claude/plans/soft-wishing-engelbart.md's M10 section for why: the
- * op handlers are plain C, compiled once ahead of time, same as
- * asnix's own hand-written asm handlers are assembled once into
- * asnix's own binary.
+ * ll_make_root_env. No LLVM involved at runtime at all.
  *
  * Printing uses ll_print.c, a verbatim port of asnix's own main.c
  * printer (quoted strings, attrsets sorted by key, <PRIMOP>/<LAMBDA>
@@ -35,14 +31,10 @@ static double ms_between(struct timespec *a, struct timespec *b) {
 
 /* If argv[1] names an existing, readable regular file, read it as the
  * source -- matching asnix's own CLI convention (a file path, not an
- * inline expression), so a file-based workload can be benchmarked
- * against asnix without an extra shell/`cat` process to turn a file
- * into a giant command-line argument first (that extra process was
- * being measured as if it were this evaluator's own cost -- see
- * bench/results/M8-findings.md's M10 section). Falls back to treating
- * argv[1] as a literal expression otherwise, preserving
- * tests/difftest.sh's existing convention (none of its 44 fixed
- * expressions are themselves valid file paths). */
+ * inline expression). Falls back to treating argv[1] as a literal
+ * expression otherwise, preserving tests/difftest.sh's existing
+ * convention (none of its fixed expressions are themselves valid file
+ * paths). */
 static char *read_file_source(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return NULL;
@@ -76,9 +68,9 @@ static char *current_dir(void) {
  * resolves against *base_dir_out, so a file argument NOT sitting
  * directly in the process's own cwd needs its real directory here, not
  * a placeholder. *resolved_path_out is the canonicalized absolute path
- * itself (ll_compile's `file_path` argument, g_compile_file_path --
- * read by __curPos__/builtins.unsafeGetAttrPos's own `file` field; a
- * NULL here is why that field printed empty instead of the real path). */
+ * itself, read by __curPos__/builtins.unsafeGetAttrPos's own `file`
+ * field -- a NULL here prints that field empty instead of the real
+ * path. */
 static void resolve_file_for_compile(const char *path, char **base_dir_out, char **resolved_path_out) {
     char *abs;
     if (path[0] == '/') {
@@ -109,14 +101,6 @@ static void resolve_file_for_compile(const char *path, char **base_dir_out, char
 int main(int argc, char **argv) {
     char *file_src = argc > 1 ? read_file_source(argv[1]) : NULL;
     const char *src = file_src ? file_src : (argc > 1 ? argv[1] : "42");
-    /* Matches asnix's own two entry points exactly: a real file's
-     * relative imports resolve against ITS OWN directory, and its own
-     * resolved path feeds position tracking (ll_eval_file's
-     * base_dir/resolved, via dir_of/resolve_import_path); a literal CLI
-     * expression (no file of its own) resolves imports against the
-     * process's cwd directly, with no file path at all for position
-     * tracking (ll_eval_expr_source) -- neither is ever a fixed
-     * placeholder. */
     char *base_dir, *resolved_path = NULL;
     if (file_src) {
         resolve_file_for_compile(argv[1], &base_dir, &resolved_path);
@@ -129,14 +113,8 @@ int main(int argc, char **argv) {
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t0);
     ll_arena_init(0);
     /* Lazy-thunk-compile experiment, ported from asnix: default ON here
-     * (unlike asnix, which keeps it opt-in -- see that repo's own
-     * bytecode-cache interaction, which ll has no equivalent of since it
-     * has no bytecode-cache subsystem at all). Verified clean under both
-     * states (44/44 difftest, 148/148 nixpkgs-hash, byte-identical real-
-     * benchmark output) with a real, substantial win (-6.52% ffmpeg,
-     * -2.79% plasma) and no known blocker, so there's no reason to leave
-     * it behind a flag nobody will ever think to set. LL_EAGER_THUNK=1
-     * is the rollback switch if a real regression ever surfaces. */
+     * (unlike asnix, which keeps it opt-in). LL_EAGER_THUNK=1 is the
+     * rollback switch if a regression ever surfaces. */
     ll_lazy_thunk_enabled = getenv("LL_EAGER_THUNK") == NULL;
     Ast *root = ll_parse(src);
     if (show_stats) clock_gettime(CLOCK_MONOTONIC, &t1);

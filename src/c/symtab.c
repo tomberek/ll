@@ -24,15 +24,10 @@ static uint64_t hash_bytes(const char *s, size_t len) {
      * a loop-carried dependency (each step's multiply needs the previous
      * step's result), so the byte-at-a-time version pays one full
      * xor+multiply latency chain PER BYTE even though each step does
-     * almost no work -- for a 9-byte identifier that's 9 serialized
-     * multiplies where iets's own `FxHasher::write` (src/syntax/symbol.rs)
-     * needs at most 2. Measured on a real corpus of 1,833,170
-     * `ll_intern` call arguments captured from a full nixpkgs/ffmpeg
-     * eval (avg length 9.12 bytes): ~7.4ns/call -> ~6.0ns/call, ~19%
-     * faster, chain-length-bound exactly as predicted. Reads are bounded
-     * by `len` the same as the byte-at-a-time version -- never past
-     * `s[0..len)` -- so this is safe for any caller's buffer, aligned or
-     * not (`memcpy`, not a cast, to avoid unaligned-access UB). */
+     * almost no work. Reads are bounded by `len` the same as the
+     * byte-at-a-time version -- never past `s[0..len)` -- so this is
+     * safe for any caller's buffer, aligned or not (`memcpy`, not a
+     * cast, to avoid unaligned-access UB). */
     size_t i = 0;
     for (; i + 8 <= len; i += 8) {
         uint64_t w;
@@ -52,8 +47,7 @@ static uint64_t hash_bytes(const char *s, size_t len) {
         h *= 0x517cc1b727220a95ULL;
     }
     /* splitmix64 finalizer: avalanches the low bits FxHash-style mixing
-     * otherwise leaves weak (the exact pathology ~/gnix/iets found and
-     * fixed the same way). */
+     * otherwise leaves weak. */
     h ^= h >> 30;
     h *= 0xbf58476d1ce4e5b9ULL;
     h ^= h >> 27;

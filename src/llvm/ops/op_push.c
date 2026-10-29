@@ -41,15 +41,11 @@ LL_OP_ATTR Value ll_op_push_const(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-/* M10 perf: a fused run of `ip->a` consecutive OP_PUSH_INT ops with
- * contiguous pool indices starting at `ip->b`, assembled by
- * dispatch_table.c's post-link peephole pass (not emitted by the
- * compiler -- see that file's own comment). Replaces what would
- * otherwise be `ip->a` separate musttail hops with one hop and a
- * tight loop. A literal list/attrset built from plain integer
- * constants (e.g. bench/workloads/list_build_large.nix) compiles to
- * exactly this shape: a long run of bare OP_PUSH_INT, nothing
- * interleaved, immediately followed by OP_MK_LIST/OP_MK_ATTRS. */
+/* A fused run of `ip->a` consecutive OP_PUSH_INT ops with contiguous
+ * pool indices starting at `ip->b`, assembled by dispatch_table.c's
+ * post-link peephole pass (not emitted by the compiler). Replaces what
+ * would otherwise be `ip->a` separate musttail hops with one hop and a
+ * tight loop. */
 LL_OP_ATTR Value ll_op_push_int_run(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     int64_t count = ip->a;
     int64_t start = ip->b;

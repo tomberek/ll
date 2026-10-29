@@ -10,58 +10,19 @@ typedef struct {
     size_t len, cap;
 } Buf;
 
-/* M174: `ll_build_derivation_aterm_cached` used to start every single
- * call from a fresh `Buf b = { 0 }` (NULL, zero-capacity), growing it by
- * doubling via `realloc` as bytes were appended, then handing the final
- * `b.buf` straight to the caller to `free()`. derivation.c calls this up
- * to 3 times PER DERIVATION (masked/real/cache-hash passes, M151's own
- * comment above `aterm_cache`), and on the real d.nix/ffmpeg eval that is
- * 5,229 derivation builds -- 64,274 `realloc` calls inside `buf_reserve`
- * total, ~13,427 of them the very first cap-0-to-256 allocation, for a
- * fresh malloc-to-free lifecycle every single call. M151 already deduped
- * the redundant re-ESCAPING *work* across those 3 passes (the character-
- * by-character scan); it left this allocation/growth/free churn
- * completely untouched -- that's what this milestone fixes, the same
- * anti-pattern `iets` found and fixed in its own derivation-ATerm
- * serialization (replacing a fresh growing buffer per unparse with one
- * buffer per thread that keeps its capacity across calls).
- *
- * Fix: one process-global `Buf` (`g_aterm_buf` below) that keeps its
- * allocated capacity across EVERY call across the whole eval, reset
- * (`len = 0`, `cap` untouched) at the start of each call instead of
- * being freed and started fresh. Safe as a single global precisely
- * because asnix is single-threaded (see `bytecode_cache.h`'s own note:
- * the one place this project forks work out, it uses a forked PROCESS,
- * never a pthread) AND because this function is a pure string
- * serializer over already-fully-evaluated C strings -- it calls nothing
- * that evaluates Nix code or could call back into this function while a
- * call is already in progress, so there is no reentrancy/nesting case
- * where two live calls could want the same buffer at once (confirmed by
- * reading every function this file calls: `buf_reserve`/`buf_putc`/
- * `buf_put_bytes`/`buf_put_escaped`/`buf_put_escaped_raw`/
- * `find_escape_aterm`/the `AtermEscapeCache` lookup/insert helpers --
- * none of them touch the evaluator).
- *
- * The existing API contract still hands every caller a malloc'd,
- * independently-owned, NUL-terminated buffer it `free()`s itself
- * (`derivation.c`'s 3 call sites each `sha256_or_die` the result then
- * `free()` it immediately -- none holds on to it past the next call
- * into this function, confirmed by reading every call site, but the
- * contract is honored unconditionally regardless) -- so the final
- * `ll_build_derivation_aterm_cached` step below copies the finished
- * text out of `g_aterm_buf` into a fresh, exactly-sized `malloc`
- * (ONE allocation, sized precisely, instead of ~12 doubling reallocs
- * worth of copy-on-grow churn) and returns THAT, leaving `g_aterm_buf`
- * itself untouched (still allocated, ready for the next call to reset
- * and reuse) rather than handing its own backing storage to the caller.
- * `AtermEscapeCache`'s cached byte spans are unaffected either way: a
- * cache entry's `val` is always ITS OWN separate `malloc`'d copy (see
- * `buf_put_escaped` below), copied out of `b->buf[start..b->len)` at
- * insert time, never a pointer into `b->buf` itself -- so it stays
- * correct whether `b->buf` is a fresh allocation every call (the old
- * behavior) or a long-lived buffer that gets `realloc`'d out from under
- * a previous call's pointer (this fix's new behavior); nothing outside
- * this file ever sees or holds a raw pointer into `g_aterm_buf`. */
+/* Reused across every call (not freed/reallocated fresh each time):
+ * reset (`len = 0`, `cap` untouched) at the start of each call. Safe as
+ * a single global because asnix is single-threaded, and because this
+ * function is a pure string serializer over already-evaluated C strings
+ * -- it calls nothing that evaluates Nix code or could call back into
+ * this function while a call is already in progress, so there is no
+ * reentrancy/nesting case where two live calls could want the buffer at
+ * once. Each caller still gets back a malloc'd, independently-owned,
+ * NUL-terminated buffer it frees itself; `g_aterm_buf` itself is never
+ * handed out. `AtermEscapeCache` cache entries are always their own
+ * separate malloc'd copy (see `buf_put_escaped` below), never a pointer
+ * into `b->buf`, so they stay correct regardless of how `g_aterm_buf` is
+ * reallocated between calls. */
 static Buf g_aterm_buf = { 0 };
 
 static void buf_reserve(Buf *b, size_t extra) {
@@ -82,34 +43,19 @@ static void buf_put_bytes(Buf *b, const char *s, size_t n) {
     b->len += n;
 }
 
-/* M154: every single call site below passes a C STRING LITERAL (the fixed
- * ATerm structural punctuation, plus the 5 two-byte escape sequences
+/* Every call site below passes a C STRING LITERAL (the fixed ATerm
+ * structural punctuation, plus the 5 two-byte escape sequences
  * \n/\r/\t/\"/\\ -- never a `derivation.c`-owned dynamic string; those all
- * go through `buf_put_escaped`/`buf_put_escaped_raw` instead). A literal's
- * length is known at compile time via `sizeof`, so there is nothing to
- * measure with a runtime `strlen()` call -- the previous `buf_puts(Buf*,
- * const char*)` helper strlen()'d its argument on every call, including
- * the 5 escape-sequence cases inside `buf_put_escaped_raw`'s hot loop
- * (one call per actual \n/\r/\t/"/\\ byte escaped -- e.g. every newline in
- * a multi-line `buildCommand`/env value). `lit` MUST be a string literal
- * (or other `char[N]`), not a `char *` variable -- `sizeof` on a pointer
- * would silently compute the wrong (pointer-sized) length instead of
- * failing loudly, so this is deliberately NOT a general-purpose replacement
- * for `buf_puts`. */
+ * go through `buf_put_escaped`/`buf_put_escaped_raw` instead). `lit` MUST
+ * be a string literal (or other `char[N]`), not a `char *` variable --
+ * `sizeof` on a pointer would silently compute the wrong (pointer-sized)
+ * length instead of failing loudly, so this is deliberately NOT a
+ * general-purpose replacement for `buf_puts`. */
 #define buf_put_lit(b, lit) buf_put_bytes((b), (lit), sizeof(lit) - 1)
 
-/* perf (M138): SWAR scan for the aterm escape set (\n \r \t \" \\),
- * processing 8 bytes per iteration instead of one branchy compare-chain
- * per byte. Ported from iets's own `find_escape` (~/gnix/iets/src/store/
- * drv.rs) -- confirmed via its own exhaustive-fuzz unit test
- * (`find_escape_finds_the_first_byte_to_escape`) and re-derived here
- * against the two underlying bit-twiddling identities independently
- * (Sean Eron Anderson's "bit twiddling hacks": "determine if a word has
- * a byte less than n" -- correct for ANY byte value 0-255, not just
- * ASCII, as long as n<=128; and the companion "has a zero byte" trick
- * used here to detect an exact byte match via XOR-then-haszero). Pure
- * filter: a chunk flagged "maybe" is re-scanned byte-by-byte to find the
- * real position (handles the trick's rare false positives); a chunk
+/* SWAR scan for the aterm escape set (\n \r \t \" \\), processing 8
+ * bytes per iteration. A chunk flagged "maybe" is re-scanned byte-by-byte
+ * to find the real position (handles rare false positives); a chunk
  * flagged "no" is trusted outright (the identities have no false
  * negatives), so output is byte-for-byte identical to a plain scalar
  * scan for every input, including non-ASCII/non-UTF-8 bytes. */
@@ -142,27 +88,15 @@ static size_t find_escape_aterm_scalar(const unsigned char *s, size_t len) {
 #if defined(__x86_64__) || defined(__i386__)
 #include <emmintrin.h>
 
-/* perf: real SSE2 vector compare, 16 bytes/iteration, ported from
- * iets's own `Escapes::mask`/`Escapes::Aterm` (~/gnix/iets/src/
- * bytescan.rs) -- the ABOVE find_escape_aterm_scalar is itself a port
- * of an OLDER iets, from before iets's own commit 4116e034 ("print:
- * find bytes to escape 16 at a time") upgraded its scanner from the
- * identical SWAR trick to this. SSE2 is baseline on every x86-64 CPU
- * (part of the ABI, no -msse2 flag or runtime feature check needed),
- * so this is the unconditional x86 path, not an opt-in. One `_mm_or_
- * si128` tree ORs five byte-equality masks (`"`, `\`, `\t`, `\n`,
- * `\r`) rather than the scalar version's three arithmetic "less-than/
- * equals" identities, because a vector compare makes a plain
- * equality test as cheap as the scalar version's less-than trick
- * (and more direct to read). `_mm_movemask_epi8` packs the 16 per-
- * lane comparison results into one bit per byte; `__builtin_ctz`
- * finds the first (lowest-index) set bit directly, replacing the
- * scalar version's byte-by-byte re-scan of a flagged chunk entirely
- * -- the vector compare already pinpoints the exact byte, no "maybe"
- * false positives to re-verify (unlike the scalar version's SWAR
- * identities, a vector *equality* compare has none). The tail
- * (<16 remaining bytes) falls through to the scalar scanner above,
- * which is already correct for any length. */
+/* SSE2 vector compare, 16 bytes/iteration. SSE2 is baseline on every
+ * x86-64 CPU (part of the ABI, no -msse2 flag or runtime feature check
+ * needed), so this is the unconditional x86 path, not an opt-in. One
+ * `_mm_or_si128` tree ORs five byte-equality masks (`"`, `\`, `\t`,
+ * `\n`, `\r`). `_mm_movemask_epi8` packs the 16 per-lane comparison
+ * results into one bit per byte; `__builtin_ctz` finds the first
+ * (lowest-index) set bit directly -- the vector compare already
+ * pinpoints the exact byte, no false positives to re-verify. The tail
+ * (<16 remaining bytes) falls through to the scalar scanner above. */
 static size_t find_escape_aterm(const unsigned char *s, size_t len) {
     size_t i = 0;
     for (; i + 16 <= len; i += 16) {
@@ -184,14 +118,10 @@ static size_t find_escape_aterm(const unsigned char *s, size_t len) {
 }
 #endif
 
-/* M151: per-derivation escape cache, keyed by SOURCE POINTER (see aterm.h's
- * own comment on `AtermEscapeCache`/`ll_build_derivation_aterm_cached`
- * for why pointer identity, not content, is both correct and exactly what
- * `derivation.c`'s 3-passes-per-derivation caller needs). Plain open-
- * addressing table, linear probe, power-of-two capacity -- the per-
- * derivation entry count is small (roughly 2*nenv + nargs + ninput_srcs +
- * a handful) and known well enough up front (the caller's own `hint`) that
- * a simple table comfortably outperforms anything fancier here. */
+/* Per-derivation escape cache, keyed by SOURCE POINTER (see aterm.h's own
+ * comment on `AtermEscapeCache`/`ll_build_derivation_aterm_cached` for why
+ * pointer identity, not content, is correct here). Plain open-addressing
+ * table, linear probe, power-of-two capacity. */
 typedef struct {
     const char *key; /* NULL = empty slot */
     char *val;        /* malloc'd escaped bytes (quotes included), NOT NUL-terminated */
@@ -201,13 +131,7 @@ typedef struct {
 struct AtermEscapeCache {
     AtermCacheSlot *slots;
     size_t cap;   /* power of two, > 0 */
-    size_t count; /* occupied slots -- tracked incrementally, NOT rescanned
-                    * per insert (an earlier version of this cache scanned
-                    * the whole table on every single insert to recompute
-                    * this, an O(cap) cost paid once per distinct string;
-                    * measured directly, by itself, to be the dominant cost
-                    * of this whole milestone's fix -- see M151's own
-                    * writeup). */
+    size_t count; /* occupied slots -- tracked incrementally, not rescanned per insert. */
 };
 
 static size_t aterm_ptr_hash(const char *p) {
@@ -314,14 +238,13 @@ static void buf_put_escaped_raw(Buf *b, const char *s) {
     buf_putc(b, '"');
 }
 
-/* M151: `cache`-aware entry point -- NULL `cache` is exactly the pre-M151
- * behavior (escape straight into `b`, every call, no memoization). With a
- * cache, a pointer seen before (within THIS cache's lifetime) is a pure
- * `buf_put_bytes` memcpy, skipping `find_escape_aterm`'s scan and the
- * switch-based re-encode entirely; a first-seen pointer pays the normal
- * cost once, then has its exact output span (read back from `b`, since
- * `buf_put_escaped_raw` appends in place) copied into the cache for the
- * next pass to reuse. */
+/* `cache`-aware entry point -- NULL `cache` means escape straight into
+ * `b` every call, no memoization. With a cache, a pointer seen before
+ * (within THIS cache's lifetime) is a pure `buf_put_bytes` memcpy,
+ * skipping `find_escape_aterm`'s scan and the switch-based re-encode
+ * entirely; a first-seen pointer pays the normal cost once, then has its
+ * exact output span (read back from `b`, since `buf_put_escaped_raw`
+ * appends in place) copied into the cache for the next pass to reuse. */
 static void buf_put_escaped(Buf *b, const char *s, AtermEscapeCache *cache) {
     if (cache) {
         char *cval;

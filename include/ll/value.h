@@ -35,7 +35,7 @@
 #define LL_TAG_LIST     0x4 /* pointer to a list heap object */
 #define LL_TAG_CLOSURE  0x5 /* pointer to a lambda/closure heap object */
 #define LL_TAG_THUNK    0x6 /* pointer to a 2-word thunk cell */
-#define LL_TAG_PRIMOP   0x7 /* pointer to a native builtin-function heap object (M7) */
+#define LL_TAG_PRIMOP   0x7 /* pointer to a native builtin-function heap object */
 
 /* IMM sub-tags, packed into bits [63:3] of an LL_TAG_IMM word. */
 #define LL_IMM_NULL      0
@@ -43,17 +43,12 @@
 #define LL_IMM_TRUE      2
 #define LL_IMM_BLACKHOLE 3
 
-/* 61-bit signed immediate integer range (M56): the ±2^60 window a
- * TAG_INT word can actually hold. Spelled as plain decimal literals (no
- * INT64_C/shift, no `LL` suffix) specifically so this is usable *both*
- * from C and as a GAS immediate operand after cpp substitution -- GAS's
- * own expression parser reads a bare decimal literal like
- * `1152921504606846975` directly, but chokes on C integer-suffix syntax.
- * Needed in asm now because op_push_int/op_arith.S's add/sub/mul/div
- * fast paths inline the overflow check directly (see those files) rather
- * than paying a `call` into ll_make_int per op -- same inlining
- * tradeoff value.h's own header comment already describes for the
- * tagging bit tricks themselves. */
+/* 61-bit signed immediate integer range: the ±2^60 window a TAG_INT word
+ * can actually hold. Spelled as plain decimal literals (no INT64_C/shift,
+ * no `LL` suffix) specifically so this is usable *both* from C and as a
+ * GAS immediate operand after cpp substitution -- GAS's own expression
+ * parser reads a bare decimal literal like `1152921504606846975`
+ * directly, but chokes on C integer-suffix syntax. */
 #define LL_INT_MAX 1152921504606846975
 #define LL_INT_MIN (-1152921504606846976)
 
@@ -68,8 +63,8 @@ typedef struct {
 /*
  * Implemented in src/asm/value.S, not as C inline functions: these are the
  * canonical, directly-unit-tested reference implementation of the tagging
- * scheme. The hot evaluator core (M3+) inlines the same bit tricks directly
- * in op handlers instead of paying a `call` per tag check -- these routines
+ * scheme. The hot evaluator core inlines the same bit tricks directly in
+ * op handlers instead of paying a `call` per tag check -- these routines
  * exist for the C-side boundary (compiler, debug printing, tests).
  */
 int ll_tag_of(Value v);

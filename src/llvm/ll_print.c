@@ -2,11 +2,7 @@
  * print_string_contents, print_attr_name, print_active_push, print_active_pop,
  * print_attrs_seen_mark, print_peel_wrappers, print_value_inner,
  * print_value_concrete, print_value --
- * see ~/.claude/plans/soft-wishing-engelbart.md. Kept behaviorally identical
- * to that reference (escaping rules, attrset key quoting/sort order,
- * Cell/Thunk/LazyApp/ThunkMap ancestor-cycle tracking, <PRIMOP>/<LAMBDA>/
- * <PRIMOP-APP> states) -- see that file's own extensive commentary for the
- * full rationale behind each choice, not repeated here. */
+ * see ~/.claude/plans/soft-wishing-engelbart.md. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,23 +16,15 @@
 #include "symtab.h"
 #include "value_util.h"
 
-/* M197: the ATTRS print case below used to cap at a fixed-size
- * stack array of 64 entries ("defensive cap; no attrset in current
- * fixtures is anywhere near this"), SILENTLY TRUNCATING the printed
- * output for any attrset with more than 64 keys -- found while stress-
- * testing M196's listToAttrs fix with a 2000-entry list: `length
- * (attrNames result)` correctly reported 2000, but printing the result
- * directly showed only 64 "key = val;" pairs, no error, no indication
- * anything was missing. Confirmed pre-existing (reproduces on the
- * unmodified pre-M195/M196 binary too, with zero duplicate keys
- * involved -- purely a print-path bug, unrelated to either of this
- * session's other fixes). Fixed by allocating dynamically above the
- * same 64 threshold (now just a stack-vs-heap choice, not a truncation
- * point) and gating the name-sort between an insertion sort (small
- * counts) and qsort (large counts) the same way make_attrs/listToAttrs
- * already do -- the old insertion sort was implicitly safe only because
- * the 64 cap bounded it; removing the cap without this would turn an
- * unbounded print of a large real attrset into its own O(n^2) cost. */
+/* The ATTRS print case below allocates dynamically above a 64-entry
+ * stack-array threshold (previously a fixed-size 64 entry cap that
+ * SILENTLY TRUNCATED the printed output for any attrset with more than
+ * 64 keys -- no error, no indication anything was missing). Name-sort
+ * is gated between an insertion sort (small counts) and qsort (large
+ * counts) the same way make_attrs/listToAttrs already do -- the old
+ * insertion sort was implicitly safe only because the 64 cap bounded
+ * it; removing the cap without this would turn an unbounded print of a
+ * large real attrset into its own O(n^2) cost. */
 typedef struct { const char *name; size_t name_len; Value val; } PrintAttrEntry;
 
 static int cmp_print_attr_entry(const void *a, const void *b) {
@@ -197,13 +185,11 @@ static int print_peel_wrappers(Value *v_out, int *pushed_out) {
              * `try_cell_ref`-emitted Cell wrapping this same formal (e.g.
              * inside a list literal) already pushed one peel step up --
              * colliding there flagged even the very first resolution as a
-             * false cycle (caught by a hand-built test printing the same
-             * required formal multiple times in one list literal). v.raw
-             * (tag bits set, idx packed into bits 48-63) is never bit-
-             * identical to a bare 8-byte-aligned pointer, so it can't
-             * collide with the Cell layer's own key, while still being
-             * identical across genuinely repeated resolutions of this
-             * same (descriptor, idx) pair. */
+             * false cycle. v.raw (tag bits set, idx packed into bits
+             * 48-63) is never bit-identical to a bare 8-byte-aligned
+             * pointer, so it can't collide with the Cell layer's own key,
+             * while still being identical across genuinely repeated
+             * resolutions of this same (descriptor, idx) pair. */
             const void *slot_addr = (const void *)(uintptr_t)v.raw;
             if (!print_active_push(slot_addr)) {
                 for (int i = 0; i < pushed; i++) print_active_pop();

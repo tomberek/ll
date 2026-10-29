@@ -6,28 +6,18 @@
 #include <stdint.h>
 
 /*
- * M8: `builtins.hashString` over OpenSSL's libcrypto, loaded via dlopen/
- * dlsym at first use -- not linked at build time. Same reasoning and the
- * same two-tier candidate-path strategy as `~/gnix/nixgoose`'s
- * `openssl_shim.h`/`blake3_shim.h` (read in full before this file was
- * written): heavy C deps (libcrypto has no business being a hard link-time
- * dependency of every `make` invocation) stay out of the default build
- * graph per docs/architecture.md's "Fast iteration loop" requirement, and
- * get pulled in lazily, only when a program actually calls `hashString`.
+ * `builtins.hashString` over OpenSSL's libcrypto, loaded via dlopen/
+ * dlsym at first use -- not linked at build time, so libcrypto stays out
+ * of the default build graph and is only pulled in when a program
+ * actually calls `hashString`.
  *
- * Which libcrypto API: confirmed directly with `nm -D` against both this
- * machine's system libcrypto (/usr/lib/x86_64-linux-gnu/libcrypto.so.3,
- * OpenSSL 3.6) and the nixpkgs-resolved one the flake's devShell points at
- * (openssl-3.5.9) that the classic one-shot wrappers `MD5()`/`SHA1()`/
- * `SHA256()`/`SHA512()` (signature `unsigned char *(*)(const unsigned
- * char*, size_t, unsigned char*)`) are still exported in both, despite
- * being deprecated at the *header* level in OpenSSL 3.x (a compile-time-
- * only warning that dlsym-based loading never triggers, since we never
- * compile against <openssl/md5.h> etc). This is exactly the same API
- * nixgoose's own openssl_shim.h already uses and exactly what upstream
- * real Nix's libutil/hash.cc itself calls -- no EVP_MD_CTX plumbing is
- * needed since every call site here already has the whole input as one
- * contiguous buffer (never streamed).
+ * Uses the classic one-shot wrappers `MD5()`/`SHA1()`/`SHA256()`/
+ * `SHA512()` (signature `unsigned char *(*)(const unsigned char*,
+ * size_t, unsigned char*)`), which are still exported despite being
+ * deprecated at the *header* level in OpenSSL 3.x (a compile-time-only
+ * warning that dlsym-based loading never triggers). No EVP_MD_CTX
+ * plumbing is needed since every call site here already has the whole
+ * input as one contiguous buffer (never streamed).
  */
 
 #define LL_HASH_MD5_LEN    16

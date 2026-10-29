@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-static const char ALPHABET[] = "0123456789abcdfghijklmnpqrsvwxyz"; /* 32 chars + NUL */
+static const char ALPHABET[] = "0123456789abcdfghijklmnpqrsvwxyz";
 
 static int base32_char_value(char c) {
     for (int i = 0; i < 32; i++) {

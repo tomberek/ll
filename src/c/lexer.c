@@ -12,32 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* perf: one 256-entry character-classification table, replacing the
- * isalnum()/isalpha()/isdigit()/isspace() calls (each a ctype-table load
- * plus a bit test) chained with up to four more byte-compares that
- * path_char/ident_cont/uri_scheme_char/uri_tail_char below used to run
- * from scratch on every single call. Confirmed via `perf annotate
- * ll_lex` on a standalone lex-only microbenchmark (all-packages.nix,
- * 300+ iterations): path_char alone (inlined into try_scan_path's
- * per-character scan loop, which runs on every leading character of
- * every identifier/number/operator token, not just real path literals)
- * was ~15-20% of ll_lex's own self time, and try_scan_uri/
- * uri_scheme_char another ~9-10% -- almost entirely from re-deriving
- * each byte's classification one comparison at a time instead of a
- * single table lookup. Every CC_* bit here mirrors one of this file's
- * EXISTING predicates byte-for-byte (not a new/changed character set --
- * a pure speed change): this project never calls setlocale(), so the
- * "C" locale's ASCII-only isalnum/isalpha/isdigit/isspace behavior these
- * predicates relied on is a fixed fact for the whole process lifetime,
- * safe to precompute once into a table instead of recomputing per call.
- * Verified by an exhaustive 256-value comparison against the original
- * isalnum()-based bodies (every byte 0-255) before this table replaced
- * them -- see this milestone's own commit message for the standalone
- * check used (a throwaway harness, not shipped, since this file has no
- * existing unit-test binary of its own to extend; the real regression
- * net here is this file's own thorough use by every test in `make
- * test-e2e`/`test-conformance`/`test-nix-conformance`, which lex every
- * byte of every fixture through this exact table). */
 enum {
     CC_SPACE      = 1 << 0, /* isspace: ' ' '\t' '\n' '\v' '\f' '\r' */
     CC_DIGIT      = 1 << 1, /* isdigit: '0'-'9' */
@@ -67,10 +41,6 @@ static const unsigned char CHAR_CLASS[256] = {
     ['='] = CC_URI_TAIL, ['?'] = CC_URI_TAIL, ['@'] = CC_URI_TAIL, ['~'] = CC_URI_TAIL,
 };
 
-/* Table-backed drop-in replacements for the plain isdigit()/isspace()/
- * isalpha() calls this file used at every digit-run/trivia/URI-entry
- * check -- same CHAR_CLASS table as path_char/ident_cont/uri_scheme_char/
- * uri_tail_char above, see this file's own top-of-file comment. */
 static int cc_digit(char c) { return (CHAR_CLASS[(unsigned char)c] & CC_DIGIT) != 0; }
 static int cc_space(char c) { return (CHAR_CLASS[(unsigned char)c] & CC_SPACE) != 0; }
 static int cc_alpha(char c) { return (CHAR_CLASS[(unsigned char)c] & CC_ALPHA) != 0; }
@@ -82,43 +52,35 @@ static Token mk_tok(TokKind k, size_t start, size_t end) {
 /* Path-literal scanning (import-paths). Real Nix's lexer recognizes PATH
  * tokens with the (flex) regex `[A-Za-z0-9._+-]*(\/[A-Za-z0-9._+-]+)+\/?`
  * -- an optional prefix of "path chars", followed by one-or-more `/segment`
- * groups, with an optional trailing slash (which real Nix's *parser*, not
- * the lexer, then rejects -- "path has a trailing slash"; checked against
- * nix-instantiate). The `+` group is what makes this unambiguous against
- * every other token in this grammar: nothing else in the language ever
- * uses `/` (there's no division operator), so any occurrence of `/` that
- * isn't inside a string is a path. That's also why this is tried *before*
- * digit/ident scanning below, not after: `foo/bar.nix` must lex as one
- * TOK_PATH, not TOK_IDENT("foo") followed by an unrecognized '/'. */
+ * groups, with an optional trailing slash (rejected later by the parser,
+ * not the lexer: "path has a trailing slash"). The `+` group is what
+ * makes this unambiguous against every other token in this grammar:
+ * nothing else in the language ever uses `/` (there's no division
+ * operator), so any occurrence of `/` that isn't inside a string is a
+ * path. That's also why this is tried *before* digit/ident scanning
+ * below, not after: `foo/bar.nix` must lex as one TOK_PATH, not
+ * TOK_IDENT("foo") followed by an unrecognized '/'. */
 static int path_char(char c) {
     return (CHAR_CLASS[(unsigned char)c] & CC_PATH_CHAR) != 0;
 }
 
-/* True iff src[j..] is exactly "${" -- the interpolation-hole marker
- * (M64). Shared by scan_path_groups below and the main dispatch loop's
- * path-literal cases (plain, absolute, and `~`/home). */
 static int at_dollar_brace(const char *src, size_t j) {
     return src[j] == '$' && src[j + 1] == '{';
 }
 
 /* Scans zero or more "/PATH_CHAR+" groups starting at *j (which must
- * already be positioned past any PATH_CHAR* prefix -- i.e. the very next
- * decision is "is src[j] a '/'?"), mirroring real Nix's own PATH/HPATH
- * lexer.l grammar's group-loop, generalized with ONE addition: a '/'
- * immediately followed by "${" ends the scan right there (consuming that
- * slash, even though zero path_chars followed it) instead of just
- * stopping -- matching real Nix's PATH_SEG/HPATH_START-before-
- * interpolation special lexer rule (needed for `./${foo}`/`~/${foo}`,
- * M64, see docs/architecture.md). Deliberately does NOT special-case a
- * trailing bare '/' with nothing useful after it (no "${", no further
- * path chars) -- that's left for the caller to optionally consume as the
- * grammar's own separate trailing `/?`, gated on `*saw_group` already
- * being true, so a `//` (update operator) immediately after an
- * as-yet-ungrouped position is never miscounted as a path (critical: if
- * this function consumed an ungrouped trailing '/' unconditionally, "a
- * // b" would mis-lex its first '/' as a 1-char path and its second '/'
- * as another, silently breaking TOK_SLASHSLASH detection). Returns the
- * new position. */
+ * already be positioned past any PATH_CHAR* prefix), mirroring real Nix's
+ * own PATH/HPATH lexer.l grammar's group-loop, generalized with ONE
+ * addition: a '/' immediately followed by "${" ends the scan right there
+ * (consuming that slash, even though zero path_chars followed it)
+ * instead of just stopping (needed for `./${foo}`/`~/${foo}`).
+ * Deliberately does NOT special-case a trailing bare '/' with nothing
+ * useful after it -- that's left for the caller to optionally consume as
+ * the grammar's own separate trailing `/?`, gated on `*saw_group` already
+ * being true: if this function consumed an ungrouped trailing '/'
+ * unconditionally, "a // b" would mis-lex its first '/' as a 1-char path
+ * and its second '/' as another, silently breaking TOK_SLASHSLASH
+ * detection. Returns the new position. */
 static size_t scan_path_groups(const char *src, size_t j, int *saw_group) {
     for (;;) {
         if (src[j] != '/') break;
@@ -140,10 +102,10 @@ static size_t scan_path_groups(const char *src, size_t j, int *saw_group) {
 
 /* Returns the length of a path literal starting at src[i], or 0 if this
  * position isn't one (in which case the caller falls through to ordinary
- * digit/ident/single-char scanning). M64: also succeeds on a prefix that
- * ends right before "${" (e.g. "./" in "./${foo}", or "/" in "/${foo}"),
- * even though that prefix alone wouldn't otherwise satisfy the "at least
- * one full /PATH_CHAR+ group" rule -- see scan_path_groups. The caller
+ * digit/ident/single-char scanning). Also succeeds on a prefix that ends
+ * right before "${" (e.g. "./" in "./${foo}", or "/" in "/${foo}"), even
+ * though that prefix alone wouldn't otherwise satisfy the "at least one
+ * full /PATH_CHAR+ group" rule -- see scan_path_groups. The caller
  * (ll_lex's main loop) is responsible for noticing that case (checking
  * at_dollar_brace right after this returns) and switching into MODE_PATH
  * instead of emitting one complete, standalone TOK_PATH. */
@@ -158,16 +120,13 @@ static size_t try_scan_path(const char *src, size_t i) {
     return j - i;
 }
 
-/* `~`-prefixed ("home") path literal (M64): unlike a plain path, there's
- * no PATH_CHAR* prefix allowed before the first '/' at all -- real Nix's
+/* `~`-prefixed ("home") path literal: unlike a plain path, there's no
+ * PATH_CHAR* prefix allowed before the first '/' at all -- real Nix's
  * HPATH grammar is exactly `~(/PATH_CHAR+)+/?`, so this only looks for a
  * literal "~/" at src[i] and then reuses scan_path_groups starting right
- * at that '/'. Returns the full token length (including the leading
- * '~'), or 0 if src[i] isn't the start of a valid HPATH (e.g. a bare "~"
- * not followed by '/', or "~/" followed by neither a path char nor
- * "${" -- in which case the caller leaves `i` untouched and falls
- * through to ordinary single-char scanning, same as every other
- * not-actually-a-token probe in this lexer). */
+ * at that '/'. Returns 0 if src[i] isn't the start of a valid HPATH, in
+ * which case the caller leaves `i` untouched and falls through to
+ * ordinary single-char scanning. */
 static size_t try_scan_home_path(const char *src, size_t i) {
     if (src[i] != '~' || src[i + 1] != '/') return 0;
     int saw_group = 0;
@@ -177,20 +136,16 @@ static size_t try_scan_home_path(const char *src, size_t i) {
     return j - i;
 }
 
-/* Bare URL literals (deprecated-but-default-accepted real-Nix syntax --
- * `eval-okay-url-literal-default.nix`'s own comment: "By default (no
- * flags), unquoted URL literals are accepted"). Ported directly from
- * real Nix's own lexer.l `URI` regex:
+/* Bare URL literals (deprecated-but-default-accepted real-Nix syntax).
+ * Ported directly from real Nix's own lexer.l `URI` regex:
  *   [a-zA-Z][a-zA-Z0-9\+\-\.]*\:[a-zA-Z0-9\%\/\?\:\@\&\=\+\$\,\_\.\!\~\*\'\-]+
- * Tried in the main loop BEFORE ordinary identifier/keyword scanning,
- * same "longest match wins" precedence flex itself gives this rule over
- * ID: e.g. `x:x+1` lexes as ONE URI token "x:x+1", not as a lambda
- * `x: x+1` -- a well-known real-Nix footgun, verified directly against
- * `nix-instantiate --eval` (`(x:x+1) 5` fails with "attempt to call
- * something which is not a function but a string"). Checked the only
- * two *.nix drivers this project's own derivation-hashing work depends
- * on (d.nix/e.nix) for any whitespace-free `ident:ident` lambda that
- * this might newly misparse -- none found. */
+ * Tried in the main loop BEFORE ordinary identifier/keyword scanning, same
+ * "longest match wins" precedence flex itself gives this rule over ID:
+ * e.g. `x:x+1` lexes as ONE URI token "x:x+1", not as a lambda `x: x+1` --
+ * a well-known real-Nix footgun (confirmed against `nix-instantiate`:
+ * `(x:x+1) 5` fails with "attempt to call something which is not a
+ * function but a string"). Scanning URIs before identifiers is required
+ * for this precedence to hold. */
 static int uri_scheme_char(char c) {
     return (CHAR_CLASS[(unsigned char)c] & CC_URI_SCHEME) != 0;
 }
@@ -213,25 +168,12 @@ static int ident_start(char c) {
     return cc_alpha(c) || c == '_';
 }
 static int ident_cont(char c) {
-    /* M23: now INCLUDES '-' -- real Nix's own identifier regex is
-     * `[a-zA-Z_][a-zA-Z0-9_'-]*`, i.e. a hyphen is an ordinary identifier
-     * character (not just special attrpath-binding syntax), verified
-     * directly against `nix-instantiate --eval`: `let flat-md5 = 1; in
-     * flat-md5` succeeds (one identifier), and critically `a-b` (NO
-     * surrounding whitespace) is itself one identifier/undefined-variable
-     * lookup, NOT `a - b` subtraction -- subtraction only "wins" when at
-     * least one side has separating whitespace (`a -b`, `a- b` is actually
-     * `a-` as a dangling identifier, `a - b`), by ordinary maximal-munch
-     * tokenization (same principle as C's `a+++b`). This was a deliberate
-     * M4-era scope cut (previously excluded exactly to dodge this
-     * ambiguity in the easy, unambiguous way) but real-world Nix source
-     * uses hyphenated attribute names constantly (`drv-fixed-output.nix`'s
-     * `flat-md5`, nixpkgs's own package/attribute names) -- found blocking
-     * numtide/nix-conformance's eval-okay-drv-fixed-output.nix. No existing
-     * asnix fixture relied on whitespace-free `a-b` meaning subtraction
-     * (checked: every existing `-` arithmetic use already has at least one
-     * space), so this is a pure feature add, not a documented-behavior
-     * change to anything previously exercised. */
+    /* Real Nix's own identifier regex is `[a-zA-Z_][a-zA-Z0-9_'-]*`, i.e.
+     * a hyphen is an ordinary identifier character, not just attrpath-
+     * binding syntax: whitespace-free `a-b` is one identifier lookup, NOT
+     * `a - b` subtraction -- subtraction only "wins" when at least one
+     * side has separating whitespace, by ordinary maximal-munch
+     * tokenization (same principle as C's `a+++b`). */
     return (CHAR_CLASS[(unsigned char)c] & CC_IDENT_CONT) != 0;
 }
 
@@ -241,15 +183,6 @@ typedef struct {
     TokKind kind;
 } Keyword;
 
-/* perf: `kwlen` is `sizeof(lit) - 1` (the string literal's own compile-time
- * length, minus its NUL), computed once here instead of via a runtime
- * `strlen(KEYWORDS[k].kw)` inside the lookup loop below -- that loop runs
- * once per keyword-table-entry for EVERY identifier-shaped token in the
- * source (the single most common token shape in any real Nix file), so a
- * redundant strlen there multiplies out badly. Same "carry a known length
- * instead of re-deriving it from a NUL terminator" fix as M141's Token
- * shrink and M143's regex cache, just applied to this fixed, compile-time-
- * known table instead of a runtime string. */
 #define KW(lit, k) { lit, sizeof(lit) - 1, k }
 
 static const Keyword KEYWORDS[] = {
@@ -261,35 +194,11 @@ static const Keyword KEYWORDS[] = {
     KW("or", TOK_OR),
 };
 
-/* perf: the identifier-vs-keyword check below used to scan all 13
- * `KEYWORDS` entries, in declaration order, for EVERY identifier-shaped
- * token in the source -- by far the most common token shape in any real
- * Nix file, and one whose volume scales with a file's own identifier
- * count, not its keyword count (keywords are always a small, bounded
- * fraction). On a file with an unusually large identifier volume (e.g.
- * `hackage-packages.nix`'s ~19,261 inline `callPackage` lambdas, each
- * with its own handful of dependency-name formals -- "aeson", "base",
- * "bytestring", etc., none of them keywords), that 13-entry scan runs in
- * full (minus whatever early-outs the length check buys) on every single
- * one of them. iets's own equivalent (`Lexer::keyword`, a Rust `match` on
- * byte-string literals) compiles to a length-first dispatch, not a linear
- * scan -- this mirrors that shape by hand: switch on `len` first (every
- * `KEYWORDS` entry has a fixed, small length, 2 through 7), so an
- * identifier whose length isn't one of those six values short-circuits to
- * TOK_IDENT with zero comparisons at all, and one whose length DOES match
- * only compares against the (always small, 1-5-entry) subset of keywords
- * sharing that length -- never all 13.
- *
- * Correctness: exhaustively mirrors `KEYWORDS` above (same 13 literals,
- * same TokKind mapping, same "first match wins" semantics, which happens
- * to be moot here since no two keywords share both length AND content).
- * This table is small and stable enough that keeping the two in sync by
- * hand (instead of generating this switch from KEYWORDS at compile time)
- * is the simpler-to-verify option -- any future edit to KEYWORDS must
- * mirror it here, and the existing keyword-coverage tests (every keyword
- * token already exercised by tests/e2e and tests/conformance) catch a
- * drift immediately: an un-mirrored new keyword lexes as TOK_IDENT, a
- * mismatched TokKind mis-parses, either way a test fails loudly. */
+/* Exhaustively mirrors `KEYWORDS` above (same literals, same TokKind
+ * mapping) via a hand-written length-first dispatch instead of a linear
+ * scan of the table. Any future edit to KEYWORDS must be mirrored here --
+ * an un-mirrored new keyword lexes as TOK_IDENT, a mismatched TokKind
+ * mis-parses. */
 static TokKind keyword_lookup(const char *s, size_t len) {
     switch (len) {
     case 2:
@@ -322,11 +231,9 @@ static TokKind keyword_lookup(const char *s, size_t len) {
     }
 }
 
-/* Runs once per process (not once per file/call): verifies `keyword_lookup`
- * agrees with `KEYWORDS` on every entry, so the hand-mirrored switch above
- * can never silently drift from the canonical table -- cheap enough (13
- * entries) to just always run, same "verify, don't just assert by
- * comment" spirit as this project's own M142/M138 correctness passes. */
+/* Runs once per process: verifies `keyword_lookup` agrees with `KEYWORDS`
+ * on every entry, so the hand-mirrored switch above can never silently
+ * drift from the canonical table. */
 static void keyword_lookup_selfcheck(void) {
     static int checked = 0;
     if (checked) return;
@@ -346,20 +253,7 @@ static void keyword_lookup_selfcheck(void) {
  * needs the inner attrset's own "}" to NOT prematurely resume string
  * lexing) pushes NORMAL; every "}" pops one level. Only when a pop reveals
  * STRING/ISTRING underneath does the "}" that closed an interpolation
- * actually mean "resume string-content lexing" -- the asm/dispatch loop
- * terminology doesn't apply here, this is purely a lexer-internal stack.
- *
- * M175: this mode stack, the byte position, and a one-slot pending-token
- * buffer (see lexer.h's own Lexer comment) are now ALL the state a `Lexer`
- * carries -- no backing Token array (TokVec) at all, unlike M135's
- * LexCursor. The pending slot exists because a handful of scan steps
- * below naturally produce TWO tokens before there's anywhere sensible to
- * pause (e.g. a string's content chunk immediately followed by its own
- * closing delimiter or a "${" boundary, where the delimiter/boundary
- * token's own mode-stack push/pop has to happen atomically with it being
- * produced) -- `lexer_next()` hands back the first of the two and stashes
- * the second for the very next call, instead of returning both from one
- * call the way `push_tok`-into-an-array used to allow. */
+ * actually mean "resume string-content lexing". */
 typedef enum { MODE_NORMAL, MODE_STRING, MODE_ISTRING, MODE_PATH } LexMode;
 
 struct Lexer {
@@ -367,15 +261,11 @@ struct Lexer {
     size_t pos;
     LexMode *modes;
     size_t modes_len, modes_cap;
-    /* M177: a mirror of modes[modes_len-1] (the only slot mode_top ever
-     * reads), kept in sync by mode_push/mode_pop so lex_normal's own
-     * per-token mode_top() call becomes a single field load instead of a
-     * 3-load chain (modes_len, then the modes pointer, then
-     * modes[modes_len-1] itself) -- see mode_push/mode_top/mode_pop below
-     * for the invariant this depends on: EVERY mutation of modes/modes_len
-     * happens through those three functions, nothing else in this file
-     * (or anywhere else -- Lexer is opaque outside lexer.c, see lexer.h)
-     * ever touches a Lexer's mode fields directly. */
+    /* Mirror of modes[modes_len-1], kept in sync by mode_push/mode_pop.
+     * Invariant: EVERY mutation of modes/modes_len must happen through
+     * those two functions (plus mode_top's read) -- nothing else in this
+     * file ever touches a Lexer's mode fields directly, or `cur` desyncs
+     * from the real top of the stack. */
     LexMode cur;
     Token pending;
     int has_pending;
@@ -408,16 +298,9 @@ static void mode_push(Lexer *lx, LexMode mode) {
         lx->modes = realloc(lx->modes, lx->modes_cap * sizeof(LexMode));
     }
     lx->modes[lx->modes_len++] = mode;
-    lx->cur = mode; /* M177: the slot just written is the new top */
+    lx->cur = mode;
 }
 static LexMode mode_top(Lexer *lx) {
-    /* M177: used to be lx->modes[lx->modes_len - 1] -- a 3-load chain
-     * (modes_len, modes, then the indexed load) paid on EVERY lex_normal
-     * iteration, even though mode_push/mode_pop (the only two places that
-     * ever change what the top actually is) already know the new top
-     * value at the moment they change it. lx->cur mirrors that value
-     * exactly, so this is a pure redundant-recomputation removal: same
-     * stack, same contents, same output, one load instead of three. */
     return lx->cur;
 }
 static void mode_pop(Lexer *lx) {
@@ -427,12 +310,7 @@ static void mode_pop(Lexer *lx) {
      * input (malformed `}`-without-`{` is caught before this is ever
      * called, see the MODE_NORMAL '}' case). */
     lx->modes_len--;
-    lx->cur = lx->modes[lx->modes_len - 1]; /* M177: popping reveals a new
-                                                top -- re-mirror it (this IS
-                                                the array read mode_top used
-                                                to do every single token;
-                                                now it happens only here,
-                                                once per actual pop). */
+    lx->cur = lx->modes[lx->modes_len - 1];
 }
 
 static void fatal_unterminated(const char *what) {
@@ -454,7 +332,7 @@ static char decode_escape_char(char c) {
 }
 
 double ll_decode_float_literal(const char *src, uint32_t start, uint32_t end) {
-    (void)end; /* see this function's own header comment (lexer.h) for why no bound is needed */
+    (void)end;
     errno = 0;
     double d = strtod(src + start, NULL);
     if (errno == ERANGE) {
@@ -505,24 +383,20 @@ void ll_decode_istr_esc(const char *src, uint32_t start, char out[2], size_t *ou
  * interpolations) followed by the boundary token (TOK_STR_END or
  * TOK_DOLLAR_LBRACE). Mutates *i and `modes` to reflect the boundary
  * crossed (pop back to NORMAL on close, push a fresh NORMAL on "${").
- * M141: the TOK_STR_PART pushed here is a RAW span -- escapes are
- * scanned over (to find where the span ends and to validate there's no
- * unterminated trailing backslash) but never decoded; decoding happens
- * later, on demand, via ll_decode_dquote_span (see lexer.h). Verified
- * against real `nix-instantiate` for raw embedded newlines (allowed,
- * unlike this lexer's pre-interpolation M5 behavior -- see
- * docs/architecture.md's Known Bugs list) and the \n \r \t \" \\ \$
- * escapes. */
-/* M175: produces exactly ONE Token per call -- a content chunk still
- * returns first; whenever this step's own boundary token (TOK_STR_END or
+ * The TOK_STR_PART pushed here is a RAW span -- escapes are scanned over
+ * (to find where the span ends and to validate there's no unterminated
+ * trailing backslash) but never decoded; decoding happens later, on
+ * demand, via ll_decode_dquote_span.
+ *
+ * Produces exactly ONE Token per call -- a content chunk still returns
+ * first; whenever this step's own boundary token (TOK_STR_END or
  * TOK_DOLLAR_LBRACE) is ready at the SAME time (the mode-stack change has
  * to happen atomically with it), that second token is stashed in
- * `lx->pending` for the very next call to hand back immediately, instead
- * of both being pushed into an array in one go (see lexer.h's own Lexer
- * comment). `lx->pos` always ends up at the position reflecting BOTH
- * tokens already consumed, even though only the first is returned here --
- * the pending slot alone is what makes the second one still show up, in
- * order, on the next call. */
+ * `lx->pending` for the very next call to hand back immediately. `lx->pos`
+ * always ends up at the position reflecting BOTH tokens already consumed,
+ * even though only the first is returned here -- the pending slot alone
+ * is what makes the second one still show up, in order, on the next
+ * call. */
 static Token lex_dquote_run(Lexer *lx) {
     const char *src = lx->src;
     size_t start = lx->pos;
@@ -539,19 +413,18 @@ static Token lex_dquote_run(Lexer *lx) {
             lx->has_pending = 1;
             return part;
         }
-        /* M-dollar-pair: "$$" is always a literal, atomically-consumed
-         * pair -- confirmed against real nix-instantiate: "a$${foo}b"
-         * passes through unchanged (length 9, no lookup of `foo` at
-         * all, even when `foo` is undefined), while an ODD run of
-         * dollars ("a$$${foo}b") leaves exactly one unpaired "$" that
-         * DOES start real interpolation. Must be checked before the
-         * "${"-starts-interpolation rule below, and must `continue`
-         * rather than fall into it -- otherwise the second "$" of a
-         * literal pair gets misread as the start of a fresh "${"
-         * check against whatever follows it. Found via a false-
-         * positive "undefined variable" on real nixpkgs code using
-         * this exact idiom (accounts-qt's `$${INSTALL_PREFIX}`,
-         * a literal qmake variable reference, not a Nix one). */
+        /* "$$" is always a literal, atomically-consumed pair -- confirmed
+         * against real nix-instantiate: "a$${foo}b" passes through
+         * unchanged (no lookup of `foo` at all), while an ODD run of
+         * dollars ("a$$${foo}b") leaves exactly one unpaired "$" that DOES
+         * start real interpolation. Must be checked before the
+         * "${"-starts-interpolation rule below, and must `continue` rather
+         * than fall into it -- otherwise the second "$" of a literal pair
+         * gets misread as the start of a fresh "${" check. Do NOT remove
+         * this check: without it, real nixpkgs code using this idiom
+         * (accounts-qt's `$${INSTALL_PREFIX}`, a literal qmake variable
+         * reference, not a Nix one) silently misparses as an undefined-
+         * variable interpolation. */
         if (c == '$' && src[i + 1] == '$') {
             i += 2;
             continue;
@@ -588,38 +461,25 @@ static Token lex_dquote_run(Lexer *lx) {
  * no separate "''${" rule, it falls out of this one plus ordinary
  * content scanning), ''' -> literal "''", ''\<c> -> a backslash-style
  * escape of <c>, and bare '' (not followed by one of the above) always
- * closes the string. M141: both TOK_ISTR_PART and TOK_ISTR_ESC carry a
- * RAW span only -- decoding (trivial for ISTR_PART: none needed at all,
- * it's already plain source text; a small fixed-shape decode for
- * TOK_ISTR_ESC) happens on demand, see ll_decode_istr_esc. See
- * lexer.h's own TOK_ISTR_ESC comment for the one narrow, documented
- * behavioral difference from the pre-M141 lexer (back-to-back escape
- * units used to merge into one token; M141 never merges).
+ * closes the string. Both TOK_ISTR_PART and TOK_ISTR_ESC carry a RAW span
+ * only -- decoding happens on demand, see ll_decode_istr_esc.
  *
- * Deliberate, documented scope cut vs. real Nix's lexer: a lone "'"
- * immediately followed by "$" is treated here as two ordinary content
- * characters (real Nix special-cases it as a hasIndentation=false
- * boundary token). This only affects the indentation-*counting* boundary
- * in the vanishingly rare case of a leading "'$" run of whitespace, never
- * the produced string's actual bytes -- not exercised by any case in
- * tests/e2e, and not worth the extra complexity here. */
-/* M175: produces exactly one Token per call, same pending-slot convention
- * as lex_dquote_run above for the two unconditional-pair boundaries
- * (closing "''" and "${"). The escape case (''$ / ''' / ''\<c>) is
- * handled WITHOUT the pending slot at all, by a different trick: when a
- * nonempty content run precedes the escape, this returns just the
- * TOK_ISTR_PART chunk and -- critically -- leaves `lx->pos` sitting right
- * BEFORE the escape's own bytes (not past them), rather than consuming it
- * here. The very next call re-enters this same function fresh with
- * `content_start == lx->pos` (recomputed at entry, see below) landing
- * exactly on that same escape; this time `i > content_start` is false (no
- * unflushed content ahead of it), so it falls straight to the
- * `lx->pos = esc_end; return TOK_ISTR_ESC` branch instead of looping back
- * into content-scanning -- i.e. the SAME escape is "re-detected", not
- * re-decoded or duplicated, by ordinary re-entry rather than a stashed
- * second token. Safe only because content_start is always freshly derived
- * from lx->pos at this function's own top, never carried across calls any
- * other way -- true both before and after this milestone. */
+ * Produces exactly one Token per call, same pending-slot convention as
+ * lex_dquote_run above for the two unconditional-pair boundaries (closing
+ * "''" and "${"). The escape case (''$ / ''' / ''\<c>) is handled WITHOUT
+ * the pending slot at all, by a different trick: when a nonempty content
+ * run precedes the escape, this returns just the TOK_ISTR_PART chunk and
+ * -- critically -- leaves `lx->pos` sitting right BEFORE the escape's own
+ * bytes (not past them), rather than consuming it here. The very next
+ * call re-enters this same function fresh with `content_start ==
+ * lx->pos` (recomputed at entry, see below) landing exactly on that same
+ * escape; this time `i > content_start` is false (no unflushed content
+ * ahead of it), so it falls straight to the `lx->pos = esc_end; return
+ * TOK_ISTR_ESC` branch instead of looping back into content-scanning --
+ * i.e. the SAME escape is "re-detected", not re-decoded or duplicated, by
+ * ordinary re-entry rather than a stashed second token. Safe only because
+ * content_start is always freshly derived from lx->pos at this function's
+ * own top, never carried across calls any other way. */
 static Token lex_indented_run(Lexer *lx) {
     const char *src = lx->src;
     size_t content_start = lx->pos;
@@ -629,18 +489,15 @@ static Token lex_indented_run(Lexer *lx) {
         char c = src[i];
         if (c == '\0') fatal_unterminated("indented string literal (''...'')");
 
-        /* M-dollar-pair: see lex_dquote_run's own comment on the
-         * identical rule -- "$$" is always a literal, atomically-
-         * consumed pair, checked before "${"-starts-interpolation so
-         * the second "$" of a pair never gets re-read as the start of
-         * a fresh "${" check. */
+        /* See lex_dquote_run's own comment on the identical rule --
+         * "$$" is always a literal, atomically-consumed pair, checked
+         * before "${"-starts-interpolation so the second "$" of a pair
+         * never gets re-read as the start of a fresh "${" check. */
         if (c == '$' && src[i + 1] == '$') {
             i += 2;
             continue;
         }
         if (c == '$' && src[i + 1] == '{') {
-            /* Always emit a (possibly empty) PART before the boundary --
-             * matches the pre-M141 istr_flush_always convention. */
             Token part = mk_tok(TOK_ISTR_PART, content_start, i);
             i += 2;
             mode_push(lx, MODE_NORMAL);
@@ -661,13 +518,13 @@ static Token lex_indented_run(Lexer *lx) {
                 } else {
                     esc_end = i + 3; /* ''' or ''$ -- both exactly 3 raw bytes */
                 }
-                /* Flush the pending content run only if nonempty -- matches
-                 * the pre-M141 istr_flush_if_nonempty convention (a
+                /* Flush the pending content run only if nonempty (a
                  * content-to-escape category change doesn't force an empty
-                 * PART the way a real boundary does). See this function's
-                 * own header comment: returning here WITHOUT consuming the
-                 * escape (lx->pos left at the escape's own start) is what
-                 * makes the next call re-detect and emit it alone. */
+                 * PART the way a real boundary does). Returning here
+                 * WITHOUT consuming the escape (lx->pos left at the
+                 * escape's own start) is what makes the next call
+                 * re-detect and emit it alone -- see this function's own
+                 * header comment. */
                 if (i > content_start) {
                     lx->pos = i;
                     return mk_tok(TOK_ISTR_PART, content_start, i);
@@ -690,45 +547,39 @@ static Token lex_indented_run(Lexer *lx) {
          * raw newlines (which indentation-stripping treats specially) --
          * just extend the pending content run, nothing to write yet.
          *
-         * perf: jump ahead to the next CANDIDATE boundary byte ('$' or
-         * '\'') via strchrnul instead of advancing one byte at a time --
-         * same "jump then verify" technique the comment-skip fix in
-         * lex_normal already uses, and the same safety contract
-         * (strchrnul never reads past the string's own NUL terminator).
-         * Searches from i+1, not i: the byte at i, if it IS '$' or '\'',
-         * already failed the real-boundary checks above (a lone '$' not
-         * followed by '{', or a lone '\'' not followed by another
-         * '\''), so re-finding it at the same position would never
-         * advance. A landed-on candidate that turns out to be another
-         * false positive just falls through these same checks again at
-         * the top of the loop, exactly as a plain byte would. */
+         * Jump ahead to the next CANDIDATE boundary byte ('$' or '\'')
+         * via strchrnul instead of advancing one byte at a time (safe:
+         * strchrnul never reads past the string's own NUL terminator).
+         * Must search from i+1, not i: the byte at i, if it IS '$' or
+         * '\'', already failed the real-boundary checks above, so
+         * re-finding it at the same position would never advance (and
+         * loop forever). A landed-on candidate that turns out to be
+         * another false positive just falls through these same checks
+         * again at the top of the loop, exactly as a plain byte would. */
         const char *dollar = strchrnul(src + i + 1, '$');
         const char *squote = strchrnul(src + i + 1, '\'');
         i = (size_t)((dollar < squote ? dollar : squote) - src);
     }
 }
 
-/* M64: scans one run of path-literal content starting at *i (positioned
- * just after a closed "${ ... }" interpolation inside a path literal
- * whose FIRST chunk already established it continues past one -- see the
+/* Scans one run of path-literal content starting at *i (positioned just
+ * after a closed "${ ... }" interpolation inside a path literal whose
+ * FIRST chunk already established it continues past one -- see the
  * MODE_PATH push sites in ll_lex's main loop above), up to the next
  * boundary: either another "${" or the first character that isn't a
  * path continuation at all (ending the whole literal). Pushes exactly
  * one TOK_PATH_PART (the literal chunk just scanned, possibly
- * zero-length -- e.g. between two adjacent interpolations, same
- * allowance lex_dquote_run makes for TOK_STR_PART) followed by the
- * boundary token (TOK_DOLLAR_LBRACE or TOK_PATH_END). Unlike
- * lex_dquote_run/lex_indented_run, there is no escape processing at all
- * in path-literal syntax (no backslash is ever a path_char), so this
- * chunk's span already points straight at the final text -- no decode
- * step needed downstream at all, same as before M141. A chunk may start
- * with plain path_chars, a '/'-group run, or both, exactly like a fresh
- * path literal's own scan (reuses scan_path_groups the same way
- * try_scan_path does), EXCEPT it's never required to contain any
- * group at all (a bare trailing `-b`-style run with no slash, like
- * `./a-${foo}-b`'s "-b", is perfectly valid here -- only the very
- * FIRST chunk of a path literal needs that requirement, to tell a path
- * apart from "not a path at all"). */
+ * zero-length) followed by the boundary token (TOK_DOLLAR_LBRACE or
+ * TOK_PATH_END). Unlike lex_dquote_run/lex_indented_run, there is no
+ * escape processing at all in path-literal syntax (no backslash is ever
+ * a path_char), so this chunk's span already points straight at the
+ * final text. A chunk may start with plain path_chars, a '/'-group run,
+ * or both, exactly like a fresh path literal's own scan (reuses
+ * scan_path_groups the same way try_scan_path does), EXCEPT it's never
+ * required to contain any group at all (a bare trailing `-b`-style run
+ * with no slash, like `./a-${foo}-b`'s "-b", is perfectly valid here --
+ * only the very FIRST chunk of a path literal needs that requirement, to
+ * tell a path apart from "not a path at all"). */
 static Token lex_path_run(Lexer *lx) {
     const char *src = lx->src;
     size_t start = lx->pos;
@@ -757,16 +608,14 @@ static Token lex_path_run(Lexer *lx) {
     return part;
 }
 
-/* M141: shared tail-scan for a float literal already known to match
- * (either a digit run followed by '.', or a bare '.' followed by a
- * digit) -- see lex_until's two call sites below. `*i` arrives already
- * positioned just past the decisive '.'; this scans the fractional
- * digits and an optional exponent ONLY (no strtod call here anymore --
- * that's deferred to ll_decode_float_literal, called later from
- * parser.c once an AST_FLOAT node is actually being built). Mirrors real
- * Nix's own lexer.l FLOAT regex exactly, same as the pre-M141 version of
- * this function (renamed from scan_float_tail_and_parse, which also did
- * the strtod+malloc+errno-check this split moved out). */
+/* Shared tail-scan for a float literal already known to match (either a
+ * digit run followed by '.', or a bare '.' followed by a digit) -- see
+ * lex_until's two call sites below. `*i` arrives already positioned just
+ * past the decisive '.'; this scans the fractional digits and an
+ * optional exponent ONLY (no strtod call here -- that's deferred to
+ * ll_decode_float_literal, called later from parser.c once an AST_FLOAT
+ * node is actually being built). Mirrors real Nix's own lexer.l FLOAT
+ * regex exactly. */
 static void scan_float_tail(const char *src, size_t *i) {
     while (cc_digit(src[*i])) (*i)++;
     if (src[*i] == 'e' || src[*i] == 'E') {
@@ -779,19 +628,11 @@ static void scan_float_tail(const char *src, size_t *i) {
     }
 }
 
-/* M175: replaces M135's `lex_until` (which pushed every produced token
- * into a shared TokVec array, stopping once at least `min_len` tokens
- * existed) -- this produces exactly ONE Token per call, by value, never
- * writing into any array at all. Every per-character scanning DECISION
- * below is byte-for-byte identical to the pre-M175 code (nothing about
- * what counts as a token, or where one ends, changed); only the "what do
- * we do once we know a token's span" step changed, from `push_tok(v,
- * ...); continue;` to `lx->pos = ...; return mk_tok(...);` (a direct
- * value return instead of an array append). The handful of steps that
- * used to push TWO tokens in one go (a path/URI chunk immediately
- * followed by a "${" interpolation boundary) stash the second one in
+/* Produces exactly ONE Token per call, by value. The handful of steps
+ * that push TWO tokens in one go (a path/URI chunk immediately followed
+ * by a "${" interpolation boundary) stash the second one in
  * `lx->pending` for the very next call, exactly like lex_dquote_run/
- * lex_indented_run/lex_path_run above -- see lexer.h's own Lexer comment. */
+ * lex_indented_run/lex_path_run above. */
 static Token lex_normal(Lexer *lx) {
     const char *src = lx->src;
     for (;;) {
@@ -804,54 +645,26 @@ static Token lex_normal(Lexer *lx) {
                 fprintf(stderr, "ll: unexpected end of input inside '${ ... }'\n");
                 exit(1);
             }
-            lx->pos = i; /* left unchanged: a repeated call at EOF keeps producing TOK_EOF,
-                           * same re-callable convention the old array-based design had
-                           * (peek2() at the EOF position used to grow the array by one more
-                           * duplicate EOF entry on demand; here it's just another call). */
+            lx->pos = i; /* left unchanged: a repeated call at EOF keeps producing TOK_EOF */
             return mk_tok(TOK_EOF, i, i);
         }
 
         if (cc_space(c)) {
-            /* perf: skip the whole run of whitespace in one tight loop
-             * instead of bouncing back through the outer dispatch (the
-             * '\0'/'#'/block-comment/path-literal checks above) once
-             * per space character -- real nixpkgs source is mostly
-             * indentation and blank lines. cc_space('\0') is false (see
-             * CHAR_CLASS above), so this stops at end of input exactly
-             * like the outer loop's own '\0' case would. */
+            /* cc_space('\0') is false, so this stops at end of input
+             * exactly like the outer loop's own '\0' case would. */
             do { i++; } while (cc_space(src[i]));
             lx->pos = i;
             continue;
         }
         if (c == '#') { /* line comment, a harmless real-Nix-ism to allow in fixtures */
-            /* perf: strchrnul finds '\n' or the string's own terminating
-             * '\0', whichever comes first -- exactly this loop's own
-             * stopping condition, in one SIMD-accelerated glibc call
-             * instead of a byte-at-a-time scan. Real nixpkgs files are
-             * full of line comments (license headers, inline notes). */
             i = (size_t)(strchrnul(src + i, '\n') - src);
             lx->pos = i;
             continue;
         }
-        if (c == '/' && src[i + 1] == '*') { /* block comment -- real Nix files are full of these
-                                               * (e.g. nixpkgs's pkgs/top-level/impure.nix opens with
-                                               * one); previously unhandled entirely, so the lexer hit
-                                               * "unrecognized character '/'" on the literal '/*' the
-                                               * moment any real-world file was fed in -- found
-                                               * evaluating real nixpkgs via d.nix, see
-                                               * docs/architecture.md's Known Bugs list. Checked before
-                                               * try_scan_path below: '/*' never matches a path literal
-                                               * anyway ('*' isn't a path_char), but comments should
-                                               * never compete with path-literal scanning regardless. */
+        if (c == '/' && src[i + 1] == '*') { /* block comment. Checked before try_scan_path
+                                               * below: comments must never compete with
+                                               * path-literal scanning. */
             i += 2;
-            /* perf: same strchrnul idea as the line comment above, one
-             * level removed -- jump straight to the next star (or the
-             * terminating NUL) instead of checking every byte by hand,
-             * then verify it is really the closing star-slash and not
-             * just a star inside the comment's own text; if not, skip
-             * past it and keep searching. Still stops in the identical
-             * state (at the closing delimiter's own star, or at NUL) as
-             * the byte-at-a-time loop this replaces. */
             for (;;) {
                 i = (size_t)(strchrnul(src + i, '*') - src);
                 if (!src[i] || src[i + 1] == '/') break;
@@ -867,26 +680,18 @@ static Token lex_normal(Lexer *lx) {
         }
 
         /* Tried before digit/string/single-char below -- see
-         * try_scan_path's comment for why this has to come first. M64:
+         * try_scan_path's comment for why this has to come first.
          * `~`-prefixed home paths are tried alongside (src[i]=='~' is
          * never itself a path_char, so try_scan_path can never fire at
          * this position on its own -- a separate probe is required). Both
          * branches below handle the "immediately followed by ${" case
-         * identically: emit just this chunk as TOK_PATH (its `~`-ness is
-         * recovered later by the parser directly from `src[start]`, see
-         * lexer.h -- no is_home flag carried here anymore), then push
+         * identically: emit just this chunk as TOK_PATH, then push
          * MODE_PATH (so the matching '}' that closes the interpolation's
          * expression returns here, not to plain MODE_NORMAL) underneath a
          * fresh MODE_NORMAL for the expression itself, and emit
          * TOK_DOLLAR_LBRACE -- exactly the same push-two-modes-and-emit-
          * the-boundary-token shape lex_dquote_run/lex_indented_run already
-         * use for "${" inside a string.
-         *
-         * M138: unlike the general try_scan_path call a few lines below
-         * (kept unconditional, see that call site's own comment),
-         * try_scan_home_path is left unconditional here too -- it's an
-         * instant one-branch bail for any non-'~' leading byte, nothing
-         * to guard. */
+         * use for "${" inside a string. */
         {
             size_t hlen = try_scan_home_path(src, i);
             if (hlen > 0) {
@@ -904,33 +709,23 @@ static Token lex_normal(Lexer *lx) {
             }
         }
 
-        /* M138: identifier-leading tokens get their own guarded path/URI
-         * check instead of falling into the unconditional try_scan_path
-         * (and, for alpha leads, try_scan_uri) calls below -- the second
-         * lexer.c lever flagged as a follow-on in M129 (see that
-         * section's "Checked against iets" paragraph) and in iets's own
-         * `next_token` (~/gnix/iets/src/syntax/lexer.rs, the
-         * `b'a'..=b'z' | b'A'..=b'Z' | b'_'` match arm): scan the
-         * ordinary identifier's own ident_cont run ONCE (needed anyway to
-         * produce a plain TOK_IDENT/keyword), then make the expensive
-         * path_char-run-plus-group scan (try_scan_path) and URI scan
-         * (try_scan_uri) conditional on a cheap single-byte peek at the
-         * character immediately following that run, instead of always
-         * attempting both scans first and then re-walking the exact same
-         * bytes a second time via ident_cont moments later whenever they
-         * fail (which is every time for an ordinary identifier/keyword --
-         * by far the most common token in real Nix source).
+        /* Identifier-leading tokens get their own guarded path/URI check
+         * instead of unconditionally calling try_scan_path (and, for
+         * alpha leads, try_scan_uri): scan the ordinary identifier's own
+         * ident_cont run ONCE (needed anyway to produce a plain
+         * TOK_IDENT/keyword), then make the expensive path_char-run-plus-
+         * group scan and URI scan conditional on a cheap single-byte peek
+         * at the character immediately following that run.
          *
-         * Correctness (the edge case M129 flagged and this milestone's
-         * commit message verifies): ident_cont and path_char/
-         * uri_scheme_char are NOT the same character set. '.' and '+' are
-         * path_char/uri_scheme_char but NOT ident_cont -- e.g. a token
-         * shaped like "a.b:foo" (a URI with a scheme containing '.') or
-         * "foo.bar/baz" (a path literal with '.' in its prefix) needs the
-         * real path_char/uri_scheme_char run, which keeps going past
-         * where ident_cont already stopped, checked -- not just where the
-         * identifier's own run ends. Conversely, '\'' is ident_cont but
-         * NOT path_char/uri_scheme_char.
+         * Correctness: ident_cont and path_char/uri_scheme_char are NOT
+         * the same character set. '.' and '+' are path_char/
+         * uri_scheme_char but NOT ident_cont -- e.g. a token shaped like
+         * "a.b:foo" (a URI with a scheme containing '.') or "foo.bar/baz"
+         * (a path literal with '.' in its prefix) needs the real
+         * path_char/uri_scheme_char run, which keeps going past where
+         * ident_cont already stopped -- not just where the identifier's
+         * own run ends. Conversely, '\'' is ident_cont but NOT path_char/
+         * uri_scheme_char.
          *
          * The guard below fires the real (expensive) rescan -- from this
          * token's own start, not from the ident_cont run's end -- whenever
@@ -941,8 +736,9 @@ static Token lex_normal(Lexer *lx) {
          * rescan, exactly the "a.b:foo"/"foo.bar/baz" case above).
          * Whenever NONE of those four hold, skipping both scans entirely
          * is PROVABLY equivalent to running them and having them both
-         * fail, not merely a fast-path approximation (see M138's own
-         * writeup, docs/architecture.md, for the full proof). */
+         * fail, not merely a fast-path approximation. Do not weaken this
+         * condition without re-checking that proof -- it is what makes
+         * skipping the scans safe. */
         if (ident_start(c)) {
             size_t j = i + 1;
             while (ident_cont(src[j])) j++;
@@ -969,9 +765,7 @@ static Token lex_normal(Lexer *lx) {
                 }
             }
             /* Plain identifier or keyword: [i, j), with j already computed
-             * above by the ident_cont scan this guard needed anyway -- no
-             * second ident_cont walk later in this function (see the old
-             * ident_start block this replaced, now removed). */
+             * above by the ident_cont scan this guard needed anyway. */
             size_t start = i;
             size_t len = j - start;
             TokKind kind = keyword_lookup(src + start, len);
@@ -979,15 +773,11 @@ static Token lex_normal(Lexer *lx) {
             return mk_tok(kind, start, j);
         }
 
-        /* Not an identifier lead (handled, with its own guard, just above):
-         * digit/'.'/'-'/'+'-led path scanning stays unconditional, exactly
-         * as before this milestone -- iets doesn't bother guarding these
-         * either (see its `or_float_or_path`'s own unconditional
-         * `scan_path_token` call, and the direct `scan_path_token` calls in
-         * its '.'/'-'/'+' match arms), since a digit/operator run is
-         * typically only 1-4 bytes before failing path_char, unlike an
-         * identifier's potentially much longer run -- not worth the extra
-         * branch/complexity for a near-zero win. */
+        /* Not an identifier lead (handled, with its own guard, just
+         * above): digit/'.'/'-'/'+'-led path scanning stays unconditional
+         * -- a digit/operator run is typically only 1-4 bytes before
+         * failing path_char, unlike an identifier's potentially much
+         * longer run, so guarding it isn't worth the extra complexity. */
         {
             size_t plen = try_scan_path(src, i);
             if (plen > 0) {
@@ -1025,25 +815,20 @@ static Token lex_normal(Lexer *lx) {
             size_t start = i;
             while (cc_digit(src[i])) i++;
             size_t int_len = i - start;
-            /* M51: real Nix's FLOAT grammar (grepped directly from
-             * ~/nix's src/libexpr/lexer.l):
+            /* Real Nix's FLOAT grammar (~/nix's src/libexpr/lexer.l):
              *   (([1-9][0-9]*\.[0-9]*)|(0?\.[0-9]+))([Ee][+-]?[0-9]+)?
              * i.e. a float literal ALWAYS needs a literal '.' somewhere --
-             * there is no bare-exponent float like "1e10" (confirmed:
-             * `nix-instantiate --eval` on that input errors "undefined
-             * variable 'e10'", i.e. it lexes as INT 1 then IDENT e10, NOT
-             * a float). Applied to the digit run just scanned: a run
-             * starting with a nonzero digit may be followed by '.' and
-             * ANY number (including zero) of further digits ("10." is a
-             * valid float with zero fractional digits -- verified
-             * against nix-instantiate); a run that's the single digit
-             * "0" may be followed by '.' only if at least one digit
-             * follows the dot ("0." is NOT a float -- verified: that
-             * lexes as INT 0 then DOT, same as before this milestone); a
-             * multi-digit run starting with '0' (e.g. "00.5") matches
-             * neither alternative and is left as plain INT "00" followed
-             * by ordinary DOT/INT lexing, an edge case no sane digit
-             * literal hits anyway. */
+             * there is no bare-exponent float like "1e10" (that lexes as
+             * INT 1 then IDENT e10, NOT a float). Applied to the digit run
+             * just scanned: a run starting with a nonzero digit may be
+             * followed by '.' and ANY number (including zero) of further
+             * digits ("10." is a valid float with zero fractional
+             * digits); a run that's the single digit "0" may be followed
+             * by '.' only if at least one digit follows the dot ("0." is
+             * NOT a float, that lexes as INT 0 then DOT); a multi-digit
+             * run starting with '0' (e.g. "00.5") matches neither
+             * alternative and is left as plain INT "00" followed by
+             * ordinary DOT/INT lexing. */
             int is_float = 0;
             if (src[i] == '.') {
                 if (int_len == 1 && src[start] == '0') {
@@ -1062,12 +847,10 @@ static Token lex_normal(Lexer *lx) {
             return mk_tok(TOK_INT, start, i);
         }
 
-        /* M51: a float literal with no leading digit at all -- the
-         * `\.[0-9]+` shape of real Nix's `0?\.[0-9]+` alternative (the
-         * "0?" is optional, so a bare ".5" is valid, verified against
-         * nix-instantiate: `.5` == `0.5`). Checked before the ELLIPSIS/
-         * plain-DOT handling below, since this starts with the same '.'
-         * character. */
+        /* A float literal with no leading digit at all -- the `\.[0-9]+`
+         * shape of real Nix's `0?\.[0-9]+` alternative (a bare ".5" is
+         * valid, equal to "0.5"). Checked before the ELLIPSIS/plain-DOT
+         * handling below, since this starts with the same '.' character. */
         if (c == '.' && cc_digit(src[i + 1])) {
             size_t start = i;
             i++; /* consume '.' */
@@ -1106,10 +889,7 @@ static Token lex_normal(Lexer *lx) {
          * string interpolation already uses (lex_dquote_run/
          * lex_indented_run above): the matching '}' pops back out via the
          * ordinary '}' handling just below, same as any other nested
-         * '{'. Previously `$` had no meaning at all outside an active
-         * string mode, so this hit "unrecognized character '$'" -- found
-         * evaluating real nixpkgs (`pkgs/top-level/default.nix` uses
-         * `set.${name}`), see docs/architecture.md's Known Bugs list. */
+         * '{'. */
         if (c == '$' && src[i + 1] == '{') {
             i += 2;
             mode_push(lx, MODE_NORMAL);
@@ -1146,12 +926,6 @@ static Token lex_normal(Lexer *lx) {
             return mk_tok(TOK_RBRACE, tok_start, i);
         }
 
-        /* M138: the ident_start(c) branch that used to live here (plain
-         * TOK_IDENT/keyword scanning, re-walking ident_cont from scratch)
-         * was moved up above, merged into the new guarded path/URI check --
-         * ident_start(c) can never reach this point anymore (that earlier
-         * branch always `continue`s/`return`s). */
-
         /* `...` (lambda-pattern ellipsis) is checked before any single- or
          * double-character operator, same lookahead style as the two-char
          * operators below. */
@@ -1185,8 +959,7 @@ static Token lex_normal(Lexer *lx) {
                 case '/': kind = TOK_SLASH; break; /* reached only when both try_scan_path
                                                      * (above) and the '//' two-char check
                                                      * just above already ruled this '/' out
-                                                     * as a path literal or update operator --
-                                                     * see TOK_SLASH's own comment (lexer.h). */
+                                                     * as a path literal or update operator. */
                 case '(': kind = TOK_LPAREN; break;
                 case ')': kind = TOK_RPAREN; break;
                 case '=': kind = TOK_EQUALS; break;
@@ -1211,51 +984,12 @@ static Token lex_normal(Lexer *lx) {
     }
 }
 
-/* M175: the parser's own on-demand lexing driver, now a true pull
- * interface -- `pending` first (a step that produced two tokens at once
- * stashed its second one here), else dispatch on the current mode and
- * delegate to the one step function that owns it, exactly mirroring
- * `iets`'s own `Lexer::next_token` dispatch (~/gnix/iets/src/syntax/
- * lexer.rs), minus its separate-functions-called-directly-by-the-parser
- * detail (asnix keeps every token, including string/path content chunks,
- * flowing through this single entry point instead, unchanged from M135).
- *
- * M194: the mode compare below now tests MODE_NORMAL FIRST, not last.
- * A follow-up candidate flagged by M182/M183's own investigation was
- * porting iets's structure literally -- having `parser.c` call
- * `lex_normal`/`lex_dquote_run`/`lex_indented_run`/`lex_path_run`
- * directly at each call site, bypassing this dispatcher for the
- * overwhelming majority of calls. Investigated and found NOT safely
- * portable as-is: iets's parser (~/gnix/iets/src/syntax/parser.rs)
- * keeps `tok`/`next` as LAZY `Option<Token>` slots, only calling
- * `next_token()` on demand (`peek()`'s `None` branch) -- its
- * `parse_string_parts`/`parse_ind_string` both `debug_assert!(self.tok.
- * is_none() && self.next.is_none())` on entry specifically because nothing
- * has pre-fetched past the opening delimiter yet. asnix's `Parser.tok`/
- * `.next` (parser.c, M181) are the opposite: an EAGERLY always-full
- * 2-slot buffer, refilled unconditionally by every `advance()` --
- * exactly the design M181 built, and measured as a major win, specifically
- * so `cur()`/`peek2()` could be plain field reads with zero calls into
- * lexer.c at all. Because of that, by the time `parser.c` ever "knows"
- * it's about to read string/path content, the lookahead slot for it has
- * ALREADY been fetched through this same generic dispatcher one
- * `advance()` call earlier -- there is no call site in `parser.c` where
- * skipping this dispatcher doesn't also mean re-deriving, per call site,
- * which of the 4 lexer step functions that fetch is secretly going to
- * need (a correctness-sensitive, whole-file audit of every `advance()`/
- * `expect()` site, the exact kind of change this file's own fragility
- * history -- 9+ prior milestones -- argues against for an estimated
- * ~0.2-0.3% win). What IS safe and captures the same flagged cost without
- * touching `parser.c`, the pending-slot convention, or the eager-lookahead
- * invariant at all: `mode_top(lx) == MODE_NORMAL` is true for the
- * overwhelming majority of real tokens (string/path literal content is a
- * small minority of any real Nix file) yet was tested LAST, after two
- * guaranteed-false compares against MODE_STRING/MODE_ISTRING on every
- * single ordinary token. Reordering to test it first turns the common
- * case into exactly one compare instead of three, with the mode-stack
- * semantics, pending-buffer contract, and every byte of per-mode scanning
- * logic completely unchanged -- a pure dispatch-order fix, not a
- * structural one. */
+/* The parser's own on-demand lexing driver, a true pull interface --
+ * `pending` first (a step that produced two tokens at once stashed its
+ * second one here), else dispatch on the current mode and delegate to
+ * the one step function that owns it. MODE_NORMAL is tested first since
+ * it's true for the overwhelming majority of real tokens (string/path
+ * literal content is a small minority of any real Nix file). */
 Token lexer_next(Lexer *lx) {
     if (lx->has_pending) {
         lx->has_pending = 0;
@@ -1309,7 +1043,7 @@ void lexer_restore(Lexer *lx, LexerSave save) {
                                       * truncating `.modes_len` back down is a complete,
                                       * correct undo -- nothing above the restored length is
                                       * ever read again until a fresh mode_push overwrites it. */
-    lx->cur = lx->modes[lx->modes_len - 1]; /* M177's cur-mirror has to be re-synced here too --
+    lx->cur = lx->modes[lx->modes_len - 1]; /* cur-mirror has to be re-synced here too --
                                                * mode_push/mode_pop are the only two places that
                                                * normally keep it in sync, but a restore changes
                                                * modes_len WITHOUT going through either of them,
@@ -1317,24 +1051,14 @@ void lexer_restore(Lexer *lx, LexerSave save) {
                                                * whatever it was at save-time's "future" (the
                                                * probed-ahead state), not at the restored position's
                                                * actual top -- a real divergence the very next
-                                               * mode_top() call (inside lexer_next) would read.
-                                               * `.modes` is never shrunk (see above), so the slot
-                                               * this reads was never overwritten by the probe. */
+                                               * mode_top() call (inside lexer_next) would read. */
     lx->pending = save.pending;
     lx->has_pending = save.has_pending;
 }
 
-/* Dead code as of M135 (every real caller goes through ll_parse's
- * internal Lexer instead -- see lexer.h's own comment); kept as a still-
- * correct, still-tested-by-construction (same lex_normal/lex_dquote_run/
- * lex_indented_run/lex_path_run core every lexer_next call ultimately
- * runs) standalone entry point, matching this project's own M127/M135
- * precedent of keeping a correct-but-unused reference implementation
- * rather than deleting a working, independently-useful API. M175: re-
- * implemented in terms of the new pull-based lexer_next() -- this
- * function's own small, local, malloc'd-and-grown array is now the ONLY
- * place in this file that assembles tokens into an array at all (every
- * real, in-use caller never materializes one). */
+/* Unused by any real caller (every real caller goes through ll_parse's
+ * internal Lexer instead); kept as a standalone, still-tested-by-
+ * construction entry point built on lexer_next(). */
 Token *ll_lex(const char *src, size_t *out_count) {
     keyword_lookup_selfcheck();
     Lexer *lx = lexer_new(src);

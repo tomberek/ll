@@ -1,8 +1,8 @@
-/* M10: prototypes for every AOT op handler, shared by their own
- * definitions and dispatch_table.c's handler table -- one shared
- * declaration keeps every handler's signature textually identical,
- * which musttail requires (the tail-called function's type must match
- * the caller's exactly). */
+/* Prototypes for every AOT op handler, shared by their own definitions
+ * and dispatch_table.c's handler table -- one shared declaration keeps
+ * every handler's signature textually identical, which musttail
+ * requires (the tail-called function's type must match the caller's
+ * exactly). */
 #ifndef LL_OPS_H
 #define LL_OPS_H
 

@@ -58,37 +58,21 @@ static void wbuf_u8(WBuf *b, uint8_t v) {
     wbuf_bytes(b, &v, 1);
 }
 
-/* M102: variable-width (LEB128-style) integer encoding, replacing the
- * fixed 8-byte int64 every opcode/operand/length/symbol-id field used to
- * burn regardless of magnitude. Measured on a real nixpkgs closure
- * (ffmpeg, 1056 files): the fixed-width cache was 91MB against ~62MB of
- * source text for the same files -- the "compiled" cache was actually
- * LARGER than the source, because most fields here (opcodes, small
- * operand values, string/pool lengths, symbol ids) fit in 1-2 bytes but
- * every one was stored as 8.
- *
- * Checked ~/gnix/iets/src/compile/cache.rs (a sibling Rust Nix
- * reimplementation's own on-disk IR-cache serializer) before picking a
- * scheme: it already uses exactly this -- unsigned LEB128 (`put_u32`/
- * `put_u64`, 7 payload bits + continuation bit per byte) for every
- * count/length/symbol-id/position field in its format, no delta-coding
- * or other trick layered on top. That's independent confirmation this is
- * the right default for "mostly-small-integer" serialization streams
- * like this one, not a novel choice -- adopted here with one addition
- * iets doesn't need: asnix's own `IrOp.a`/`.b` fields and `VTAG_INT`
- * payload are genuinely signed (jump deltas can be negative; a `PUSH_INT`
- * operand is an arbitrary signed 64-bit Nix integer), where iets's own
- * fields (counts, lengths, bit-pattern words) are always unsigned. So
- * this adds a zigzag step (the standard protobuf `sint64` trick: maps
- * 0,-1,1,-2,2,... to 0,1,2,3,4,...) before the same LEB128 varint,
- * folding "signed small magnitude" into "small unsigned", while still
- * correctly round-tripping the full int64_t range (including
- * INT64_MIN/INT64_MAX) at a bounded worst case of 10 bytes -- never
- * truncating, just no longer paying 8 bytes for a value that fits in 1.
+/* Variable-width (LEB128-style) integer encoding for every opcode/
+ * operand/length/symbol-id field, rather than a fixed 8-byte int64:
+ * most fields here (opcodes, small operand values, lengths, symbol ids)
+ * fit in 1-2 bytes. Since `IrOp.a`/`.b` and `VTAG_INT`'s payload are
+ * genuinely signed (jump deltas can be negative; a `PUSH_INT` operand is
+ * an arbitrary signed 64-bit Nix integer), this adds a zigzag step (the
+ * standard protobuf `sint64` trick: maps 0,-1,1,-2,2,... to 0,1,2,3,4,...)
+ * before the same LEB128 varint, folding "signed small magnitude" into
+ * "small unsigned", while still correctly round-tripping the full
+ * int64_t range (including INT64_MIN/INT64_MAX) at a bounded worst case
+ * of 10 bytes.
  *
  * Every call site below still calls plain wbuf_i64/rcur_i64 with an
  * int64_t -- only these two functions' own wire format changed, so this
- * is the entire diff against the fixed-width encoding. */
+ * is the entire diff against a fixed-width encoding. */
 static uint64_t zigzag_encode(int64_t v) {
     return ((uint64_t)v << 1) ^ (uint64_t)(v >> 63);
 }
@@ -300,15 +284,12 @@ static int read_value(RCur *r, Value *out) {
  * itself).
  * --------------------------------------------------------------------- */
 static int handler_to_op_id(void *handler) {
-    /* `ll`-port addition: ir_link()'s own peephole fusion (dispatch_
-     * table.c) rewrites the FIRST op of a qualifying run of >= 4
-     * consecutive OP_PUSH_INTs to `ll_op_push_int_run` directly (never
-     * through `ll_handler_table` -- see that function's own comment),
-     * so the loop below alone would return -1 for it, making
-     * program_op_count/write_one_op refuse to cache ANY program
-     * containing such a run (confirmed directly: only 32 of 1132 real
-     * files in a full ffmpeg-closure eval stored at all before this
-     * fix, every refusal traced to exactly this). Reporting it as plain
+    /* ir_link()'s own peephole fusion (dispatch_table.c) rewrites the
+     * FIRST op of a qualifying run of >= 4 consecutive OP_PUSH_INTs to
+     * `ll_op_push_int_run` directly (never through `ll_handler_table` --
+     * see that function's own comment), so the loop below alone would
+     * return -1 for it, making program_op_count/write_one_op refuse to
+     * cache ANY program containing such a run. Reporting it as plain
      * OP_PUSH_INT here is deliberate, not a shortcut: write_one_op's own
      * OP_PUSH_INT case only ever reads THIS op's own `pool[op->b]`
      * (the run's first literal) -- the run's OTHER (run_len - 1)
@@ -423,9 +404,9 @@ enum {
                           * that byte offset before compiling, instead of using an already-
                           * parsed Ast it never had. */
     PTAG_OP_SYM_B = 9,  /* same, but the bare symbol id is in `b` -- OP_WITH_TRY,
-                          * OP_SELECT_OR, OP_HAS_ATTR_IF (M162) (all three also have a real
+                          * OP_SELECT_OR, OP_HAS_ATTR_IF (all three also have a real
                           * jump-delta in `a`, passed through unchanged). */
-    PTAG_OP_PUSHINT = 10, /* M169: OP_PUSH_INT -- one raw (untagged) int64 literal follows,
+    PTAG_OP_PUSHINT = 10, /* OP_PUSH_INT -- one raw (untagged) int64 literal follows,
                           * written/read exactly like PTAG_OP_CONST except the payload is a
                           * bare int64 (write_value/read_value's Value.raw encoding), not a
                           * fully-formed, already-tagged Value -- see irbuild.c's ib_push_int. */
@@ -615,7 +596,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
     if (op_id < 0) return -1;
     switch (op_id) {
         case OP_PUSH_INT: {
-            /* M169: pool[op->b] is a raw (untagged) int64 literal, not a
+            /* pool[op->b] is a raw (untagged) int64 literal, not a
              * fully-formed Value -- write it directly, no write_value
              * envelope (that function's encoding is for already-tagged
              * Value.raw words, e.g. OP_PUSH_CONST's string/etc. constants). */
@@ -630,7 +611,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
             return write_value(b, v);
         }
         case OP_MK_THUNK: {
-            /* M100: pool[op->b] is now a single IrProgram* (ib_mk_thunk
+            /* pool[op->b] is now a single IrProgram* (ib_mk_thunk
              * pushes one pool slot, not a {ops,pool} pair) -- dereference
              * it directly instead of reading two separate pool slots. */
             IrProgram *child = (IrProgram *)(intptr_t)pool[op->b];
@@ -652,7 +633,7 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
             return write_program(b, child);
         }
         case OP_LAMBDA: {
-            /* M100: same single-IrProgram*-slot layout as OP_MK_THUNK
+            /* Same single-IrProgram*-slot layout as OP_MK_THUNK
              * above; formals moved from pool[op->b+2] to pool[op->b+1]
              * since the child program no longer occupies two slots. */
             IrProgram *child = (IrProgram *)(intptr_t)pool[op->b];
@@ -782,29 +763,20 @@ static int write_one_op(WBuf *b, IrOp *op, int64_t *pool) {
 
 int ll_bytecode_serialize(IrProgram *prog, uint8_t **out_buf, size_t *out_len) {
     WBuf b = { 0 };
-    /* M102: magic bumped 01 -> 02 -- the wire format of every
-     * opcode/operand/length/symbol-id field changed from fixed 8-byte
-     * int64 to a variable-width (zigzag+LEB128) varint. A stale
-     * ASNXBC01 entry from before this change must never be misread as
-     * ASNXBC02 data (the byte layout no longer lines up at all past the
-     * first field) -- ll_bytecode_deserialize's own magic check below
-     * rejects it outright, same as any other corrupt/foreign entry,
-     * degrading cleanly to a cache miss (recompile, overwrite) per this
-     * cache's own silent-degrade-to-miss design (bytecode_cache.c).
-     *
-     * M169: magic bumped 02 -> 03 -- OP_PUSH_INT's own wire encoding
-     * changed (new PTAG_OP_PUSHINT, see write_one_op/read_one_tagged_op):
-     * a pre-M169 ASNXBC02 entry wrote OP_PUSH_INT under plain PTAG_OP with
-     * the literal inline in `a` (back when IrOp.a was 64 bits); this
-     * binary's IrOp.a is now only 32 bits, so blindly replaying that old
-     * entry's db_emit(OP_PUSH_INT, a, b) call would SILENTLY TRUNCATE any
-     * literal outside +-2^31 instead of erroring -- not a crash, a wrong
-     * answer. Every other op's wire shape is actually unchanged (the
-     * varint encoding was always value-based, not a raw IrOp struct dump
-     * -- see this function's own M102 comment), but gating on OP_PUSH_INT
-     * alone would mean this format's own version history could no longer
-     * be determined by the magic string alone -- bumping the whole magic
-     * is the simpler, already-established invalidation mechanism. */
+    /* The magic string MUST be bumped whenever the wire format changes
+     * in a way that isn't self-describing. Two concrete reasons on
+     * record: (1) the opcode/operand/length/symbol-id fields moved from
+     * fixed 8-byte int64 to a variable-width zigzag+LEB128 varint, and a
+     * stale fixed-width entry must never be misread as varint data (the
+     * byte layout no longer lines up at all past the first field); (2)
+     * OP_PUSH_INT's own wire encoding changed to PTAG_OP_PUSHINT -- an
+     * older entry wrote it under plain PTAG_OP with the literal inline
+     * in `a` (back when IrOp.a was 64 bits); this binary's IrOp.a is now
+     * only 32 bits, so blindly replaying that old entry would SILENTLY
+     * TRUNCATE any literal outside +-2^31 instead of erroring -- not a
+     * crash, a wrong answer. ll_bytecode_deserialize's own magic check
+     * below rejects any mismatched magic outright, same as any other
+     * corrupt/foreign entry, degrading cleanly to a cache miss. */
     wbuf_bytes(&b, "ASNXBC03", 8);
     if (write_program(&b, prog) != 0 || b.failed) {
         free(b.buf);
@@ -930,7 +902,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
             return d->failed ? -1 : 0;
         }
         case PTAG_OP_PUSHINT: {
-            /* M169: see write_one_op's matching OP_PUSH_INT case -- the
+            /* See write_one_op's matching OP_PUSH_INT case -- the
              * payload is a bare int64 literal, not a tagged Value. */
             int64_t v = rcur_i64(r);
             if (r->failed) return -1;
@@ -959,7 +931,7 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
              * gdb: "Program received signal SIGSEGV... 0x000000000000000c",
              * `0xc` being a small op-id, not a code address). */
             ir_link(child.ops, child.len);
-            /* M100: Thunk/Closure's runtime consumer expects ONE pool
+            /* Thunk/Closure's runtime consumer expects ONE pool
              * slot holding an IrProgram*, not a {ops,pool} pair -- box
              * the freshly-read child the same way ib_finish does. */
             IrProgram *child_prog = malloc(sizeof(IrProgram));
@@ -1219,28 +1191,22 @@ static int read_one_tagged_op(RCur *r, DBuilder *d) {
 static int read_program_into(RCur *r, DBuilder *d) {
     int64_t n_ops = rcur_i64(r);
     if (r->failed || n_ops <= 0 || n_ops > 10000000) return -1;
-    /* perf (M137): `n_ops` is this level's EXACT final `d->len` -- verified
-     * against write_program's own counting (program_op_count, called on
-     * the ORIGINAL uncollapsed op array before OP_MK_ATTRS's grouped
-     * pairs are folded into one PTAG_OP_ATTRS entry) and against
-     * read_program_into's own loop below, which advances `i` by however
-     * many ops a single tagged entry actually emits (PTAG_OP_ATTRS emits
-     * `count+1` for one group entry, every other tag emits exactly 1) --
-     * so by the time this loop finishes, `d->len` always equals `n_ops`
-     * exactly, never more or less. Presizing `d->ops` to `n_ops` up front
-     * (this DBuilder is always freshly `{0}`-initialized by every call
-     * site -- the top-level call in ll_bytecode_deserialize and both
-     * PTAG_OP_THUNK/PTAG_OP_LAMBDA's own fresh `child = {0}`) replaces
-     * db_emit's usual start-at-16-and-double growth with a SINGLE
-     * allocation and zero growth-reallocs for `ops` at this level,
-     * mirroring M123's lexer TokVec precedent (presize when the final
-     * count is already known, rather than discover it by doubling).
-     * `pool` has no equivalent exact count (OP_CHECK_FORMALS/
-     * OP_REC_OVERRIDES_MERGE can add many pool entries for a single op),
-     * so it's only a heuristic starting guess here -- still correctly
-     * grows via the ordinary doubling path in db_pool_add if exceeded,
-     * same safety as before this change, just a smaller/zero chance of
-     * ever needing to. */
+    /* `n_ops` is this level's EXACT final `d->len`: write_program's own
+     * counting (program_op_count) runs on the ORIGINAL uncollapsed op
+     * array before OP_MK_ATTRS's grouped pairs are folded into one
+     * PTAG_OP_ATTRS entry, and read_program_into's own loop below
+     * advances `i` by however many ops a single tagged entry actually
+     * emits (PTAG_OP_ATTRS emits `count+1` for one group entry, every
+     * other tag emits exactly 1) -- so by the time this loop finishes,
+     * `d->len` always equals `n_ops` exactly. Presizing `d->ops` to
+     * `n_ops` up front (this DBuilder is always freshly `{0}`-initialized
+     * by every call site) replaces db_emit's usual start-at-16-and-double
+     * growth with a single allocation and zero growth-reallocs for `ops`
+     * at this level. `pool` has no equivalent exact count (OP_CHECK_
+     * FORMALS/OP_REC_OVERRIDES_MERGE can add many pool entries for a
+     * single op), so it's only a heuristic starting guess here -- still
+     * correctly grows via the ordinary doubling path in db_pool_add if
+     * exceeded. */
     if (d->cap == 0) {
         d->ops = malloc((size_t)n_ops * sizeof(IrOp));
         if (!d->ops) return -1;
@@ -1261,8 +1227,8 @@ static int read_program_into(RCur *r, DBuilder *d) {
 }
 
 IrProgram *ll_bytecode_deserialize(const uint8_t *buf, size_t len) {
-    /* Also rejects a pre-M102 ASNXBC01 entry (fixed-8-byte-int wire
-     * format) and a pre-M169 ASNXBC02 entry (OP_PUSH_INT's old inline-`a`
+    /* Also rejects any entry written under an older magic (an earlier
+     * fixed-8-byte-int wire format, or OP_PUSH_INT's old inline-`a`
      * encoding) -- see ll_bytecode_serialize's own comment on the
      * magic bump. */
     if (len < 8 || memcmp(buf, "ASNXBC03", 8) != 0) return NULL;

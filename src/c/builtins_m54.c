@@ -1,7 +1,4 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-/* open_memstream (used by toXML) is POSIX, not C11 -- needs an explicit
- * feature-test macro under -std=c11 (same reason eval_file.c defines
- * _DEFAULT_SOURCE for realpath()). */
 #define _POSIX_C_SOURCE 200809L
 
 #include "builtins_m54.h"
@@ -30,25 +27,8 @@ static void fatal(const char *who, const char *msg) {
     exit(1);
 }
 
-/* M195: zipAttrsWith2_impl's own size gate between its plain insertion-
- * sort+dedupe path and the ART path -- see that function's own comment
- * for the measured crossover (~40-50) this threshold is set comfortably
- * past, and why an unconditional ART swap regressed real workloads. */
 #define LL_ZIP_ART_THRESHOLD 64
 
-/* ---------------------------------------------------------------------
- * bitAnd / bitOr / bitXor (M54) -- `__bitAnd`/`__bitOr`/`__bitXor` in real
- * Nix (confirmed via cppnix source, ~/nix/src/libexpr/primops.cc: all
- * three `__`-prefixed, builtins-only). Plain arity-2 integer bitwise ops,
- * curried the same way every other true-arity-2 builtin in this codebase
- * is (ll_bshared_make_curried_native -- see builtins_misc.c's
- * make_curried_native for the full rationale). Verified against real
- * `nix-instantiate --eval`:
- *   bitAnd 6 3  == 2    (0b110 & 0b011 = 0b010)
- *   bitOr  6 3  == 7    (0b110 | 0b011 = 0b111)
- *   bitXor 6 3  == 5    (0b110 ^ 0b011 = 0b101)
- *   bitAnd 0 0  == 0
- * --------------------------------------------------------------------- */
 static Value bitAnd2_impl(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_INT(args[0], "bitAnd");
@@ -71,43 +51,17 @@ static Value build_bitAnd(void) { return ll_bshared_make_curried_native((void *)
 static Value build_bitOr(void) { return ll_bshared_make_curried_native((void *)bitOr2_impl, 2); }
 static Value build_bitXor(void) { return ll_bshared_make_curried_native((void *)bitXor2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * trace msg value (M54) -- `__trace` in real Nix (builtins-only).
- * Real Nix's own `prim_trace` forces (and prints) `msg` but does NOT
- * force `value` -- it's returned exactly as received, matching the
- * project's established "lazy pass-through" idiom (same as `getAttr`,
- * M23). Verified against real `nix-instantiate --eval`:
- *   trace "hi" 1                       -> stderr "trace: hi", result 1
- *   trace {a=1;} 1                     -> stderr "trace: { a = 1; }"
- *   trace ["a" "b"] 1                  -> stderr "trace: [ \"a\" \"b\" ]"
- *   let y = trace "x" (abort "boom"); in 1  -> 1, NO stderr output at all
- *     (y unused -> its thunk never forced -> trace never even runs,
- *     ordinary M6 let-laziness, nothing trace-specific)
- * The crucial top-level formatting rule (confirmed against 4 separate
- * nix-instantiate cases): when `msg` forces to a STRING, its RAW bytes
- * are printed unquoted ("trace: hi", not "trace: \"hi\""); every other
- * type (including a string NESTED inside a list/attrset) uses the
- * ordinary quoted/structural printer. This project's 4 actual conformance
- * callers (eval-okay-tryeval-failed-thunk-reeval/sort-peeksort/
- * inherit-from/print) only ever trace a plain top-level string, so the
- * nested-container/function-value branches below are a best-effort,
- * not-fully-faithful fallback (no attrset-name quoting/reserved-keyword
- * handling the way main.c's own printer has, and no `<PRIMOP>`/`<LAMBDA>`/
- * cycle-detection notation the way real Nix's repl-style printer has) --
- * documented, deliberate scope cut, see docs/architecture.md's M54 notes.
+/* trace msg value -- `__trace` in real Nix. Real Nix's `prim_trace` forces
+ * and prints `msg` but does NOT force `value` -- it's returned exactly as
+ * received (same lazy pass-through idiom as `getAttr`). When `msg` forces to
+ * a STRING, its raw bytes are printed unquoted; every other type uses the
+ * ordinary quoted/structural printer.
  *
- * Needs its argument UNFORCED (NOFORCE) so `value` doesn't get forced
- * -- and therefore potentially abort/throw -- by op_call.S's ordinary
- * pre-call argument-forcing (M25/M38) before this function even runs,
- * which would both force `value` too early (before `msg` is even
- * printed) and defeat the "pass `value` through exactly as received"
- * contract. The real native call still only happens once something
- * forces the overall `trace msg value` application to begin with (two
- * ordinary Closure-call curry stages first, forcing nothing, M25) --
- * msg is forced/printed HERE, manually, and `value` is returned raw;
- * op_call.S's unconditional POST-call force (M23/M38) still forces the
- * returned `value` to WHNF once that outer application is itself
- * forced, exactly mirroring getAttr's own "lazy passthrough" shape. */
+ * Needs its argument UNFORCED (NOFORCE) so `value` isn't forced by
+ * op_call.S's ordinary pre-call argument-forcing before this function even
+ * runs -- that would force `value` too early and defeat the "pass `value`
+ * through exactly as received" contract. `msg` is forced/printed manually
+ * here instead; `value` is returned raw. */
 static void trace_print_string(FILE *out, const char *bytes, int64_t len) {
     fputc('"', out);
     for (int64_t i = 0; i < len; i++) {
@@ -194,16 +148,8 @@ static Value trace2_impl(const Value *args, int64_t argc) {
     return args[1];
 }
 
-/* Same curry-chain shape as ll_bshared_make_curried_native
- * (builtins_shared.c), but building the real native primop via
- * ll_bshared_make_primop_noforce instead -- needed only by `trace`
- * so far, hence not promoted into builtins_shared.c's own general
- * helper (which every OTHER curried-native builtin in this codebase
- * wants force-args-on, the ordinary default). */
 static Value make_curried_native_noforce(void *native_fn, int64_t arity) {
     Value native_primop = ll_bshared_make_primop_noforce(native_fn, arity);
-    /* M80: shared canonical marker, not a fresh allocation -- see
-     * builtins_shared.h's ll_bshared_native_formals_marker. */
     Value empty_formals = ll_bshared_native_formals_marker();
 
     IrBuilder *b = ib_new();
@@ -222,7 +168,7 @@ static Value make_curried_native_noforce(void *native_fn, int64_t arity) {
 
     void *mem = ll_arena_alloc(LL_CLOSURE_SIZE);
     *(void **)((char *)mem + LL_CLOSURE_OFF_UP) = NULL;
-    *(IrProgram **)((char *)mem + LL_CLOSURE_OFF_PROG) = prog; /* M100: one pointer, not {ops,pool} */
+    *(IrProgram **)((char *)mem + LL_CLOSURE_OFF_PROG) = prog;
     *(int64_t *)((char *)mem + LL_CLOSURE_OFF_ARITY) = 1;
     *(uint64_t *)((char *)mem + LL_CLOSURE_OFF_FORMALS) = empty_formals.raw;
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_CLOSURE };
@@ -230,28 +176,15 @@ static Value make_curried_native_noforce(void *native_fn, int64_t arity) {
 
 static Value build_trace(void) { return make_curried_native_noforce((void *)trace2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * zipAttrsWith f listOfAttrsets (M54) -- `__zipAttrsWith` in real Nix
- * (builtins-only). For each distinct key appearing in ANY of the given
- * attrsets, collects every value present under that key -- in the
- * LIST's own order, not alphabetical, not per-attrset insertion order --
- * into a list, then calls `f key thatList`; the result is one attrset
- * with those per-key results. Verified against real `nix-instantiate
- * --eval`:
- *   zipAttrsWith (n: v: v) [{a=1;b=2;} {a=3;c=4;}]
- *     == { a = [ 1 3 ]; b = [ 2 ]; c = [ 4 ]; }
- *   zipAttrsWith (n: v: v) [] == {}
- * Each output value is a genuine lazy call (M118: a ThunkMap,
- * ll_thunkmap_make_desc/_pack -- value_util.c -- one shared descriptor
- * for the whole call rather than a separate heap object per key; see
- * heap.h's LL_THUNKMAP_MARKER comment, same M23 laziness fix every
- * other map-shaped builtin in this codebase already uses for its
- * callback), not an eagerly-invoked one -- `f` must not run just from
- * zipAttrsWith being called, only once a given key's result is actually
- * forced. The per-key GROUPING (which values go under which key) stays
- * eager regardless -- that's the whole point of zipAttrsWith, and there's
- * no way to defer it -- only the call to `f` on top of that grouping is
- * deferred. */
+/* zipAttrsWith f listOfAttrsets -- `__zipAttrsWith` in real Nix. For each
+ * distinct key appearing in any of the given attrsets, collects every value
+ * present under that key (in the list's own order) into a list, then calls
+ * `f key thatList`; the result is one attrset of per-key results.
+ *
+ * `f` must stay lazy: it must not run just because zipAttrsWith was called,
+ * only once a given key's result is actually forced (ThunkMap, see heap.h's
+ * LL_THUNKMAP_MARKER comment). The per-key grouping itself stays eager --
+ * only the call to `f` on top of it is deferred. */
 static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value f = args[0];
@@ -270,28 +203,11 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     }
 
     /* Collect every (sym) appearing in any input attrset, then dedupe and
-     * sort. M195: size-gated hybrid. A specialized ART (uint32_t-symbol-
-     * id-keyed, mutable/non-persistent, variable-size-per-kind nodes --
-     * see ll/art_sym.h for the full design rationale) measures as a
-     * real win over the plain bulk-collect+sort+dedupe below -- but ONLY
-     * once total_attrs is large (roughly even at total_attrs~=40-50,
-     * clearly ahead by total_attrs=200, up to ~2.6x by total_attrs=
-     * 50000). Instrumenting a real NixOS module-system eval (the
-     * plasma-desktop system closure) showed why that threshold matters:
-     * across 26,156 real zipAttrsWith calls, total_attrs has a MEDIAN of
-     * 4 and 99% are <= 32 -- almost every real call is far below where
-     * ART wins, and ART's small fixed per-insert overhead (one
-     * arena-backed node per distinct key, recursive descent) makes it a
-     * measurable net LOSS at that tiny-call end (e.g. ~1-2% slower at
-     * total_attrs=10-30 in isolation). An unconditional swap to ART
-     * measured as a tiny net REGRESSION end-to-end on real workloads
-     * (+0.02-0.05% instructions on ffmpeg-full.outPath and the plasma
-     * system closure) despite winning decisively in isolation at large
-     * total_attrs, because real calls are overwhelmingly tiny. This
-     * threshold (64, comfortably past the ~40-50 measured crossover)
-     * keeps the cheap path for the common tiny-call case and only pays
-     * ART's node-allocation overhead on the rare large merges where it
-     * actually wins. */
+     * sort. Size-gated hybrid: below the threshold, use the plain
+     * bulk-collect+sort+dedupe path below; above it, use a specialized ART
+     * (see ll/art_sym.h). An unconditional swap to ART regresses real
+     * workloads overall because real zipAttrsWith calls are overwhelmingly
+     * tiny -- keep this size gate rather than using ART unconditionally. */
     uint32_t *distinct;
     int64_t distinct_n;
     if (total_attrs <= LL_ZIP_ART_THRESHOLD) {
@@ -316,10 +232,6 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
             if (distinct_n == 0 || distinct[distinct_n - 1] != all_syms[i]) distinct[distinct_n++] = all_syms[i];
         }
     } else {
-        /* M198: this call site only needs the distinct sorted sym set,
-         * not a payload -- pass a dummy zero Value and NULL for
-         * out_vals (art_sym_collect_sorted skips writing values entirely
-         * when out_vals is NULL, zero extra cost). */
         LlArtSymSet sym_set;
         ll_art_sym_init(&sym_set);
         for (int64_t i = 0; i < n; i++) {
@@ -344,12 +256,6 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
     }
 
     if (distinct_n > 0 && distinct_n <= LL_THUNKMAP_MAX_IDX + 1) {
-        /* M118: pack each key's {sym, already-collected value list} into a
-         * small `Attr`-shaped `src_entries` buffer (heap.h's packed
-         * {uint32_t sym; Value value;}, no header word needed -- `idx` is
-         * always < distinct_n) and share ONE ThunkMapDesc across every
-         * key, instead of M117's one 32-byte LazyApp PER key -- see
-         * heap.h's LL_THUNKMAP_MARKER comment. */
         char *src_entries = ll_arena_alloc((uint64_t)distinct_n * LL_ATTR_SIZE);
         for (int64_t k = 0; k < distinct_n; k++) {
             char *entry = src_entries + k * LL_ATTR_SIZE;
@@ -363,11 +269,10 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
         return out;
     }
 
-    /* Pathological (distinct_n > LL_THUNKMAP_MAX_IDX + 1) or empty:
-     * fall back to the old per-element LazyApp path rather than silently
-     * truncating a packed index -- see heap.h's LL_THUNKMAP_MARKER
-     * comment. distinct_n == 0 also lands here but the loop below is then
-     * simply a no-op, matching this function's pre-M118 behavior exactly. */
+    /* distinct_n > LL_THUNKMAP_MAX_IDX + 1, or empty: fall back to the
+     * per-element LazyApp path instead of silently truncating a packed
+     * index. distinct_n == 0 also lands here but the loop below is then
+     * simply a no-op. */
     for (int64_t k = 0; k < distinct_n; k++) {
         size_t namelen;
         const char *name = ll_sym_name(distinct[k], &namelen);
@@ -379,33 +284,6 @@ static Value zipAttrsWith2_impl(const Value *args, int64_t argc) {
 
 static Value build_zipAttrsWith(void) { return ll_bshared_make_curried_native((void *)zipAttrsWith2_impl, 2); }
 
-/* ---------------------------------------------------------------------
- * toXML v (M54) -- `__toXML` in real Nix (builtins-only). Serializes
- * `v` as Nix's own XML schema, ported field-for-field from real Nix's
- * `printValueAsXML`/`XMLWriter` (~/nix/src/libexpr/value-to-xml.cc,
- * ~/nix/src/libutil/xml-writer.cc): 2-space indent per nesting level, a
- * self-closing `<tag attr="val" />` for leaf values, `<tag>`/`</tag>` on
- * their own lines for containers, attrset keys in ALPHABETICAL order
- * (matching this project's existing attrNames convention). Verified
- * against numtide/nix-conformance's eval-okay-toxml.nix/eval-okay-
- * toxml2.nix expected output byte-for-byte (including the exact `<?xml
- * version='1.0' encoding='utf-8'?>` header line and indentation) before
- * trusting this.
- *
- * Deliberately scoped out (not exercised by either target test, and
- * each would need infrastructure this project doesn't have): real
- * Nix's `isDerivation`-special-cased `<derivation>` element (asnix's
- * own derivation support is itself a documented, narrower M8 scope
- * cut), position attributes on `<attr>`/`<function>` (prim_toXML always
- * passes `location=false`, so real Nix itself never emits these either
- * -- nothing lost), and a fully faithful `<function>`/`<varpat>` (a
- * plain, non-pattern lambda's single argument NAME isn't tracked
- * anywhere in this project's Closure representation, only pattern-
- * style formals are, see M37's functionArgs) -- closures print as an
- * empty `<function><varpat name="" /></function>` and primops/
- * primop-applications print `<unevaluated />` (matching real Nix's own
- * "FIXME: Serialize primops and primopapps" fallback exactly, just
- * applied to lambdas too here). */
 typedef struct {
     FILE *out;
     int depth;
@@ -552,23 +430,6 @@ static Value prim_toXML(const Value *args, int64_t argc) {
 }
 static Value build_toXML(void) { return ll_bshared_make_primop((void *)prim_toXML, 1); }
 
-/* ---------------------------------------------------------------------
- * convertHash { hash, hashAlgo?, toHashFormat } (M54) -- `__convertHash`
- * in real Nix (builtins-only). Ported from real Nix's own `Hash::
- * parseAny`/`Hash::to_string` (~/nix/src/libutil/hash.cc): `hash` may be
- * bare (format detected purely from its decoded LENGTH against the
- * known algorithm digest size), `algo:body`-prefixed, or an SRI string
- * (`algo-base64body`) -- `hashAlgo` is required unless the algo can be
- * read from one of those two prefix forms (and if both are present, they
- * must agree). `toHashFormat` is one of "base16"/"nix32"/"base32"
- * (deprecated alias for nix32 -- same encoding) /"base64"/"sri" (always
- * algo-prefixed, with '-'; base16/nix32/base64 are never algo-prefixed in
- * convertHash's output -- confirmed directly against real Nix:
- * `convertHash { hash="e3b0..."; hashAlgo="sha256"; toHashFormat=
- * "base16"; }` == "e3b0..." with NO "sha256:" prefix). Verified against
- * numtide/nix-conformance's eval-okay-convertHash.nix/.exp, which
- * exercises all 4 algorithms x all 5 formats x bare/colon-prefixed input,
- * before trusting this. */
 static int64_t algo_name_to_size(const char *name, int64_t len) {
     if (len == 3 && memcmp(name, "md5", 3) == 0) return LL_HASH_MD5_LEN;
     if (len == 4 && memcmp(name, "sha1", 4) == 0) return LL_HASH_SHA1_LEN;
@@ -589,11 +450,10 @@ static int str_eq_lit(const char *s, int64_t len, const char *lit) {
     return (size_t)len == litlen && memcmp(s, lit, litlen) == 0;
 }
 
-/* Parses `s` (the `hash` attribute's raw bytes) -- with an optional
- * already-known algorithm name from the `hashAlgo` attribute
- * (`given_algo`/`given_algo_len`, NULL/0 if that attribute was omitted)
- * -- into `out_raw` (caller-sized >= 64 bytes) and reports the resolved
- * algorithm's digest size/canonical name. */
+/* Parses `s` (hash attribute's raw bytes), with an optional already-known
+ * algorithm name `given_algo`/`given_algo_len` (NULL/0 if omitted), into
+ * `out_raw` (caller-sized >= 64 bytes); reports the resolved algorithm's
+ * digest size and canonical name. */
 static void parse_any_hash(const char *s, int64_t slen, const char *given_algo, int64_t given_algo_len,
                             unsigned char *out_raw, int64_t *out_size, const char **out_name, int64_t *out_name_len) {
     int64_t colon = -1, dash = -1;
@@ -741,38 +601,20 @@ static Value prim_convertHash(const Value *args, int64_t argc) {
 }
 static Value build_convertHash(void) { return ll_bshared_make_primop((void *)prim_convertHash, 1); }
 
-/* ---------------------------------------------------------------------
- * getContext / hasContext / appendContext / unsafeDiscardOutputDependency /
- * addDrvOutputDependencies (M54, real semantics added M80) --
- * `__getContext`/`__hasContext`/`__appendContext`/
- * `__unsafeDiscardOutputDependency`/`__addDrvOutputDependencies` in real
- * Nix (all builtins-only, ~/nix/src/libexpr/primops/context.cc, read in
- * full before writing this). M76 gave this codebase a REAL string-
- * context side table (string_context.c/.h) for derivation-hashing
- * purposes, but these five builtins -- the first thing to ever expose
- * that mechanism at the Nix-language level -- were still the M54-era
- * hardcoded no-ops described in this comment's prior revision (git
- * history). Real Nix's context has exactly three element kinds (see
- * string_context.h): Opaque (a plain store-path reference, `{path=
- * true;}`), Built (a specific named output of a derivation, `{outputs=
- * [...];}`), and DrvDeep (the WHOLE closure of a derivation, `{
- * allOutputs=true;}` -- attached to a derivation's own `.drvPath`
- * string, derivation.c's ll_prim_derivation). */
+/* getContext / hasContext / appendContext / unsafeDiscardOutputDependency /
+ * addDrvOutputDependencies -- `__getContext`/`__hasContext`/
+ * `__appendContext`/`__unsafeDiscardOutputDependency`/
+ * `__addDrvOutputDependencies` in real Nix. A string's context has exactly
+ * three element kinds (string_context.h): Opaque (a plain store-path
+ * reference, `ctx->srcs`), Built (a specific named output of a derivation,
+ * `ctx->drvs`), and DrvDeep (the whole closure of a derivation, `ctx->deep`,
+ * attached to a derivation's own `.drvPath`). */
 static Value prim_getContext(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_STRING(args[0], "getContext");
     const LlStringContext *ctx = ll_string_context_of(args[0]);
     if (ll_ctx_is_empty(ctx)) return ll_bshared_make_attrs(NULL, NULL, 0);
 
-    /* One aggregated record per distinct drv_path, matching real Nix's
-     * own `std::map<StorePath, ContextInfo>` (context.cc's
-     * prim_getContext) -- a path may have `path`/`allOutputs` both set
-     * AND a non-empty `outputs` list all at once. Linear-scan
-     * find-or-create: this project's own context table is itself a
-     * linear/hash scan over similarly small per-string N (see
-     * string_context.c's own perf note), and a single string's context
-     * here is bounded by how many distinct derivations/paths it
-     * mentions -- not a hot path the way the side table's OWN lookup is. */
     typedef struct {
         const char *path;
         int is_path;
@@ -837,19 +679,11 @@ static Value prim_getContext(const Value *args, int64_t argc) {
             nk++;
         }
         if (e->noutputs > 0) {
-            /* M80: real Nix's context is a `std::set<NixStringContextElem>`
-             * ordered by variant-index-then-value (~/nix/src/libexpr/
-             * include/nix/expr/value/context.hh) -- for same-drvPath
-             * `Built` elements, that's alphabetical by OUTPUT NAME, not
-             * the order they were encountered scanning the string's own
-             * text (which is what `ctx->drvs`, a plain append-on-first-
-             * attach array, preserves instead). Confirmed needed
-             * directly: `eval-okay-context-introspection.nix`'s `combo-
-             * path` interpolates `drv.outPath` (output "out") BEFORE
-             * `drv.foo.outPath` (output "foo"), yet real Nix's own
-             * `getContext` reports `outputs = [ "foo" "out" ]` --
-             * alphabetical, not encounter order. Plain insertion sort:
-             * always a handful of outputs per derivation. */
+            /* Must sort alphabetically by output name here: real Nix's
+             * context is an ordered std::set, and for same-drvPath Built
+             * elements that ordering is by output name, not the order
+             * encountered scanning the string -- removing this sort would
+             * report outputs in the wrong order relative to real Nix. */
             for (size_t j = 1; j < e->noutputs; j++) {
                 size_t k = j;
                 while (k > 0 && strcmp(e->outputs[k - 1], e->outputs[k]) > 0) {
@@ -878,9 +712,7 @@ static Value prim_getContext(const Value *args, int64_t argc) {
 }
 static Value build_getContext(void) { return ll_bshared_make_primop((void *)prim_getContext, 1); }
 
-/* `builtins.hasContext` -- not in the original M54 batch (real Nix has
- * it, `__hasContext`, context.cc) but trivial once `ll_string_context_of`
- * exists: `!context.empty()`, verbatim. */
+/* `builtins.hasContext` -- `__hasContext` in real Nix: `!context.empty()`. */
 static Value prim_hasContext(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_STRING(args[0], "hasContext");
@@ -889,15 +721,12 @@ static Value prim_hasContext(const Value *args, int64_t argc) {
 }
 static Value build_hasContext(void) { return ll_bshared_make_primop((void *)prim_hasContext, 1); }
 
-/* `builtins.appendContext orig ctxAttrs` -- ported from context.cc's
- * `prim_appendContext`: starts from `orig`'s OWN existing context (a
- * no-op union if `orig` is context-free, the common case for every
- * conformance fixture that calls this on a literal string), then adds
- * one element per `ctxAttrs` key: `path=true` -> Opaque, `allOutputs=
- * true` -> DrvDeep (key must look like a `.drv` path), `outputs=[...]`
- * -> one Built element per name (same `.drv`-path requirement). Returns
- * a FRESH string value (same bytes, new arena pointer) with the
- * combined context attached -- never mutates/reuses `args[0]`'s own
+/* `builtins.appendContext orig ctxAttrs` -- `__appendContext` in real Nix.
+ * Starts from `orig`'s own existing context, then adds one element per
+ * `ctxAttrs` key: `path=true` -> Opaque, `allOutputs=true` -> DrvDeep (key
+ * must look like a `.drv` path), `outputs=[...]` -> one Built element per
+ * name (same `.drv`-path requirement). Returns a fresh string value with
+ * the combined context attached -- must not mutate/reuse `args[0]`'s own
  * table entry. */
 static int ends_with_dot_drv(const char *s, size_t len) {
     return len > 4 && memcmp(s + len - 4, ".drv", 4) == 0;
@@ -985,10 +814,9 @@ static Value appendContext2_impl(const Value *args, int64_t argc) {
 }
 static Value build_appendContext(void) { return ll_bshared_make_curried_native((void *)appendContext2_impl, 2); }
 
-/* `builtins.unsafeDiscardOutputDependency s` -- ported from context.cc's
- * `prim_unsafeDiscardOutputDependency`: every DrvDeep element in `s`'s
- * context becomes a plain Opaque element at the same path (Built/Opaque
- * elements pass through unchanged). Always succeeds -- no size
+/* `builtins.unsafeDiscardOutputDependency s` -- every DrvDeep element in
+ * `s`'s context becomes a plain Opaque element at the same path (Built/
+ * Opaque elements pass through unchanged). Always succeeds -- no size
  * restriction on the context, unlike `addDrvOutputDependencies` below. */
 static Value prim_unsafeDiscardOutputDependency(const Value *args, int64_t argc) {
     (void)argc;
@@ -1011,14 +839,6 @@ static Value build_unsafeDiscardOutputDependency(void) {
     return ll_bshared_make_primop((void *)prim_unsafeDiscardOutputDependency, 1);
 }
 
-/* `builtins.addDrvOutputDependencies s` -- ported from context.cc's
- * `prim_addDrvOutputDependencies`: `s`'s context must have EXACTLY one
- * element; an Opaque element whose path ends `.drv` becomes DrvDeep, a
- * DrvDeep element passes through unchanged (idempotent, confirmed
- * directly against real `nix-instantiate --eval`: `addDrvOutputDependencies
- * d.drvPath == addDrvOutputDependencies (addDrvOutputDependencies
- * d.drvPath)`), and a Built element (a specific named output) is a hard
- * error -- "can only act on derivations, not on a derivation output". */
 static Value prim_addDrvOutputDependencies(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_STRING(args[0], "addDrvOutputDependencies");
@@ -1057,21 +877,12 @@ static Value build_addDrvOutputDependencies(void) {
     return ll_bshared_make_primop((void *)prim_addDrvOutputDependencies, 1);
 }
 
-/* unsafeDiscardStringContext s (M58-adjacent, found via d.nix right
- * after M58's derivation fix let nixpkgs eval far enough to reach a
- * call to it -- `pkgs/build-support/fetchurl/default.nix` and friends
- * call it on `url`/`name`-shaped strings before using them as plain
- * env-var values). M80: now that `getContext` is real (above), this
- * MUST return a genuinely context-free value, not `args[0]` unchanged
- * -- the string-context side table is keyed by the Value's own arena
- * POINTER (string_context.c), so returning the same pointer would leave
- * `getContext (unsafeDiscardStringContext s)` finding `s`'s own
- * still-attached context (confirmed needed directly against real
- * `nix-instantiate --eval`'s `eval-okay-context-builtins.nix`: `discard
- * = ctx (builtins.unsafeDiscardStringContext s);` must be `{}`, not
- * `s`'s own non-empty context). A fresh `ll_make_string_value` with
- * the same bytes, under a NEW arena pointer, with nothing ever attached
- * to it, is exactly that. */
+/* unsafeDiscardStringContext s -- must return a genuinely context-free
+ * value, not `args[0]` unchanged: the string-context side table is keyed
+ * by the Value's own arena pointer, so returning the same pointer would
+ * leave `getContext (unsafeDiscardStringContext s)` still finding `s`'s
+ * own context. A fresh `ll_make_string_value` with a new arena pointer
+ * and nothing attached achieves that. */
 static Value prim_unsafeDiscardStringContext(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_STRING(args[0], "unsafeDiscardStringContext");
@@ -1084,25 +895,6 @@ static Value build_unsafeDiscardStringContext(void) {
     return ll_bshared_make_primop((void *)prim_unsafeDiscardStringContext, 1);
 }
 
-/* ---------------------------------------------------------------------
- * scopedImport scope path (M54) -- one of real Nix's bare root-scope
- * globals (confirmed via cppnix source, ~/nix/src/libexpr/primops.cc:
- * `.name = "scopedImport"`, no `__` prefix -- see M27's bare-global-rule
- * notes). `scope`'s attribute names become extra bare identifiers,
- * resolvable (and shadowing any bare global/builtins.X of the same
- * name) inside `path`'s own lexical scope -- see compiler.c's
- * ll_compile_scoped/eval_file.c's ll_eval_file_scoped for the
- * actual mechanism (a real compile-time ScopeFrame + runtime Env hop,
- * exactly mirroring cppnix's own StaticEnv-splicing implementation, NOT
- * a `with`-style runtime fallback -- `with` would give scope's names the
- * WRONG priority here, see compiler.c's comment). The path argument
- * accepts the same two shapes `builtins.import` already does (a Path, or
- * an absolute-path String) via the same resolve-and-reject-relative-
- * strings logic (builtins.c's prim_import). Verified against real
- * nix-instantiate (numtide/nix-conformance's own eval-okay-import.nix,
- * which exercises both the basic shadowing case and a recursive
- * `scopedImport (overrides // s) fn`-via-overridden-bare-`import`
- * pattern) before trusting this. */
 static Value scopedImport2_impl(const Value *args, int64_t argc) {
     (void)argc;
     Value scope = args[0];
@@ -1129,57 +921,16 @@ static Value build_scopedImport(void) { return ll_bshared_make_curried_native((v
 
 Value ll_make_scopedImport_primop(void) { return build_scopedImport(); }
 
-/* ---------------------------------------------------------------------
- * unsafeGetAttrPos name attrset (M59) -- `builtins`-only in real Nix
- * (confirmed: `nix-instantiate --eval --strict -E 'builtins.isFunction
- * unsafeGetAttrPos'` errors "undefined variable 'unsafeGetAttrPos'",
- * unlike `scopedImport` above -- so this is wired into
- * LL_M54_BUILTINS only, with no ll_make_*_primop/root-Env-slot
- * counterpart the way scopedImport has one).
+/* builtins.unsafeGetAttrPos name attrset -- builtins-only in real Nix.
+ * Returns `{ file; line; column; }` for where `attrset`'s binding named
+ * `name` was written in source, or `null` if `attrset` has no such
+ * attribute, or if it does but its value is a native builtin (which has no
+ * source position in real Nix either).
  *
- * Real Nix returns `{ file; line; column; }` describing where
- * `attrset`'s binding named `name` was written in source, or `null` if
- * `attrset` has no such attribute (verified directly: `let a = { x = 1;
- * }; in builtins.unsafeGetAttrPos "x" a` => `{ column = 11; file =
- * "<...>"; line = 1; }`; `... unsafeGetAttrPos "y" a` => `null`).
- *
- * asnix has no source-position information available at this call site
- * at all, by construction: `attrset` here is a bare runtime Attrs heap
- * value (LL_TAG_ATTRS) with no back-pointer to whatever AST node (or
- * which of possibly several files, if the attrset was merged/imported)
- * originally built it, and growing the Attr record (LL_ATTR_SIZE/
- * LL_ATTR_OFF_SYM/LL_ATTR_OFF_VALUE, heap.h) to add one is
- * EXPLICITLY out of scope for this milestone (see docs/architecture.md's
- * M59 scope notes -- this is a deliberately narrow, approximate
- * implementation requested in place of the full position-tracking
- * feature this project's docs have long flagged as a disproportionate,
- * cross-cutting change). What this function actually does:
- *
- *   - The null-vs-not-null distinction IS exact in two different ways,
- *     now (M80, see docs/architecture.md): returns real `LL_NULL` if
- *     `name` isn't one of `attrset`'s attributes at all (ll_bshared_
- *     attrs_find, unchanged since M59) -- same membership test
- *     `hasAttr`/`getAttr` already use -- AND ALSO if it is, but its
- *     (forced) value is `LL_TAG_PRIMOP`: a native builtin genuinely
- *     has no source position in real Nix either (confirmed:
- *     `unsafeGetAttrPos "abort" builtins` => `null`, even though
- *     `abort` is unquestionably an attribute of `builtins`) -- found via
- *     numtide/nix-conformance's eval-okay-getattrpos-undefined.nix.
- *     `{file;line;column;}` otherwise.
- *   - `file` is APPROXIMATE: the resolved absolute path of the
- *     OUTERMOST file asnix was originally invoked on (ll_eval_
- *     top_level_file, eval_file.c/.h), reported uniformly for every
- *     attribute that exists -- regardless of which actual file/import
- *     wrote the specific binding being asked about. "" if no file is
- *     tracked yet (shouldn't happen via main.c's normal entry point).
- *   - `line`/`column` are FIXED PLACEHOLDERS (1/1), not read from
- *     anywhere: the only genuinely available per-token position data in
- *     this codebase (lexer.h's Token.pos) is discarded by parser.c
- *     before it ever reaches an AstBinding, and threading it all the way
- *     from there through compiler.c's IR into a runtime Attrs entry
- *     would mean exactly the Attr-record growth this pass is scoped to
- *     avoid. A uniform 1/1 is honest about being a placeholder rather
- *     than implying false precision. */
+ * No source-position tracking exists in this codebase: `file` is always the
+ * resolved path of the outermost file asnix was invoked on (regardless of
+ * which actual file/import wrote the binding), and `line`/`column` are
+ * fixed placeholders (1/1), not real positions. */
 static Value unsafeGetAttrPos2_impl(const Value *args, int64_t argc) {
     (void)argc;
     LL_REQUIRE_STRING(args[0], "unsafeGetAttrPos");
@@ -1193,29 +944,16 @@ static Value unsafeGetAttrPos2_impl(const Value *args, int64_t argc) {
     int64_t idx = ll_bshared_attrs_find(args[1], name_sym);
     if (idx < 0) return LL_NULL;
 
-    /* M80 (see docs/architecture.md): a NATIVE builtin has no source
-     * position at all in real Nix (confirmed directly against
-     * `nix-instantiate --eval`: `unsafeGetAttrPos "abort" builtins` is
-     * `null`, even though `abort` genuinely IS an attribute of
-     * `builtins` -- eval.cc's own `Value::determinePos` returns
-     * `noPos`/`std::nullopt` for a `tPrimOp`/`tPrimOpApp`, never a
-     * placeholder). `LL_TAG_PRIMOP` is UNAMBIGUOUSLY a from-C native
-     * builtin with no Nix-source binding to point at -- unlike
-     * `LL_TAG_CLOSURE` (main.c's printer has its own comment on why
-     * THAT tag can't be trusted the same way: a partially-applied
-     * multi-arg native builtin is indistinguishable, at this tag alone,
-     * from a genuine user lambda) -- so this check is exact for the
-     * `LL_TAG_PRIMOP` case, not another approximation layered on top
-     * of the existing one: a curried-but-not-yet-fully-applied native
-     * (still `LL_TAG_CLOSURE`) isn't caught here and keeps the
-     * pre-existing placeholder position, same documented gap as
-     * before. */
-    /* M88: `idx` came from ll_bshared_attrs_find above, which already
-     * resolves a lazy union header (heap.h) to its flat form internally
-     * -- re-resolving args[1] here (idempotent, returns the same cached
-     * flat Value) keeps this raw re-index consistent with the index
-     * `find` actually computed, instead of indexing into args[1]'s own
-     * possibly-union raw bytes. */
+    /* `LL_TAG_PRIMOP` unambiguously means a native builtin with no
+     * Nix-source position (matching real Nix: `unsafeGetAttrPos "abort"
+     * builtins` is `null`). Don't extend this check to `LL_TAG_CLOSURE` --
+     * a partially-applied multi-arg native builtin is indistinguishable
+     * from a genuine user lambda at that tag alone, so a curried native
+     * still shows the placeholder position; that's a known, accepted gap. */
+    /* `idx` was computed by ll_bshared_attrs_find against the flat form
+     * (which resolves a lazy union header internally) -- re-resolve
+     * args[1] here before raw-indexing, or this would index into
+     * args[1]'s own possibly-unresolved union bytes instead. */
     Value attrs_flat = ll_bshared_attrs_resolve(args[1]);
     const char *entry = (const char *)(attrs_flat.raw & ~0x7ULL) + LL_ATTRS_OFF_ENTRIES + idx * LL_ATTR_SIZE;
     Value attr_val = ll_force_for_print(*(const Value *)(entry + LL_ATTR_OFF_VALUE));

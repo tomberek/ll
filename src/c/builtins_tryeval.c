@@ -1,30 +1,10 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-/*
- * builtins.tryEval expr -- M30. Catches exactly what real Nix's own
- * `tryEval` catches: `throw` and a failed `assert` (both the single
- * `AssertionError` exception class cppnix uses, confirmed in its
- * `primops.cc`), nothing else -- see tryeval.h's full comment for the
- * mechanism (setjmp/longjmp) and its one accepted limitation.
- *
- * Verified directly against `nix-instantiate --eval` before writing any
- * code:
- *   tryEval (throw "x")       == { success = false; value = false; }
- *   tryEval (assert false; 1) == { success = false; value = false; }
- *   tryEval 42                == { success = true; value = 42; }
- *   tryEval { a = throw "x"; } == { success = true; value = { a = <CODE>; } }
- *     (shallow: only forces to WHNF, never recurses into attrset/list
- *     values -- the nested `throw` is never reached)
- *   tryEval (abort "x")       -- NOT caught, the whole process still
- *     aborts unconditionally (abort is not an AssertionError in real Nix)
- *   tryEval (1 + "a")         -- NOT caught either (a plain type error,
- *     not an AssertionError)
- */
 #include "builtins_tryeval.h"
 
 #include <setjmp.h>
 #include <stdint.h>
 
-#include "ll/ir.h" /* ll_force_for_print */
+#include "ll/ir.h"
 #include "builtins_shared.h"
 #include "symtab.h"
 #include "tryeval.h"
@@ -46,15 +26,6 @@
 extern int64_t ll_valstack_limit;
 extern int64_t ll_retsp_limit;
 
-/* M82: `ll_force_for_print` also increments `ll_force_depth`
- * (force.S) on entry and only decrements it in its own ordinary
- * epilogue -- same "longjmp skips the epilogue" problem as the two
- * limits above, except here the consequence isn't a crash (nothing
- * checks this one against a bound), just permanently inflating which
- * per-depth force_scratch.c buffer every SUBSEQUENT force reaching this
- * depth reuses. Harmless for correctness but wasteful across many
- * caught `tryEval`s in one process; restored for the same reason the
- * two limits above are. */
 extern int64_t ll_force_depth;
 
 static Value prim_tryEval(const Value *args, int64_t argc) {

@@ -1,20 +1,9 @@
-/* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 src/asm/ops/op_with.S -- see soft-wishing-engelbart.md plan
- *
- * OP_WITH_TRY's attrset probe reuses ll_bshared_attrs_probe, the same
- * vendored helper op_select.c already calls -- it already handles both a
- * flat Attrs and a lazy `//` UnionHdr internally (binary search +
- * on-demand flatten/cache), so there is no need to hand-roll op_with.S's
- * own inlined binary search here. On a hit, the matched entry is forced
- * via ll_force_for_print (same Cell/LazyApp/ThunkMap/Thunk unwrapping
- * op_select.c relies on) rather than re-deriving op_with.S's own inlined
- * force-loop by hand. */
+/* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 src/asm/ops/op_with.S -- see soft-wishing-engelbart.md plan */
 #include "ops.h"
 #include "builtins_shared.h"
 #include "../env_helpers.h"
 
-/* `with EXPR; BODY`: EXPR's value is already on top of VALSTACK (forced
- * if needed by whatever compiled it -- see compiler.c's AST_WITH case:
- * either a var-ref-cell, a thunk-free literal, or an OP_MK_THUNK). Binds
+/* `with EXPR; BODY`: EXPR's value is already on top of VALSTACK. Binds
  * it into a fresh 1-slot Env frame and tags the frame's OWN `up` field
  * with LL_ENV_WITH_TAG so OP_WITH_TRY/a depth-relative var-ref walk
  * can recognize it later. */
@@ -58,11 +47,7 @@ LL_OP_ATTR Value ll_op_with_try(IrOp *ip, Env *env, Value *vs, int64_t *pool, Re
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-/* All enclosing `with`s were tried (every OP_WITH_TRY took its "not
- * found" branch): unconditional fatal, the same error a compile-time-
- * unbound variable gets (compiler.c's AST_VAR case), just raised at
- * runtime since whether a `with`'s attrset actually has the key is a
- * runtime fact. */
+/* All enclosing `with`s were tried: unconditional fatal. */
 LL_OP_ATTR Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     (void)ip;
     (void)env;
@@ -74,12 +59,11 @@ LL_OP_ATTR Value ll_op_with_miss(IrOp *ip, Env *env, Value *vs, int64_t *pool, R
 }
 
 /* No operands; undoes one OP_WITH: env = env->up with LL_ENV_WITH_TAG
- * masked off first. This is OP_WITH's own counterpart to OP_FRAME_EXIT,
- * NOT a reuse of env_helpers.c's existing ll_env_frame_exit -- that
- * helper deliberately does NOT mask the tag bit (it only ever closes an
- * ordinary OP_FRAME_ALLOC frame, whose `up` never has the bit set in the
- * first place; see its own comment), so OP_WITH_EXIT needs its own
- * unmasking logic inline here, matching op_with.S's ll_op_with_exit. */
+ * masked off first. This is NOT a reuse of env_helpers.c's existing
+ * ll_env_frame_exit -- that helper deliberately does NOT mask the tag
+ * bit (it only ever closes an ordinary OP_FRAME_ALLOC frame, whose `up`
+ * never has the bit set in the first place), so this op needs its own
+ * unmasking logic inline here. */
 LL_OP_ATTR Value ll_op_with_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     env = (Env *)((uint8_t *)ll_env_arena_base + (env->up & ~(uint32_t)LL_ENV_WITH_TAG));
     LL_NEXT(ip, env, vs, pool, rs);

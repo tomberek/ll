@@ -2,8 +2,6 @@
 #ifndef LL_IRPASS_STREQ_H
 #define LL_IRPASS_STREQ_H
 
-/* Registers the "streq" bytecode pass -- see irpass_streq.c's own header
- * comment for what it does. */
 void ll_irpass_register_streq(void);
 
 #endif /* LL_IRPASS_STREQ_H */

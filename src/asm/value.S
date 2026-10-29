@@ -1,8 +1,8 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-// M1: value/tagging primitives. These are the C-callable, directly testable
-// boundary -- the hot evaluator core (M3+) inlines these bit tricks directly
-// in op handlers rather than paying a `call` per tag check; these routines
-// exist for the C side (compiler, debug printing, tests) and as the proven
+// Value/tagging primitives. C-callable, directly testable boundary --
+// the hot evaluator core inlines these bit tricks directly in op
+// handlers rather than paying a `call` per tag check; these routines
+// exist for the C side (compiler, debug printing, tests) and as the
 // reference implementation the inlined copies must match.
 #include "ll/value.h"
 
@@ -13,7 +13,7 @@
 
     .text
 
-    /* M56: every C call site that builds a Value int (builtins.add/sub/
+    /* Every C call site that builds a Value int (builtins.add/sub/
      * mul/div -- builtins_m23.c; fromTOML's own integer-literal parsing
      * -- toml.c; ll_add_values's int+int fallback -- value_util.c;
      * etc.) funnels through here, so checking the ±2^60 LL_INT_MIN/
@@ -21,8 +21,7 @@
      * all of them without duplicating the check at each call site. The
      * hot inlined-asm copies of this same bit trick (op_push_int,
      * op_arith.S's add/sub/mul/div) carry their own copy of this check
-     * instead, per this file's own header comment on why they don't
-     * just `call` this function. */
+     * instead. */
     .globl ll_make_int
     .type ll_make_int, @function
 ll_make_int:                        // Value ll_make_int(int64_t n)

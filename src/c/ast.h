@@ -5,19 +5,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* `let` is genuinely recursive (letrec), matching real Nix: every binding
- * in one `let ... in` is visible to itself and to every sibling binding,
- * regardless of source order. AST_LET therefore carries its whole binding
- * list (like AST_ATTRSET), not just one name -- see compiler.c's AST_LET
- * case for how that list becomes a single multi-slot Env frame built
- * *before* any binding's thunk is constructed. `rec { ... }` gives an
- * attrset literal the same self/sibling visibility (AST_ATTRSET.is_rec);
- * plain `{ ... }` keeps the old non-recursive behavior (bindings only see
- * the enclosing scope). */
+/* `let` is genuinely recursive (letrec): every binding in one
+ * `let ... in` is visible to itself and every sibling, regardless of
+ * source order. AST_LET carries its whole binding list (like
+ * AST_ATTRSET), not just one name -- see compiler.c's AST_LET case.
+ * `rec { ... }` gives the same self/sibling visibility
+ * (AST_ATTRSET.is_rec); plain `{ ... }` does not. */
 
 typedef enum {
     AST_INT,
-    AST_FLOAT, /* M51: a `1.5`/`0.5e-3`-shaped literal -- see lexer.c's TOK_FLOAT. */
+    AST_FLOAT,
     AST_BOOL,
     AST_NULL,
     AST_STRING,
@@ -37,7 +34,7 @@ typedef enum {
     AST_WITH,
     AST_HAS_ATTR,
     AST_PATH,
-    AST_CURPOS, /* M80: `__curPos` -- see parser.c's special-case in its TOK_IDENT
+    AST_CURPOS, /* `__curPos` -- see parser.c's special-case in its TOK_IDENT
                  * handling and compiler.c's own case for how `line`/`column` (captured
                  * here, at parse time) become a `{file;line;column;}` attrset. */
 } AstKind;
@@ -87,19 +84,12 @@ typedef struct {
     size_t name_len;
     Ast *value;
     int is_inherit;
-    /* M80 (see docs/architecture.md): set only on the synthetic hidden
-     * binding `inherit (expr) a b c;` (parser.c's parse_binding_stmt)
-     * generates to hold `expr` itself, shared by every one of that
-     * clause's `AST_SELECT`s instead of each re-embedding (and so
-     * re-evaluating, on every force) its own copy of `expr`. Gets a
-     * normal frame/env slot exactly like any other binding (so sibling
-     * selects can read it back), but is never a real attribute: both
-     * AST_ATTRSET compiler cases (compiler.c) and the pretty-printer
-     * must skip it. The synthetic name itself (a NUL byte prefix,
-     * parser.c) is already unreachable from source syntax, so the only
-     * reason this flag exists at all is to make the exclusion an O(1)
-     * check instead of a string-prefix comparison at every call site
-     * that needs it. */
+    /* Set only on the synthetic hidden binding `inherit (expr) a b c;`
+     * (parser.c's parse_binding_stmt) generates to hold `expr` itself,
+     * shared by every one of that clause's `AST_SELECT`s. Gets a normal
+     * frame/env slot like any other binding, but is never a real
+     * attribute: both AST_ATTRSET compiler cases (compiler.c) and the
+     * pretty-printer must skip it. */
     int is_hidden;
 } AstBinding;
 
@@ -159,12 +149,12 @@ struct Ast {
             Ast *fn, *arg;
         } app; /* AST_APP */
         struct {
-            /* '+' '-' '*'                  arithmetic (M4)
+            /* '+' '-' '*'                  arithmetic
              * 'e' '==' 'n' '!='            equality/inequality
              * 'l' '<' 'g' '>' 'L' '<=' 'G' '>='   ordering (INT-only, see compiler.c)
              * 'u' '//'                     attrset update/merge
-             * 'c' '++'                     list concatenation (M23)
-             * '/' '/'                      integer division (M23) -- the char code and the
+             * 'c' '++'                     list concatenation
+             * '/' '/'                      integer division -- the char code and the
              *                              source operator happen to coincide here, unlike
              *                              every other op letter above */
             char op;
@@ -188,12 +178,12 @@ struct Ast {
                                             * parse_binding_stmt). Applied at runtime, after
                                             * `bindings` above is fully built -- see compiler.c's
                                             * AST_ATTRSET case and OP_INSERT_DYNAMIC_ATTR (ir.h).
-                                            * M67: a dynamic binding never gets its OWN ScopeFrame
+                                            * A dynamic binding never gets its OWN ScopeFrame
                                             * slot, so a *static* sibling still can't reference a
                                             * dynamically-NAMED attribute (confirmed: `rec {
                                             * ${k}=1; b=a; }` with `k="a"` still errors "undefined
                                             * variable 'a'") -- but a dynamic binding's own
-                                            * name/value expression DOES now read the enclosing
+                                            * name/value expression DOES read the enclosing
                                             * `rec {}`'s frame (so it CAN see a *static* sibling:
                                             * `let bString="b"; in (rec { "${bString}"=a; a=true;
                                             * }).b` is `true`, confirmed against real Nix) -- see
@@ -213,12 +203,11 @@ struct Ast {
                                        resolved (interned) at runtime, not compile time -- see
                                        compiler.c's AST_SELECT case and
                                        src/asm/ops/op_select_dynamic.S. `.${expr} or default`
-                                       is supported too (M28, found needed: nixpkgs's own
-                                       lib/lists.nix groupBy uses `r.${key} or [ ]`) -- see
+                                       is supported too -- see
                                        OP_SELECT_DYNAMIC_OR (ir.h) and
                                        src/asm/ops/op_select_dynamic_or.S. */
             Ast *default_; /* `expr.attr or default` -- NULL for a plain select (fatal if
-                              * missing/wrong type, see compiler.c's AST_SELECT case). M70: a
+                              * missing/wrong type, see compiler.c's AST_SELECT case). A
                               * multi-segment chain (`a.b.c or default`) shares the SAME
                               * `default_` `Ast*` across every node of the chain (stamped by
                               * parse_select's post-loop walk, parser.c) -- compiler.c's
@@ -227,9 +216,7 @@ struct Ast {
                               * landing pad, matching real Nix's `ExprSelect::eval`, which
                               * falls through to `default` on ANY segment's failure, not just
                               * this node's own. See compiler.c's AST_SELECT case comment for
-                              * the full mechanism, and M70's scope notes (docs/
-                              * architecture.md) for why the parser and compiler halves of
-                              * this had to move together. */
+                              * the full mechanism. */
         } select; /* AST_SELECT */
         struct {
             Ast *lhs, *rhs;
@@ -254,9 +241,7 @@ struct Ast {
             Ast *attr_expr;        /* non-NULL for a dynamic `? ${expr}` segment -- same
                                        split as AST_SELECT.attr_expr (see above); resolved
                                        at runtime via OP_HAS_ATTR_DYNAMIC, not interned at
-                                       compile time. Found needed: nixpkgs's own
-                                       lib/systems/default.nix has `rustc-target-env ?
-                                       ${final.rust.rustcTargetSpec}`. */
+                                       compile time. */
         } has_attr; /* AST_HAS_ATTR: `target ? attr` */
         struct {
             const char *text; /* raw lexeme: e.g. "./foo.nix", or the bare name for a search path --
@@ -264,14 +249,14 @@ struct Ast {
                                 * FIRST chunk (e.g. "./" in "./${foo}") */
             size_t len;
             int is_search; /* 1 for `<name>`-style search-path literals, 0 for ordinary path literals */
-            int is_home;   /* M64: 1 if this literal (or its first chunk) started with `~` --
+            int is_home;   /* 1 if this literal (or its first chunk) started with `~` --
                              * see compiler.c's resolve_path_literal/resolve_path_chunk. Always 0
                              * when is_search is set. */
-            AstStringPart *interp_parts; /* M64: NULL/0 for a plain, non-interpolated literal
-                                           * (the pre-existing, common case) -- otherwise the parts
-                                           * AFTER `text`, each a literal chunk or an interpolated
-                                           * expression, same shape AST_STRING already uses (reused
-                                           * directly rather than inventing a second one). */
+            AstStringPart *interp_parts; /* NULL/0 for a plain, non-interpolated literal --
+                                           * otherwise the parts AFTER `text`, each a literal chunk
+                                           * or an interpolated expression, same shape AST_STRING
+                                           * already uses (reused directly rather than inventing a
+                                           * second one). */
             size_t interp_count;
         } path; /* AST_PATH */
         struct {
@@ -291,23 +276,15 @@ Ast *ll_ast_new(AstKind kind);
  * Ast's own comment above) -- used by parser.c's real construction
  * sites, which always know the current token's byte offset.
  *
- * LL_IRDUMP_LINE_TRACKING-gated, not just a runtime no-op: measured
- * directly (real d.nix/ffmpeg eval, interleaved perf stat) that even an
- * always-inlined "set one extra field" version cost a real, reproducible
- * ~1.1% instruction regression on its own (parser.c's 46 call sites are
- * hot enough, and `cur(p).start`'s own evaluation apparently isn't fully
- * free at every one of them) -- on top of a further ~1.5% from the
- * IrBuilder/irpass side (irbuild.h/irpass.h). Neither half is a real
- * production cost this project would accept for a debug/offline-only
- * convenience feature, so irdump.c is compiled as its own variant build
- * (see Makefile's IRDUMP_LINE_TRACKING_SRCS) with this macro defined;
- * `asnix`/`libasnix.a` never define it, so the real production build's
- * parser.c/ast.c/compiler.c/irbuild.c/irpass.c object code is BYTE-
- * IDENTICAL to before this feature existed -- confirmed directly
- * (`objdump -d`/`cmp` against a pristine master build). When undefined,
+ * LL_IRDUMP_LINE_TRACKING-gated, not just a runtime no-op: an always-
+ * inlined "set one extra field" version costs a measurable instruction
+ * regression on hot parser.c call sites, so irdump.c is compiled as its
+ * own variant build (see Makefile's IRDUMP_LINE_TRACKING_SRCS) with this
+ * macro defined; the real production build never defines it, so
+ * production object code is unaffected. When undefined,
  * `ll_ast_new_at(kind, pos)` macro-expands to plain `ll_ast_new
- * (kind)` -- a pure textual substitution, so `pos`'s expression (e.g.
- * `cur(p).start`) is never even evaluated, not just cheaply skipped. */
+ * (kind)` -- a pure textual substitution, so `pos`'s expression is
+ * never even evaluated. */
 #ifdef LL_IRDUMP_LINE_TRACKING
 static inline Ast *ll_ast_new_at(AstKind kind, uint32_t src_pos) {
     Ast *n = ll_ast_new(kind);
@@ -324,18 +301,18 @@ static inline Ast *ll_ast_new_at(AstKind kind, uint32_t src_pos) {
  * why that's always safe. */
 void ll_ast_arena_reset(void);
 
-/* Lazy-thunk-compile experiment, ported from asnix (docs/lazy-thunk-
- * compile-proposal.md): redirects every ll_ast_new()/
- * ll_ast_new_at() call made while active into a SEPARATE chunk list
- * that ll_ast_arena_reset() never touches -- i.e. permanently
- * retained for the rest of the process, since a deferred lazy-compile
- * stub's Ast subtree must survive past the file's own compile call.
- * Gated internally on ll_lazy_thunk_enabled (compiler.h) -- a no-op
- * when the experiment is off. parser.c's own call sites toggle this
- * around exactly the subtree the experiment defers (an attrset literal
- * binding's value expression). Returns the previous state (nested-safe:
- * a `let`/attrset nested INSIDE an already-redirected value expression
- * must stay redirected for its own nested attrset fields too). */
+/* Lazy-thunk-compile experiment (docs/lazy-thunk-compile-proposal.md):
+ * redirects every ll_ast_new()/ll_ast_new_at() call made while active
+ * into a SEPARATE chunk list that ll_ast_arena_reset() never touches --
+ * i.e. permanently retained for the rest of the process, since a
+ * deferred lazy-compile stub's Ast subtree must survive past the file's
+ * own compile call. Gated internally on ll_lazy_thunk_enabled
+ * (compiler.h) -- a no-op when the experiment is off. parser.c's own
+ * call sites toggle this around exactly the subtree the experiment
+ * defers (an attrset literal binding's value expression). Returns the
+ * previous state (nested-safe: a `let`/attrset nested INSIDE an
+ * already-redirected value expression must stay redirected for its own
+ * nested attrset fields too). */
 int ll_ast_enter_retained(void);
 void ll_ast_leave_retained(int prev_state);
 

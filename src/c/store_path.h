@@ -8,9 +8,7 @@
 /*
  * Nix store path computation, ported from ~/nix/src/libstore/store-dir-config.cc
  * (`StoreDirConfig::makeStorePath`) and ~/nix/src/libutil/hash.cc
- * (`compressHash`), verified end-to-end against real `nix-instantiate`
- * output (`builtins.toFile "foo.txt" "hello"` -> real store path) before
- * being used for anything -- see docs/architecture.md's M8 notes.
+ * (`compressHash`).
  *
  * Deliberately has NO crypto dependency: computing the actual SHA-256
  * digests is the *caller's* job (via src/c/hash_shim.h), so this module
@@ -44,12 +42,7 @@ size_t ll_make_store_path_from_digest(const uint8_t digest[32], const char *name
  * `[0-9a-zA-Z+-._?=]`, and not literally "." or ".." or starting with
  * "-." or "-.." (the leading-dash-separated-component special case).
  * Fatal (prints an "invalid derivation name" message and exits) on a
- * violation, mirroring real Nix's own `BadStorePathName` exception --
- * found needed by `derivation {...}`, which previously built a store
- * path from ANY name string verbatim with no validation at all, silently
- * accepting e.g. spaces/slashes/empty names that real Nix rejects
- * (numtide/nix-conformance's several eval-fail-drv-name-... cases and
- * eval-fail-derivation-name.nix all expect this to be a hard error). */
+ * violation, mirroring real Nix's own `BadStorePathName` exception. */
 void ll_check_store_path_name(const char *name);
 
 #endif /* LL_STORE_PATH_H */

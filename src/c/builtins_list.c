@@ -1,53 +1,36 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/c, include/asnix, src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
 /*
- * builtins-list stage: map, filter, foldl', elemAt, concatLists, tail,
- * head. See builtins_list.h for why these live in their own file/table
- * instead of editing builtins.c's BUILTINS[] directly.
+ * map, filter, foldl', elemAt, concatLists, tail, head. See
+ * builtins_list.h for why these live in their own file/table.
  *
- * Currying (map/filter/foldl'/elemAt are arity >1 in real Nix): exactly
- * the pattern docs/architecture.md's M8 notes spell out for
- * `builtins.hashString` -- parser.c's parse_app always desugars `f x y`
- * into nested arity-1 AST_APP nodes, so OP_CALL only ever sees argc=1
- * calls for builtin application. hashString's trick (return one of N
- * *statically known* arity-1 PrimOps) doesn't generalize here though:
- * map/filter/foldl' need to carry an arbitrary *runtime* Value (the
- * mapped function, the predicate, the accumulator) from one curried call
- * into the next, not just pick between a handful of hardcoded function
- * pointers. The PrimOp heap object is normally just {fn; arity} (16
- * bytes, heap.h) with no spare field and no self/closure pointer handed
- * to `fn` -- op_call.S's primop path calls it with nothing but (args,
- * argc).
+ * Currying: parser.c's parse_app always desugars `f x y` into nested
+ * arity-1 AST_APP nodes, so OP_CALL only ever sees argc=1 calls for
+ * builtin application. map/filter/foldl' need to carry an arbitrary
+ * *runtime* Value (the mapped function, the predicate, the accumulator)
+ * from one curried call into the next. The PrimOp heap object is
+ * normally just {fn; arity} (16 bytes, heap.h) with no spare field and
+ * no self/closure pointer handed to `fn`.
  *
  * The fix: allocate *larger* PrimOp objects for these curried stages --
- * {fn; arity; capture0; [capture1]} -- nothing anywhere checks that a
+ * {fn; arity; capture0; [capture1]}. Nothing anywhere checks that a
  * PrimOp heap object is exactly LL_PRIMOP_SIZE bytes, only that
  * offsets 0/8 hold fn/arity (see make_primop1/make_primop2 below). The
  * captured Value(s) are recovered inside the stage's own `fn` via
- * `self_captures()`, which exploits a real invariant of op_call.S's
+ * `self_captures()`, which relies on a real invariant of op_call.S's
  * primop call path: the callee's own tagged Value sits in the VALSTACK
  * slot immediately before `args[0]` (op_call.S computes `args = callee_
  * slot + 8` and never overwrites that slot before calling), so
  * `args[-1]` is always the exact PrimOp Value that was called -- letting
  * `fn` recover "self" and read its own trailing capture fields with no
  * assembly changes. This invariant holds for every *ordinary* Nix-level
- * application (`f x` always desugars to an OP_CALL, regardless of how
- * `f` was obtained), which is the only way these stage-2/3 PrimOps are
- * ever invoked -- this module itself only ever uses ll_apply (see
- * apply_shim.h) to call the *user-supplied* function/predicate/operator,
- * never its own curried stages, so the ll_apply primop path (which
- * does NOT preserve this invariant -- it tail-calls `fn` with the
- * caller's own args pointer, nothing before it) never needs to recover a
- * self pointer this way.
- *
- * genericClosure: NOT implemented here -- cut as out of scope for this
- * pass. Real Nix's builtins.genericClosure needs attrset field access
- * (`key`/`operator`), value-equality-based dedup across arbitrary key
- * Values (not just ints/strings), and a breadth-first worklist that
- * preserves a specific visitation/output order -- enough surface area
- * (and enough ways to subtly mismatch real Nix's exact semantics without
- * much more verification time than the other 7 builtins combined needed)
- * that it's a reasonable rabbit hole to defer rather than rush. The other
- * 7 are complete and verified below.
+ * application, which is the only way these stage-2/3 PrimOps are ever
+ * invoked -- this module itself only ever uses ll_apply to call the
+ * *user-supplied* function/predicate/operator, never its own curried
+ * stages, so the ll_apply primop path (which does NOT preserve this
+ * invariant -- it tail-calls `fn` with the caller's own args pointer,
+ * nothing before it) never needs to recover a self pointer this way.
+ * If you change op_call.S's primop calling convention, this invariant
+ * (and self_captures()) must change with it.
  */
 #include "builtins_list.h"
 
@@ -82,10 +65,8 @@ static Value make_primop1(void *fn, int64_t arity, Value cap0) {
 
 /* Same as make_primop1, but sets LL_PRIMOP_OFF_NOFORCE (heap.h) so
  * op_call.S/apply.S do NOT force this primop's own argument before
- * calling it. M53: used only for foldl''s stage2 -- see
- * prim_foldl_prime's own comment for why plain make_primop1 (which
- * leaves every other curried stage's forcing untouched, correctly) is
- * wrong specifically here. */
+ * calling it. Used only for foldl''s stage2 -- see prim_foldl_prime's
+ * own comment for why plain make_primop1 is wrong specifically here. */
 static Value make_primop1_noforce(void *fn, int64_t arity, Value cap0) {
     void *mem = ll_arena_alloc(LL_PRIMOP_SIZE + sizeof(Value));
     *(void **)((char *)mem + LL_PRIMOP_OFF_FN) = fn;
@@ -145,11 +126,6 @@ static Value make_list(int64_t count, const Value *src) {
     return (Value){ .raw = (uint64_t)(uintptr_t)mem | LL_TAG_LIST };
 }
 
-/* Applies a curried-by-construction 2-argument Nix function (e.g. `a: b:
- * ...`, which compiles to two nested arity-1 closures, exactly like
- * every other multi-argument Nix lambda) to two arguments via two
- * successive single-argument ll_apply calls -- `fn a b` is `(fn a) b`,
- * same as any other curried application in this codebase. */
 static Value apply2(Value fn, Value a, Value b) {
     Value step1 = ll_apply(fn, &a, 1);
     return ll_apply(step1, &b, 1);
@@ -163,16 +139,13 @@ static Value apply2(Value fn, Value a, Value b) {
  * thunks, each calling `f elem` only once actually forced (verified:
  * `builtins.length (map (x: throw "boom") [1 2 3])` => 3, never
  * triggering the throw at all since nothing forces the elements here).
- * A prior version of this function called `ll_apply(f, &elem, 1)`
- * immediately for every element while *building* the result list --
- * a real, previously-undiscovered strictness bug (not a cosmetic
- * printing difference), found via numtide/nix-conformance's
- * eval-okay-intersectAttrs.nix exposing the identical bug in `mapAttrs`
- * (see builtins_attrs.c's own fix). Each element is now a genuinely
- * lazy value instead of an already-computed one -- M117: a LazyApp
- * (ll_make_lazyapp1, value_util.c), not a Thunk+Env pair the way
- * ll_bshared_make_lazy_call1 (removed) used to build -- see heap.h's
- * LL_LAZYAPP_MARKER comment for the full rationale. */
+ * Do NOT call `ll_apply(f, &elem, 1)` eagerly while building the result
+ * list here -- a prior version did exactly that and it is a real
+ * strictness bug (confirmed via numtide/nix-conformance's
+ * eval-okay-intersectAttrs.nix, which exposed the identical bug in
+ * `mapAttrs`). Each element must stay a genuinely lazy LazyApp
+ * (ll_make_lazyapp1, value_util.c) instead of an already-computed
+ * value. */
 static Value prim_map_stage2(const Value *args, int64_t argc) {
     (void)argc;
     Value f = self_captures(args)[0];
@@ -264,24 +237,20 @@ static Value prim_foldl_prime_stage2(const Value *args, int64_t argc) {
 
 static Value prim_foldl_prime(const Value *args, int64_t argc) {
     (void)argc;
-    /* M53: NOFORCE here -- the *next* call (supplying `acc`, handled by
+    /* NOFORCE here -- the *next* call (supplying `acc`, handled by
      * prim_foldl_prime_stage2) must not force its argument. Real Nix's
-     * own foldl' (primops.cc's prim_foldlStrict) never forces the
-     * initial accumulator merely because it was passed in: for a
-     * nonempty list it's threaded straight into `op` as a raw value
-     * (only forced if `op`'s body actually reads it), and only an EMPTY
-     * list forces it (since then it just *is* the already-to-be-forced
-     * result). Confirmed against real nix-instantiate: `builtins.foldl'
-     * (_: x: x) (throw "never forced") ["a" 42]` => 42, no throw --
-     * `op`'s first parameter is never read. Previously, stage2's primop
-     * had ordinary (forcing) semantics, so op_call.S's blanket M25
-     * argument-forcing (needed for primops that *do* read their args'
-     * raw tag) forced `acc` the instant `(foldl' op) acc` was called --
-     * before stage2's own body (which only captures it, never inspects
-     * its tag) ever ran. stage3 (supplying `list`) deliberately keeps
-     * ordinary forcing -- it genuinely needs the list's own
-     * LL_TAG_LIST tag/count/elems (check_list), matching real Nix's
-     * own `state.forceList(*args[2], ...)`. */
+     * own foldl' never forces the initial accumulator merely because it
+     * was passed in: for a nonempty list it's threaded straight into
+     * `op` as a raw value (only forced if `op`'s body actually reads
+     * it). Confirmed against real nix-instantiate: `builtins.foldl'
+     * (_: x: x) (throw "never forced") ["a" 42]` => 42, no throw.
+     * Do NOT switch this to plain make_primop1 -- op_call.S's blanket
+     * argument-forcing would then force `acc` the instant
+     * `(foldl' op) acc` was called, before stage2's own body (which
+     * only captures it, never inspects its tag) ever ran. stage3
+     * (supplying `list`) deliberately keeps ordinary forcing -- it
+     * genuinely needs the list's own LL_TAG_LIST tag/count/elems
+     * (check_list). */
     return make_primop1_noforce((void *)prim_foldl_prime_stage2, 1, args[0]);
 }
 
@@ -323,19 +292,14 @@ static Value prim_concatLists(const Value *args, int64_t argc) {
     int64_t ocount = list_count(outer);
     const Value *oelems_raw = list_elems(outer);
 
-    /* Each outer element must be FORCED before checking its tag --
-     * list elements are always lazy by design (same as attrset values),
-     * so an unforced Thunk here is completely ordinary, not an error;
-     * only forcing reveals whether it's actually a list. A prior
-     * version of this function checked `ll_tag_of()` on the raw,
-     * possibly-still-thunked element directly, which happened to "work"
-     * only because every list producer up to M23 always left already-
-     * computed values in a list -- M23's `map` fix (now genuinely lazy
-     * per element, matching real Nix) exposed this as a real bug:
-     * `concatLists (map (x: map f strings) algos)` aborted with a bogus
-     * "element N is not a list" instead of forcing the inner map's
-     * still-lazy result first (found via numtide/nix-conformance's
-     * eval-okay-hashstring.nix/eval-okay-hashfile.nix). */
+    /* Each outer element must be FORCED before checking its tag -- list
+     * elements are always lazy by design, so an unforced Thunk here is
+     * completely ordinary, not an error. Do NOT check `ll_tag_of()` on
+     * the raw, possibly-still-thunked element directly: a prior version
+     * did that and it broke once list elements became genuinely lazy
+     * (`concatLists (map (x: map f strings) algos)` aborted with a
+     * bogus "element N is not a list" instead of forcing the inner
+     * map's still-lazy result first). */
     Value *oelems = ocount > 0 ? malloc((size_t)ocount * sizeof(Value)) : NULL;
     int64_t total = 0;
     for (int64_t i = 0; i < ocount; i++) {

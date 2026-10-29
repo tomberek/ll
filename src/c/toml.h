@@ -7,9 +7,8 @@
 #include "ll/value.h"
 
 /*
- * A hand-written, from-scratch recursive-descent TOML parser -- M23,
- * built for `builtins.fromTOML` (see docs/architecture.md's "M23 scope
- * notes" for the exact subset implemented and what's deliberately cut).
+ * A hand-written, from-scratch recursive-descent TOML parser, built for
+ * `builtins.fromTOML`.
  *
  * `ll_toml_parse` is the sole entry point: parses `text[0..len)` as a
  * complete TOML document and returns it as an ordinary asnix attrset

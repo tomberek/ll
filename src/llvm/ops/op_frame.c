@@ -22,7 +22,7 @@ LL_OP_ATTR Value ll_op_frame_exit(IrOp *ip, Env *env, Value *vs, int64_t *pool, 
     LL_NEXT(ip, env, vs, pool, rs);
 }
 
-/* a = slot index (M29); pushes the CURRENT Env's slot verbatim, raw
+/* a = slot index; pushes the CURRENT Env's slot verbatim, raw
  * data movement, deliberately NOT forcing -- used only to read back a
  * `rec {}` binding's freshly-OP_FRAME_SET thunk for attrset
  * construction, where OP_VAR_REF's force-on-read would be wrong (it

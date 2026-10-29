@@ -1,7 +1,7 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
-// Shared "print a message and die" primitive, used by every abort path
-// across the runtime (arena cap/mmap failures, M3 op type/arity errors) so
-// the write+exit_group syscall sequence exists in exactly one place.
+// Shared "print a message and die" primitive, used by every abort
+// path across the runtime so the write+exit_group syscall sequence
+// exists in exactly one place.
     .equ LL_SYS_WRITE,      1
     .equ LL_SYS_EXIT_GROUP, 231
     .equ LL_STDERR_FD,      2

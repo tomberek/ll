@@ -11,8 +11,8 @@
 static jmp_buf *g_tryeval_stack[LL_TRYEVAL_MAX_DEPTH];
 static int g_tryeval_depth = 0;
 
-/* M82: stacklimits.S's intrusive IN_PROGRESS-thunk stack -- see
- * tryeval.h's own comment and ir.h's LL_THUNK_OFF_ENV comment. Each
+/* stacklimits.S's intrusive IN_PROGRESS-thunk stack -- see tryeval.h's
+ * own comment and ir.h's LL_THUNK_OFF_ENV comment. Each
  * node's "prev" link is stashed in the thunk's own (otherwise unused
  * while IN_PROGRESS) `env` field, so this is a plain linked-list walk
  * over raw thunk-cell addresses, not a separate allocation. */
@@ -27,10 +27,10 @@ void ll_tryeval_unwind_inprogress(int64_t saved_head) {
     while (cur != saved_head) {
         char *cell = (char *)(intptr_t)cur;
         int64_t next = *(int64_t *)(cell + LL_THUNK_OFF_ENV);
-        /* M103: OFF_STATE's IN_PROGRESS-time pointer bits (there are
-         * none left to preserve -- the one read that mattered already
+        /* OFF_STATE's IN_PROGRESS-time pointer bits (there are none
+         * left to preserve -- the one read that mattered already
          * happened at the UNFORCED->IN_PROGRESS transition) are simply
-         * overwritten with the bare FAILED tag, same as before. */
+         * overwritten with the bare FAILED tag. */
         *(int64_t *)(cell + LL_THUNK_OFF_STATE) = LL_THUNK_STATE_FAILED;
         cur = next;
     }

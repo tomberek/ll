@@ -4,27 +4,10 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
-/* M146: the legacy one-shot wrappers (MD5()/SHA1()/SHA256()/SHA512(),
- * what this file used to call exclusively) still work under OpenSSL 3.x,
- * but internally they're now reimplemented as a full EVP_Digest() call --
- * fetch an EVP_MD from the provider registry, init, update, final, free
- * the fetched EVP_MD -- repeated on EVERY call, not just once. Measured in
- * isolation against a from-scratch microbenchmark (docs/architecture.md
- * M146): for d.nix/ffmpeg's real derivation-hashing workload (34,988
- * `ll_hash_sha256` calls, avg 1649.5 bytes), that provider-fetch
- * machinery costs a ~3,122-instruction FIXED tax per call, independent of
- * input size -- about half of asnix's own total hashing instruction
- * budget, and a cost iets's `sha2` Rust crate (no provider abstraction at
- * all) never pays.
- *
- * The classic streaming triplet -- `MD5_Init`/`_Update`/`_Final` and its
- * SHA1/SHA256/SHA512 siblings -- bypasses the provider-fetch path
- * entirely and computes the exact same digest. Confirmed still exported
- * in both this machine's system libcrypto and the nixpkgs-resolved one
- * (`nm -D`, same discipline M8 used to confirm the one-shot symbols).
- * Byte-identical output is covered by tests/c/test_hash_shim.c's existing
- * oracle values (md5sum/sha1sum/sha256sum/openssl-dgst-transcribed, not
- * re-derived here) -- any mismatch from this change would fail there. */
+/* Uses the classic streaming triplet -- `MD5_Init`/`_Update`/`_Final`
+ * and its SHA1/SHA256/SHA512 siblings -- rather than the one-shot
+ * wrappers; both compute the same digest. Byte-identical output is
+ * covered by tests/c/test_hash_shim.c's oracle values. */
 typedef void *(*ll_hash_init_fn)(void *ctx);
 typedef void *(*ll_hash_update_fn)(void *ctx, const void *data, size_t len);
 typedef void *(*ll_hash_final_fn)(unsigned char *md, void *ctx);
@@ -33,8 +16,7 @@ typedef void *(*ll_hash_final_fn)(unsigned char *md, void *ctx);
  * structs -- the largest in play here is SHA512_CTX (8 uint64 state + 2
  * uint64 length counters + a 128-byte block buffer + 2 uint32, ~216 bytes
  * on every LP64 target this runs on). 256 bytes leaves headroom without
- * this file ever needing to include OpenSSL's own headers (see
- * hash_shim.h's header comment on why dlopen/dlsym instead of linking). */
+ * this file ever needing to include OpenSSL's own headers. */
 typedef union {
     unsigned char raw[256];
     uint64_t align_marker;
@@ -46,11 +28,10 @@ static void *ll_load_libcrypto(void) {
     if (ll_libcrypto_handle) return ll_libcrypto_handle;
 
     /* Tier 1: an explicit resolved store path, exported by flake.nix's
-     * devShell shellHook as LL_LIBCRYPTO_LIB (mirroring nixgoose's
-     * NIXGOOSE_LIBBLAKE3_LIB/NIXGOOSE_TOMLC99_LIB convention) -- needed
-     * because, unlike a system package manager, nixpkgs' openssl has no
-     * single predictable path and isn't on the ambient dlopen search path
-     * by soname alone in general. */
+     * devShell shellHook as LL_LIBCRYPTO_LIB -- needed because, unlike a
+     * system package manager, nixpkgs' openssl has no single predictable
+     * path and isn't on the ambient dlopen search path by soname alone
+     * in general. */
     const char *env_path = getenv("LL_LIBCRYPTO_LIB");
     if (env_path) {
         void *h = dlopen(env_path, RTLD_NOW);
@@ -58,11 +39,7 @@ static void *ll_load_libcrypto(void) {
     }
 
     /* Tier 2: bare sonames / common absolute paths, tried in case
-     * libcrypto happens to be reachable some other way (e.g. this
-     * project's own dev machine also has a system libcrypto.so.3 at
-     * /usr/lib/x86_64-linux-gnu -- true here, but not assumed to be true
-     * on every machine this ever runs on, hence still trying the bare
-     * soname first). */
+     * libcrypto happens to be reachable some other way. */
     static const char *candidates[] = {
         "libcrypto.so.3",
         "libcrypto.so",
@@ -80,30 +57,16 @@ static void *ll_load_libcrypto(void) {
     return 0;
 }
 
-/* perf: `dlsym` does a real symbol-table lookup (hash-bucket walk plus a
- * string compare against every candidate in the bucket, `do_sym`/
- * `_dlerror_run` in a `perf` profile of this file's old behavior) -- cheap
- * once, but this function used to re-resolve all 3 symbols on EVERY single
- * hash call, not just the first. On the real `d.nix`/ffmpeg eval
- * (M146's own count: ~35K `ll_hash_sha256` calls alone, plus whatever
- * md5/sha1/sha512 call sites add on top), that is 3 redundant `dlsym`
- * calls per hash computed, forever, for a result (the function's address)
- * that can never change mid-process -- `ll_libcrypto_handle` was
- * already cached this way (see `ll_load_libcrypto` above); the 3
- * function pointers resolved from it were not, for no reason tied to
- * correctness. One cache slot per algorithm (4 total, each populated via
+/* One cache slot per algorithm (4 total), each populated via
  * `ll_hash_one`'s own `cache` out-param on first use, read directly
- * thereafter) -- a `dlsym` per call becomes a `dlsym` per algorithm per
- * process, matching `ll_load_libcrypto`'s own one-time-resolution
- * discipline instead of re-deriving what's already known. */
+ * thereafter, so `dlsym` only runs once per algorithm per process. */
 typedef struct {
     ll_hash_init_fn init;
     ll_hash_update_fn update;
     ll_hash_final_fn final_fn;
     int resolved; /* 1 once init/update/final_fn have been looked up (even
-                   * if any came back NULL -- a symbol genuinely missing
-                   * from this libcrypto isn't going to appear later, so a
-                   * failed resolution is cached too, not retried forever). */
+                   * if any came back NULL -- a failed resolution is
+                   * cached too, not retried forever). */
 } LlHashFnCache;
 
 static int64_t ll_hash_one(const char *init_sym, const char *update_sym,

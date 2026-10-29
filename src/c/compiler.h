@@ -7,45 +7,32 @@
 #include "ast.h"
 #include "ll/ir.h"
 
-/* Compiles an AST produced by ll_parse() into a linked (handler
- * addresses already resolved) IrProgram ready for ll_eval(). Name
- * resolution happens inline during this walk (no separate annotation
- * pass) -- see src/c/compiler.c for why that's sufficient at M4's scope.
- *
- * `base_dir` is the absolute directory of the .nix file being compiled
+/* `base_dir` is the absolute directory of the .nix file being compiled
  * (no trailing slash) -- relative path literals (AST_PATH, e.g.
  * `./foo.nix`) resolve against it, matching real Nix's rule that a path
  * literal resolves relative to the directory of the file it's *written
- * in*, not the process's cwd or the importing file's directory (see
- * src/c/eval_file.c, which computes this once per file and is the only
- * other caller of ll_compile besides this file's own tests).
+ * in*, not the process's cwd or the importing file's directory.
  *
- * `file_path` (M82): the resolved absolute path of the .nix file being
+ * `file_path` is the resolved absolute path of the .nix file being
  * compiled (not just its directory) -- used ONLY for `__curPos`'s `file`
- * field (AST_CURPOS in compile_expr), so a `__curPos` token inside an
- * IMPORTED file reports that file's own path, not the outermost file
- * asnix was invoked on (the old M80 approximation). May be NULL (falls
- * back to `ll_eval_top_level_file()`, matching the old behavior
- * exactly) -- every real caller passes it, NULL only covers this file's
- * own unit tests, which don't exercise `__curPos`. */
+ * field, so a `__curPos` token inside an IMPORTED file reports that
+ * file's own path, not the outermost file asnix was invoked on. May be
+ * NULL (falls back to `ll_eval_top_level_file()`) -- every real caller
+ * passes it, NULL only covers this file's own unit tests. */
 IrProgram *ll_compile(Ast *root, const char *base_dir, const char *file_path);
 
-/* M54: `builtins.scopedImport`'s compile-time half -- same as
- * ll_compile above, but with one extra named (lexical, not `with`-
- * style fallback) ScopeFrame of `extra_count` names (`extra_names`/
- * `extra_lens`) spliced in between the ordinary root `builtins` frame
- * and `root`'s own top-level expression, so each of those names resolves
- * (and takes priority over any bare global/builtins.X of the same name)
- * like any other variable reference. See compiler.c's own comment on
- * this function and eval_file.c's ll_eval_file_scoped (the only
- * caller) for the matching runtime half. */
+/* `builtins.scopedImport`'s compile-time half -- same as ll_compile
+ * above, but with one extra named (lexical, not `with`-style fallback)
+ * ScopeFrame of `extra_count` names (`extra_names`/`extra_lens`) spliced
+ * in between the ordinary root `builtins` frame and `root`'s own
+ * top-level expression, so each of those names resolves (and takes
+ * priority over any bare global/builtins.X of the same name) like any
+ * other variable reference. */
 IrProgram *ll_compile_scoped(Ast *root, const char *base_dir, const char *file_path,
                                  const char **extra_names, size_t *extra_lens, size_t extra_count);
 
-/* Lazy-thunk-compile experiment, ported from asnix (docs/lazy-thunk-
- * compile-proposal.md): 0 by default (every binding still compiles
- * eagerly, byte-identical to before this experiment existed); set once
- * from main() via `getenv("LL_LAZY_THUNK")`. When set,
+/* Lazy-thunk-compile mode: 0 by default (every binding still compiles
+ * eagerly); set once from main() via `getenv("LL_LAZY_THUNK")`. When set,
  * `compile_expr`'s AST_ATTRSET case defers an ordinary field's value to
  * first-force instead of compiling it immediately, AND eval_file.c's
  * `free(src)` call sites skip freeing the source buffer (hazard #3's

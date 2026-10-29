@@ -5,27 +5,15 @@
 #include <stddef.h>
 
 /*
- * ATerm (.drv) text serialization. M8's original version was scoped to
- * zero input derivations/zero input sources -- derivation-to-derivation
- * dependencies need knowing which attribute values reference another
- * derivation's output, which this project didn't have at the time. A
- * later milestone generalized the original single-fixed-"out"-output
- * assumption to an arbitrary, caller-supplied list of named outputs
- * (see derivation.c), matching real Nix's own `Outputs` section
- * (~/nix/src/libstore/derivation/aterm.cc's `unparse`), which is a map
- * from output name to (path, hashAlgo, hash) and is NOT folded into
- * `env`. M73 added real `InputDrvs`/`InputSrcs` sections (see
- * derivation.c's narrow, call-scoped input-reference collector) and
- * real per-output `hashAlgo`/`hash` fields for fixed-output derivations
- * -- see each struct's own comment below.
+ * ATerm (.drv) text serialization. `Outputs` is a map from output name
+ * to (path, hashAlgo, hash) and is NOT folded into `env`, matching real
+ * Nix's own `Outputs` section (~/nix/src/libstore/derivation/aterm.cc's
+ * `unparse`). `InputDrvs`/`InputSrcs` sections and per-output
+ * `hashAlgo`/`hash` fields for fixed-output derivations are described in
+ * each struct's own comment below.
  *
  * Format and escaping rules ported from ~/nix/src/libstore/derivation/
- * aterm.cc and verified byte-for-byte against two real references before
- * writing this: numtide/nix-conformance's
- * drv/upstream/ia-advanced-attributes-defaults.drv, and a real
- * `nix-instantiate -E 'derivation { name = "asnix-test"; ... }'` run
- * locally -- both reproduced exactly by a throwaway Python port of this
- * same algorithm before any C was written.
+ * aterm.cc.
  */
 
 typedef struct {
@@ -36,13 +24,11 @@ typedef struct {
 /* One entry of the ATerm's `Outputs` section: `name` is the output name
  * (e.g. "out", "bin"), `path` is that output's store path (or "" for the
  * masked/self-referential-hash pass, see store_path.h). `hash_algo`/
- * `hash` (M73) are NULL/unused for the plain input-addressed case this
- * project almost always produces (written as "" each, matching real
- * Nix's own InputAddressed/Deferred encoding) -- set them (hash_algo a
- * plain algorithm name like "sha256", hash its hex digest, no "r:"
- * prefix needed here since that's folded into the derivation.c caller's
- * own hash computation, not this struct) only for a fixed-output
- * derivation's "out" entry, confirmed directly against a real `.drv`:
+ * `hash` are NULL/unused for the plain input-addressed case (written as
+ * "" each, matching real Nix's own InputAddressed/Deferred encoding) --
+ * set them (hash_algo a plain algorithm name like "sha256", hash its hex
+ * digest, no "r:" prefix needed here) only for a fixed-output
+ * derivation's "out" entry, matching a real `.drv`:
  * `("out",path,"sha256","0d5f6015...")`, not `("out",path,"","")`. */
 typedef struct {
     const char *name;
@@ -51,7 +37,7 @@ typedef struct {
     const char *hash;
 } AtermOutput;
 
-/* One entry of the ATerm's `InputDrvs` section (M73): `drv_path` is the
+/* One entry of the ATerm's `InputDrvs` section: `drv_path` is the
  * referenced derivation's own `.drv` path (in the masked pass, see
  * derivation.c's caller, this is instead the hex string of that
  * derivation's own recursively-computed masked hash -- substituted by
@@ -82,17 +68,16 @@ char *ll_build_derivation_aterm(const AtermOutput *outputs, size_t noutputs,
                                     size_t ninput_srcs, const char *system, const char *builder, const char **args,
                                     size_t nargs, const AtermEnvVar *env, size_t nenv);
 
-/* M151: a per-derivation escape cache, keyed by the SOURCE POINTER of each
+/* A per-derivation escape cache, keyed by the SOURCE POINTER of each
  * string handed to `ll_build_derivation_aterm_cached` (not its content --
- * pointer identity is exactly what the caller already guarantees for the
- * common case this exists for: `derivation.c` builds up to 3 ATerm texts
- * per derivation -- masked/real/cache-hash passes -- from the SAME
+ * pointer identity is what the caller already guarantees for the common
+ * case: `derivation.c` builds up to 3 ATerm texts per derivation --
+ * masked/real/cache-hash passes -- from the SAME
  * `system`/`builder`/`args`/`input_srcs`/`env` arrays each time, varying
- * only the `outputs`/`input_drvs` sections between passes. Caching by
+ * only the `outputs`/`input_drvs` sections between passes). Caching by
  * pointer means a string that's merely `strcmp`-equal but a DIFFERENT
- * buffer (e.g. a freshly computed output path reused as an env value)
- * correctly misses and gets escaped fresh -- no risk of a stale/wrong
- * hit from content that only looks the same. */
+ * buffer correctly misses and gets escaped fresh -- no risk of a
+ * stale/wrong hit from content that only looks the same. */
 typedef struct AtermEscapeCache AtermEscapeCache;
 
 /* `hint` is the caller's best guess at how many distinct strings it will

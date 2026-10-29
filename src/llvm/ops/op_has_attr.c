@@ -8,8 +8,7 @@
  * -- this only asks "is the key there", never "what is its value".
  * ll_bshared_attrs_probe already handles both a flat Attrs and a
  * lazy `//` UnionHdr internally (same helper op_select.c's OP_SELECT
- * uses), so no separate resolve call is needed here, matching the
- * asm's own direct tag-check-then-probe shape. */
+ * uses), so no separate resolve call is needed here. */
 #include "ops.h"
 #include "builtins_shared.h"
 

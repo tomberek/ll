@@ -17,10 +17,8 @@ typedef struct {
 static ForceScratchSlot *g_slots = NULL;
 static size_t g_cap = 0;
 
-/* Same doubling-growth convention as every other dynamic array in this
- * codebase (e.g. eval_file.c's g_import_cache) -- grows to at least
- * `depth + 1` slots, zeroing the newly added ones so a not-yet-cached
- * slot's pointers read back as NULL. */
+/* Grows to at least `depth + 1` slots, zeroing the newly added ones so
+ * a not-yet-cached slot's pointers read back as NULL. */
 static void ensure_cap(size_t depth) {
     if (depth < g_cap) return;
     size_t new_cap = g_cap ? g_cap * 2 : 8;

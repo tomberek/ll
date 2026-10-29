@@ -20,6 +20,6 @@ LL_OP_ATTR Value ll_op_select(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetF
         ll_bshared_select_missing_fatal(sym); /* _Noreturn */
     }
     Value result = ll_force_for_print(out);
-    vs[-1] = result; /* pop attrs, push result -- net zero stack change */
+    vs[-1] = result;
     LL_NEXT(ip, env, vs, pool, rs);
 }

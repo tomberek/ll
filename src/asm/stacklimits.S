@@ -1,16 +1,14 @@
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 (src/asm) -- see ~/.claude/plans/soft-wishing-engelbart.md */
 // Shared state and abort routines backing include/ll/stackcheck.h's
 // LL_CHECK_VALSTACK/LL_CHECK_RETSP macros, used at every VALSTACK/
-// RETSP push site (grep LL_CHECK_VALSTACK / LL_CHECK_RETSP). Both
-// dispatch.S's top-level eval loop and force.S's smaller nested-forcing
-// context write ll_valstack_limit/ll_retsp_limit to "one past the
-// last valid byte" of whichever buffer they just allocated (force.S saves
-// and restores the previous values around its own nested use, exactly
-// like it already does for %r12/%r14 -- see force.S) so the same shared
-// op handler code enforces the right cap in either context. Exceeding
-// either cap aborts cleanly via ll_fatal, matching the
-// LL_MAX_MEMORY philosophy in arena.S, instead of silently corrupting
-// whatever the arena allocates next.
+// RETSP push site. Both dispatch.S's top-level eval loop and force.S's
+// nested-forcing context write ll_valstack_limit/ll_retsp_limit to
+// "one past the last valid byte" of whichever buffer they just
+// allocated (force.S saves and restores the previous values around
+// its own nested use, like it already does for %r12/%r14) so the
+// same shared op handler code enforces the right cap in either
+// context. Exceeding either cap aborts cleanly via ll_fatal instead
+// of silently corrupting whatever the arena allocates next.
     .bss
     .align 8
     .globl ll_valstack_limit
@@ -26,7 +24,7 @@ ll_retsp_limit:
     .quad 0
     .size ll_retsp_limit, 8
 
-    // M82: head of an intrusive "currently IN_PROGRESS" Thunk* stack,
+    // Head of an intrusive "currently IN_PROGRESS" Thunk* stack,
     // linked through each such thunk's OWN `env` field (see ir.h's
     // LL_THUNK_OFF_ENV comment -- safe to repurpose once IN_PROGRESS,
     // since the original env was already consumed to jump into the
@@ -41,7 +39,7 @@ ll_retsp_limit:
     // that range are exactly the ones left stuck IN_PROGRESS by frames
     // the longjmp skipped over, which get marked FAILED (LL_THUNK_
     // STATE_FAILED) instead of being mistaken for a genuine blackhole on
-    // the next force. See docs/architecture.md's M82 notes.
+    // the next force.
     .align 8
     .globl ll_inprogress_head
     .type ll_inprogress_head, @object

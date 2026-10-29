@@ -7,51 +7,10 @@
 
 #include "value_util.h"
 
-/* Folds `OP_PUSH_CONST idx1; OP_PUSH_CONST idx2; OP_STR_CONCAT a=2` into a
- * single `OP_PUSH_CONST idx3` whenever BOTH pool entries are already
- * genuine String values -- the bytecode-level mirror of what
- * compiler.c's own AST_STRING case already does at compile time for an
- * ENTIRELY-literal string ("no interpolation at all" -> one constant),
- * except this also catches the two-constant case exposed only once two
- * adjacent parts of an interpolated string EACH happen to compile down to
- * a bare constant on their own -- e.g. `"${"a"}${"b"}"` (two nested,
- * individually-all-literal interpolations, each folded by compiler.c into
- * its own OP_PUSH_CONST, landing adjacent to each other before a single
- * `a=2` OP_STR_CONCAT) -- or, same spirit as irpass_cfold.c's own
- * comment, a pair exposed later by some OTHER pass's prior rewrite, not
- * just something already foldable purely from the original source.
- *
- * Deliberately scoped to the SAFE, simple a==2 case only (not any N>2
- * OP_STR_CONCAT, and not a mix of one-constant-one-not): an
- * OP_PUSH_CONST's pool entry can hold ANY constant Value shape (an int,
- * bool, list-of-syms, a Path or Float that merely happens to share
- * LL_TAG_PTR with String, ...) -- there's no way to tell from the op
- * alone, so this pass must actually dereference the pool entry and check
- * its runtime tag before assuming "string". A Path or Float operand is
- * deliberately left alone (not folded) even though both ALSO reach
- * OP_STR_CONCAT via the exact same op shape: interpolating either one has
- * real side effects at runtime (Path: existence check + NAR-copy-to-store
- * coercion, value_util.c's coerce_to_string_for_interp; Float: rejected
- * outright, "cannot coerce a float to a string") that a compile-time fold
- * must not silently skip.
- *
- * String "context" (M76, string_context.h) is a non-issue here: it's
- * attached via a side table keyed by a String's own arena pointer, and
- * ONLY ever populated by RUNTIME construction call sites (derivation
- * outputs, path/attrs coercion, ...) -- a literal pool constant built by
- * compiler.c (either directly, or via ll_make_string_value in its own
- * AST_STRING interpolation case) never goes through
- * ll_string_attach_context, so both operands here are guaranteed
- * context-free already; the freshly-built folded constant below
- * inherits that same "no context" state for free, identical to what
- * OP_STR_CONCAT's own runtime path (concat_strings_impl, unioning two
- * empty contexts) would have produced. */
-/* Which op-ids carry a byte-delta-to-target in field `a` -- see ir.h's own
- * per-op comments; same exhaustive list irpass.c's own op_is_jump uses. */
 static int op_is_jump(int op_id) {
     return op_id == OP_IF || op_id == OP_JMP || op_id == OP_WITH_TRY || op_id == OP_SELECT_OR ||
            op_id == OP_SELECT_DYNAMIC_OR || op_id == OP_EQ_IF || op_id == OP_NEQ_IF || op_id == OP_LT_IF ||
-           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF; /* M162 */
+           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF;
 }
 
 /* Found on a REAL nixpkgs workload (not caught by the 308-fixture +
@@ -96,14 +55,6 @@ static int fold_adjacent_const_strings(IrOp *ops, size_t *len, int64_t **pool, s
 
         Value v1 = { .raw = (uint64_t)(*pool)[idx1] };
         Value v2 = { .raw = (uint64_t)(*pool)[idx2] };
-        /* "genuine String" check -- same tag-exclusion pattern
-         * value_util.c's own is_plain_string helper uses (LL_TAG_PTR
-         * minus the Path/Float sibling kinds that share it); Cell/
-         * LazyApp are excluded too purely for defense-in-depth (neither
-         * can actually appear in a compile-time constant pool -- both
-         * are purely-internal runtime-only devices, see heap.h -- but
-         * checking costs nothing and keeps this pass correct even if
-         * that ever changed). */
         if (ll_tag_of(v1) != LL_TAG_PTR || ll_value_is_path(v1) || ll_value_is_float(v1) ||
             ll_value_is_cell(v1) || ll_value_is_lazyapp(v1))
             continue;
@@ -124,7 +75,7 @@ static int fold_adjacent_const_strings(IrOp *ops, size_t *len, int64_t **pool, s
          * array-index-0) before v2's (ops[i+1]) -- exactly source order,
          * no reversal needed. */
         char *buf = malloc((size_t)(len1 + len2));
-        if (buf == NULL) continue; /* allocation failure: leave this triple for the runtime op */
+        if (buf == NULL) continue;
         memcpy(buf, b1, (size_t)len1);
         memcpy(buf + len1, b2, (size_t)len2);
         Value folded = ll_make_string_value(buf, (size_t)(len1 + len2));
@@ -135,7 +86,7 @@ static int fold_adjacent_const_strings(IrOp *ops, size_t *len, int64_t **pool, s
         ops[i].a = 0;
         ops[i].b = (int64_t)new_idx;
         ll_irpass_remove(ops, len, i + 1, 2);
-        return 1; /* re-scan from the top next iteration -- simplest correct strategy */
+        return 1;
     }
     return 0;
 }

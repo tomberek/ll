@@ -1,29 +1,25 @@
-/* M-iets-parity: ported from iets's own src/sys/linux.rs (read directly,
- * not guessed) -- before ever requesting a huge page via MADV_HUGEPAGE,
- * check whether the kernel actually HAS free order-9+ (>= 2MiB) blocks
- * to satisfy it. transparent_hugepage/defrag=madvise (confirmed via
- * /sys on the dev machine) means a madvise'd region that the kernel
- * can't satisfy from an already-free block gets its huge page assembled
- * by DIRECT (synchronous) compaction in the calling thread -- iets's own
- * comment documents measuring this as a real regression on a fragmented
- * box. Checked once per process (cached), matching iets's own
- * LazyLock<bool> -- fragmentation during one process's own short
+/* Before ever requesting a huge page via MADV_HUGEPAGE, check whether
+ * the kernel actually HAS free order-9+ (>= 2MiB) blocks to satisfy it.
+ * With transparent_hugepage/defrag=madvise, a madvise'd region that the
+ * kernel can't satisfy from an already-free block gets its huge page
+ * assembled by DIRECT (synchronous) compaction in the calling thread,
+ * which is a real stall risk on a fragmented box. Checked once per
+ * process (cached) -- fragmentation during one process's own short
  * lifetime isn't worth re-checking.
  *
  * Called from arena.S/env_arena.S (hand-written asm, no libc dependency
  * of their own) via the C ABI -- this one helper is the sole reason
- * those files gained a non-syscall C dependency; kept to this single,
- * narrow helper rather than pulling broader C machinery into them. */
-#define _DEFAULT_SOURCE /* strtok_r() -- same feature-test macro eval_file.c uses for getcwd */
+ * those files gained a non-syscall C dependency. */
+#define _DEFAULT_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 /* Bytes free in blocks of order 9 (2^9 pages = 2MiB at a 4KiB page
  * size) and up, summed across every zone/node line in /proc/buddyinfo.
- * Mirrors iets's own huge_free(): skip the "Node N, zone NAME" prefix
- * (4 whitespace-separated tokens), then each remaining token is the
- * free-block count at increasing order, starting from 0. */
+ * Skip the "Node N, zone NAME" prefix (4 whitespace-separated tokens),
+ * then each remaining token is the free-block count at increasing
+ * order, starting from 0. */
 static uint64_t huge_free_bytes(void) {
     FILE *f = fopen("/proc/buddyinfo", "r");
     if (!f) return 0;
@@ -57,7 +53,7 @@ static uint64_t huge_free_bytes(void) {
     return total;
 }
 
-/* 1 GiB, matching iets's own HUGE_FREE_MIN exactly. */
+/* 1 GiB. */
 #define LL_HUGE_FREE_MIN (1ULL << 30)
 
 /* -1 = not yet checked, 0 = checked, not safe, 1 = checked, safe. */

@@ -18,9 +18,9 @@ LL_OP_ATTR Value ll_op_update(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetF
 /* ported from asnix@0ad7e2f60019b9cadf8205a6e2c77885d63af445 src/asm/ops/op_concat.S -- see soft-wishing-engelbart.md plan */
 LL_OP_ATTR Value ll_op_concat(IrOp *ip, Env *env, Value *vs, int64_t *pool, RetFrame *rs) {
     Value rhs = vs[-1], lhs = vs[-2];
-    /* No type-check here, matching op_concat.S: ll_concat_lists does its
-     * own TAG_LIST check on both operands and ll_fatal()s (never
-     * returns) if either isn't a list. */
+    /* No type-check here: ll_concat_lists does its own TAG_LIST check
+     * on both operands and ll_fatal()s (never returns) if either isn't
+     * a list. */
     Value result = ll_concat_lists(lhs, rhs);
     vs--;
     vs[-1] = result;

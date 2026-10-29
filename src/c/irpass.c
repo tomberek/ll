@@ -11,29 +11,14 @@ static LlIrPass g_passes[LL_IRPASS_MAX_PASSES];
 static uint64_t g_fire_counts[LL_IRPASS_MAX_PASSES];
 static size_t g_npasses = 0;
 
-/* Which pass is currently executing, for ll_irpass_remove's firing-log
- * attribution below -- set by ll_irpass_run just before calling each
- * g_passes[p], valid only during that call. */
 static size_t g_current_pass = (size_t)-1;
 
-/* The firing-log index at which the CURRENTLY-COMPILING program's own
- * ll_irpass_run call started -- see ll_irpass_begin_program below.
- * Bounds ll_irpass_remove's shift-fixup loop so a later program's own
- * removal never touches an earlier, already-finished program's entries
- * (each program's ops array independently starts its own indexing at 0,
- * so without this bound two different programs' op-index ranges
- * routinely overlap, and the naive "shift every logged firing" loop
- * would silently corrupt the earlier one's already-correct locations). */
+/* Bounds ll_irpass_remove's firing-log shift-fixup so a later program's
+ * own removal never touches an earlier, already-finished program's
+ * entries -- each program's ops array independently starts its own
+ * indexing at 0, so op-index ranges across programs can coincide. */
 static size_t g_program_firing_base = 0;
 
-/* Per-program firing ranges: {prog, [start,end)} into g_firings, recorded
- * by ll_irpass_mark_program once a program's own ll_irpass_run call
- * (bounded by g_program_firing_base above) is done. Growable cap is
- * generous but finite -- this is an irdump/debug-only feature, never
- * consulted by a real production eval (which registers zero passes, so
- * ll_irpass_mark_program below is a guaranteed no-op there). Declared
- * up here (not next to the functions that use it, further down) so
- * ll_irpass_reset_stats can clear it without a forward-declaration. */
 #define LL_IRPASS_MAX_PROGRAM_RANGES 65536
 typedef struct {
     const void *prog;
@@ -69,25 +54,6 @@ uint64_t ll_irpass_fire_count(size_t index) {
     return g_fire_counts[index];
 }
 
-/* --- Firing-location log: WHERE each pass fired, not just how many times.
- *
- * Recorded by ll_irpass_remove (the one shrink primitive every
- * existing pass uses) at the index the kept/folded op ends up at --
- * start-1 by convention, since every pass so far follows "rewrite ops[i]
- * in place, then ll_irpass_remove(ops, len, i+1, count)" (see
- * irpass_cfold.c). A pass that removes a range with no "kept predecessor"
- * (e.g. a pure dead-code deletion) still gets a location logged at
- * start-1 (clamped to 0) -- less precise for that shape, but still a
- * useful "around here" marker, which is this feature's stated bar.
- *
- * Entries are kept valid against the CURRENT ops array at all times: every
- * later ll_irpass_remove call also shifts any already-logged op_index
- * >= the newly-removed range, by the same amount it shifts jump targets
- * below -- so by the time a compile finishes, every logged index is still
- * correct for the FINAL ops array irdump actually prints. Not disambiguated
- * across separate IrPrograms (root vs. a nested lambda/thunk body each get
- * their own ib_finish() call, but share this one global log/index space) --
- * best-effort for nested cases, exact for a single flat program. */
 #define LL_IRPASS_MAX_FIRINGS 4096
 typedef struct {
     size_t pass_index;
@@ -97,9 +63,6 @@ static LlIrFiring g_firings[LL_IRPASS_MAX_FIRINGS];
 static size_t g_nfirings = 0;
 
 #ifdef LL_IRDUMP_LINE_TRACKING
-/* irdump's own variant build only -- see irpass.h's own comment on
- * ll_irpass_set_line_array. Absent entirely from a real production
- * build of this file. */
 static uint32_t *g_tracked_lines = NULL;
 
 void ll_irpass_set_line_array(uint32_t *lines) {
@@ -146,9 +109,9 @@ void ll_irpass_begin_program(void) {
 }
 
 void ll_irpass_mark_program(const void *prog) {
-    if (g_npasses == 0) return; /* no-op by default, same guarantee as the rest of this framework */
-    if (g_nfirings == g_program_firing_base) return; /* this program logged nothing -- no range needed */
-    if (g_nprogram_ranges >= LL_IRPASS_MAX_PROGRAM_RANGES) return; /* defensive cap */
+    if (g_npasses == 0) return;
+    if (g_nfirings == g_program_firing_base) return;
+    if (g_nprogram_ranges >= LL_IRPASS_MAX_PROGRAM_RANGES) return;
     g_program_ranges[g_nprogram_ranges].prog = prog;
     g_program_ranges[g_nprogram_ranges].start = g_program_firing_base;
     g_program_ranges[g_nprogram_ranges].end = g_nfirings;
@@ -163,13 +126,12 @@ int ll_irpass_firing_belongs_to_program(size_t i, const void *prog) {
     return 0;
 }
 
-/* Which op-ids carry a byte-delta-to-target in field `a` -- see ir.h's own
- * per-op comments. Exhaustive: nothing else in OP_COUNT's enum uses a
- * self-relative index delta. */
+/* Which op-ids carry a byte-delta-to-target in field `a`. Exhaustive:
+ * nothing else in OP_COUNT's enum uses a self-relative index delta. */
 static int op_is_jump(int op_id) {
     return op_id == OP_IF || op_id == OP_JMP || op_id == OP_WITH_TRY || op_id == OP_SELECT_OR ||
            op_id == OP_SELECT_DYNAMIC_OR || op_id == OP_EQ_IF || op_id == OP_NEQ_IF || op_id == OP_LT_IF ||
-           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF; /* M162 */
+           op_id == OP_GE_IF || op_id == OP_HAS_ATTR_IF;
 }
 
 void ll_irpass_remove(IrOp *ops, size_t *len, size_t start, size_t count) {
@@ -194,21 +156,12 @@ void ll_irpass_remove(IrOp *ops, size_t *len, size_t start, size_t count) {
     }
     memmove(&ops[start], &ops[start + count], (old_len - start - count) * sizeof(IrOp));
 #ifdef LL_IRDUMP_LINE_TRACKING
-    /* `lines[i]` is a plain per-op attribute, not a jump target needing
-     * remapping -- it just needs to move along with whichever op it
-     * describes, so a lockstep memmove over the exact same range is
-     * sufficient, unlike the jump-target fixup loop below. Entirely
-     * absent (not even this check) from a real production build. */
     if (g_tracked_lines) {
         memmove(&g_tracked_lines[start], &g_tracked_lines[start + count],
                 (old_len - start - count) * sizeof(uint32_t));
     }
 #endif
     size_t new_len = old_len - count;
-    /* Re-point every jump whose own position or target shifted. Op i's new
-     * position maps back to old position (i < start ? i : i + count) --
-     * exactly the inverse of the memmove above -- so that's how to recover
-     * each jump's OLD absolute target for remapping. */
     for (size_t i = 0; i < new_len; i++) {
         int id = (int)(intptr_t)ops[i].handler;
         if (!op_is_jump(id)) continue;
@@ -217,24 +170,13 @@ void ll_irpass_remove(IrOp *ops, size_t *len, size_t start, size_t count) {
         int64_t new_target = (old_target < (int64_t)start) ? old_target : old_target - (int64_t)count;
         ops[i].a = (new_target - (int64_t)i) * LL_IROP_SIZE;
     }
-    /* Keep every already-logged firing location valid against the new,
-     * shorter array -- same shift rule as jump targets just above (an
-     * index at/after the removed range moves back by `count`; one before
-     * it is untouched). Bounded to >= g_program_firing_base: an earlier
-     * program's own already-finished entries must never be touched here
-     * -- `ops`/`start`/`count` are all relative to the CURRENT program's
-     * own array, which has nothing to do with an earlier program's
-     * unrelated op-index space, even though the raw integers can
-     * coincide (every program's own indexing independently starts at
-     * 0). */
+    /* Bounded to >= g_program_firing_base: an earlier program's own
+     * already-finished entries must never be touched here. */
     for (size_t i = g_program_firing_base; i < g_nfirings; i++) {
         size_t idx = g_firings[i].op_index;
         if (idx >= start + count) g_firings[i].op_index = idx - count;
-        else if (idx >= start) g_firings[i].op_index = start > 0 ? start - 1 : 0; /* was inside the removed range itself */
+        else if (idx >= start) g_firings[i].op_index = start > 0 ? start - 1 : 0;
     }
-    /* Log this firing: by convention (irpass_cfold.c and friends) the
-     * kept/folded result lives at start-1; clamp to 0 for a pass that
-     * removes starting at index 0 with no predecessor. */
     if (g_current_pass != (size_t)-1 && g_nfirings < LL_IRPASS_MAX_FIRINGS) {
         g_firings[g_nfirings].pass_index = g_current_pass;
         g_firings[g_nfirings].op_index = start > 0 ? start - 1 : 0;

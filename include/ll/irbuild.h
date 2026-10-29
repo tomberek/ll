@@ -6,8 +6,8 @@
 #include <stdint.h>
 #include "ll/ir.h"
 
-/* IR-stream builder shared by the M3 test fixtures (tests/ir) and the real
- * M4 compiler (src/c/compiler.c) -- "append an IrOp, track patch sites" is
+/* IR-stream builder shared by the test fixtures (tests/ir) and the real
+ * compiler (src/c/compiler.c) -- "append an IrOp, track patch sites" is
  * the same API either way. */
 
 typedef struct {
@@ -36,23 +36,14 @@ size_t ib_len(IrBuilder *b);
  * see Makefile's IRDUMP_LINE_TRACKING_SRCS); a real production eval links
  * against the plain (undefined-macro) objects and never sees any of this
  * code at all -- not a runtime-disabled flag, genuinely absent from the
- * compiled instructions. Measured directly: even a runtime-flag-gated
- * version of this (checked but defaulted off) cost a real, reproducible
- * instruction regression on the real d.nix/ffmpeg eval -- not from any
- * one obvious hot branch, but diffusely enough (parser.c's 46 call sites,
- * the IrBuilder struct's own size, ib_emit's extra field write) that a
- * true compile-time exclusion was the only approach that measured as
- * genuinely free. */
+ * compiled instructions. */
 void ib_enable_line_tracking(void);
 void ib_set_current_src_pos(uint32_t pos);
 
 /* Looks up the finished `lines` array a given IrProgram's builder recorded
  * (NULL if line tracking was off, or if `prog` is unrecognized) -- a
- * pointer-identity side table, not a field on IrProgram itself, so a real
- * eval's IrProgram struct (hundreds of thousands of long-lived instances
- * per real eval) never carries this debug-only pointer's permanent 8-byte
- * cost even in the irdump variant build. irdump.c is the only real
- * caller. */
+ * pointer-identity side table, not a field on IrProgram itself. irdump.c
+ * is the only real caller. */
 const uint32_t *ll_ib_lookup_program_lines(const IrProgram *prog);
 #else
 /* Plain production build: these become unconditional no-ops so compiler.c
@@ -70,11 +61,11 @@ size_t ib_push_true(IrBuilder *b);
 size_t ib_push_false(IrBuilder *b);
 size_t ib_push_null(IrBuilder *b);
 size_t ib_var_ref(IrBuilder *b, int64_t depth, int64_t slot);
-/* M92: see OP_VAR_REF_CELL's own comment (ir.h) -- same depth/slot
+/* See OP_VAR_REF_CELL's own comment (ir.h) -- same depth/slot
  * addressing as ib_var_ref, but pushes a Cell aliasing the slot instead
  * of forcing+pushing its value. */
 size_t ib_var_ref_cell(IrBuilder *b, int64_t depth, int64_t slot);
-/* M92: see OP_VAR_REF_RAW's own comment (ir.h) -- same depth/slot
+/* See OP_VAR_REF_RAW's own comment (ir.h) -- same depth/slot
  * addressing as ib_var_ref, but pushes the slot's raw content with NO
  * forcing at all. */
 size_t ib_var_ref_raw(IrBuilder *b, int64_t depth, int64_t slot);
@@ -86,12 +77,12 @@ size_t ib_jmp(IrBuilder *b);  /* ditto */
 void ib_patch_delta(IrBuilder *b, size_t site, size_t target_idx);
 size_t ib_let(IrBuilder *b, int64_t nslots);
 /* body_prog must come from this same translation's ib_finish() -- its
- * `pool` travels with the resulting closure (M100: via LL_CLOSURE_OFF_PROG
- * in ir.h, a single IrProgram* rather than separate body/pool fields) so a
+ * `pool` travels with the resulting closure (via LL_CLOSURE_OFF_PROG in
+ * ir.h, a single IrProgram* rather than separate body/pool fields) so a
  * lambda body containing its own nested OP_LAMBDA resolves against the
  * right constant pool at call time, not the caller's.
  * `formals_raw`: this closure's pre-built `builtins.functionArgs` result
- * Value.raw (M37) -- the caller must build it (a real `{name:
+ * Value.raw -- the caller must build it (a real `{name:
  * hasDefault}` attrset for a lambda-pattern, or any empty-attrset Value
  * otherwise) and pass it through here; see LL_CLOSURE_OFF_FORMALS,
  * ir.h. */
@@ -102,7 +93,7 @@ size_t ib_call_chain(IrBuilder *b, int64_t n);
 size_t ib_ret(IrBuilder *b);
 size_t ib_halt(IrBuilder *b);
 
-/* M5: pushes a fully-formed Value.raw (e.g. a string literal) stashed in
+/* Pushes a fully-formed Value.raw (e.g. a string literal) stashed in
  * the constant pool. */
 size_t ib_push_const(IrBuilder *b, int64_t raw_value);
 size_t ib_mk_list(IrBuilder *b, int64_t count);
@@ -118,7 +109,7 @@ size_t ib_select(IrBuilder *b, uint32_t sym);
  * OP_SELECT_DYNAMIC's own comment (ir.h) and op_select_dynamic.S. */
 size_t ib_select_dynamic(IrBuilder *b);
 
-/* M6: pushes a thunk wrapping body_prog (compiled like a lambda body,
+/* Pushes a thunk wrapping body_prog (compiled like a lambda body,
  * ending in OP_RET) captured over the *current* Env at the point this op
  * runs -- same pool-travels-with-it rationale as ib_lambda. */
 size_t ib_mk_thunk(IrBuilder *b, IrProgram *body_prog);
@@ -139,7 +130,7 @@ size_t ib_frame_set(IrBuilder *b, int64_t slot);
 size_t ib_frame_get(IrBuilder *b, int64_t slot);
 size_t ib_frame_exit(IrBuilder *b);
 
-/* `rec { ... __overrides = {...}; ... }` (M57c) -- see OP_REC_OVERRIDES_MERGE's
+/* `rec { ... __overrides = {...}; ... }` -- see OP_REC_OVERRIDES_MERGE's
  * own long comment, ir.h. `syms` is n entries in ORIGINAL (OP_FRAME_SET slot)
  * order, NOT sorted; `overrides_slot` is which of those n slots is
  * `__overrides` itself. Emitted by compiler.c's AST_ATTRSET case in place
@@ -176,7 +167,7 @@ size_t ib_assert_fail(IrBuilder *b, const char *msg, size_t len);
  * String -- see OP_STR_CONCAT in ir.h. */
 size_t ib_str_concat(IrBuilder *b, int64_t count);
 
-/* M59: same as ib_str_concat, but the result is re-canonicalized and
+/* Same as ib_str_concat, but the result is re-canonicalized and
  * wrapped as a Path -- see OP_PATH_CONCAT in ir.h. Only ever emitted when
  * the first of the `count` pushed values is already a Path constant
  * (compiler.c's AST_PATH case). */
@@ -196,7 +187,7 @@ size_t ib_with_try(IrBuilder *b, uint32_t sym);
 /* Every enclosing `with` was tried and none had the symbol: aborts with
  * "undefined variable", same error class as the compile-time check. */
 size_t ib_with_miss(IrBuilder *b);
-/* M52: the with-frame counterpart of ib_frame_exit() -- restores ENV to the
+/* The with-frame counterpart of ib_frame_exit() -- restores ENV to the
  * with-frame's `up` (tag bit masked off) once the `with` body is fully
  * compiled, so a non-tail `with` doesn't leak its frame into a sibling's
  * compiled depths. See OP_WITH_EXIT in ir.h. */
@@ -205,7 +196,7 @@ size_t ib_with_exit(IrBuilder *b);
 /* Lambda-patterns: pops a value, pushes TRUE/FALSE -- see op_has_attr.S. */
 size_t ib_has_attr(IrBuilder *b, uint32_t sym);
 
-/* `expr ? ${nameExpr}` (M33): pops the name Value then the target -- see
+/* `expr ? ${nameExpr}`: pops the name Value then the target -- see
  * OP_HAS_ATTR_DYNAMIC (ir.h) and op_has_attr_dynamic.S. */
 size_t ib_has_attr_dynamic(IrBuilder *b);
 
@@ -230,7 +221,7 @@ size_t ib_mk_formalsmap(IrBuilder *b, int64_t nf, const int64_t *syms);
  * and the fixed symbol id `sym` (operand `b`) -- see OP_SELECT_OR in ir.h. */
 size_t ib_select_or(IrBuilder *b, uint32_t sym);
 
-/* M162: branch-fused comparison/`?`-membership ops -- see their OP_*_IF
+/* Branch-fused comparison/`?`-membership ops -- see their OP_*_IF
  * comments in ir.h for the full rationale. Each emits with a placeholder
  * delta (operand `a`, patched via ib_patch_delta, same convention as
  * ib_if/ib_jmp), taken when the comparison/test is FALSE; a TRUE result

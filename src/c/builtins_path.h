@@ -4,11 +4,8 @@
 
 #include <stddef.h>
 
-#include "builtins_misc.h" /* LlBuiltinMiscDef -- same {name,build()} shape precedent
-                             * builtins_shared.h's own header comment describes. */
+#include "builtins_misc.h"
 
-/* M80: `builtins.path`/`builtins.filterSource` -- see builtins_path.c's
- * own header comment for the full picture. */
 extern const LlBuiltinMiscDef LL_PATH_BUILTINS[];
 extern const size_t LL_PATH_BUILTINS_COUNT;
 

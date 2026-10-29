@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 /*
- * M30: a narrow, targeted catchable-throw mechanism for `builtins.tryEval`
+ * A narrow, targeted catchable-throw mechanism for `builtins.tryEval`
  * -- NOT a general exception system. Real Nix's own `tryEval` only ever
  * catches `AssertionError` and its one subclass `ThrownError` (confirmed
  * directly in cppnix's source, `~/nix/src/libexpr/primops.cc`'s
@@ -35,29 +35,26 @@
  * `prim_tryEval` returns normally (whichever way it got there), the
  * caller's own push/pop restores them regardless of what happened inside.
  *
- * M82 (see docs/architecture.md): previously-documented limitation, now
- * fixed -- if the thrown expression's evaluation forced some OTHER thunk
- * partway through (not just the thunk `tryEval` was directly asked to
- * evaluate), that thunk used to stay marked IN_PROGRESS forever (the
- * normal "finish forcing, mark FORCED" step never runs for it, since the
+ * If the thrown expression's evaluation forced some OTHER thunk partway
+ * through (not just the thunk `tryEval` was directly asked to evaluate),
+ * that thunk would otherwise stay marked IN_PROGRESS forever (the normal
+ * "finish forcing, mark FORCED" step never runs for it, since the
  * `longjmp` back to here skips every intervening op_*.S/force.S
  * epilogue) -- referencing that *same* thunk object again later would
- * incorrectly blackhole (found via numtide/nix-conformance's
- * eval-okay-tryeval-failed-thunk-reeval.nix: "Since Nix 2.34, errors are
- * memoized" -- real Nix re-raises the SAME cached failure on a second
+ * then incorrectly blackhole, instead of matching real Nix's "errors are
+ * memoized" behavior (re-raising the SAME cached failure on a second
  * force, rather than either re-running the thunk's body or treating it
- * as a genuine cycle). Fixed via `ll_inprogress_head`
- * (stacklimits.S): every op_*.S/force.S site that marks a thunk
- * IN_PROGRESS also pushes it onto this intrusive stack (linked through
- * the thunk's own, now-unused `env` field -- see ir.h's LL_THUNK_OFF_
- * ENV comment), and `ll_tryeval_save_inprogress_head`/
- * `ll_tryeval_unwind_inprogress` below let `prim_tryEval`
- * (builtins_tryeval.c) walk exactly the range of thunks that became
- * IN_PROGRESS during ITS OWN dynamic extent (not any OUTER, still-
- * legitimately-in-progress force further up the call chain) and mark
- * them FAILED instead -- re-forcing a FAILED thunk re-raises
- * (catchable again) rather than re-running the body or blackholing; see
- * each op_*.S/force.S's own `.L*_reraise` label.
+ * as a genuine cycle). Fixed via `ll_inprogress_head` (stacklimits.S):
+ * every op_*.S/force.S site that marks a thunk IN_PROGRESS also pushes
+ * it onto this intrusive stack (linked through the thunk's own,
+ * now-unused `env` field -- see ir.h's LL_THUNK_OFF_ENV comment), and
+ * `ll_tryeval_save_inprogress_head`/`ll_tryeval_unwind_inprogress` below
+ * let `prim_tryEval` (builtins_tryeval.c) walk exactly the range of
+ * thunks that became IN_PROGRESS during ITS OWN dynamic extent (not any
+ * OUTER, still-legitimately-in-progress force further up the call
+ * chain) and mark them FAILED instead -- re-forcing a FAILED thunk
+ * re-raises (catchable again) rather than re-running the body or
+ * blackholing; see each op_*.S/force.S's own `.L*_reraise` label.
  */
 
 #define LL_TRYEVAL_MAX_DEPTH 256
@@ -83,7 +80,7 @@ void ll_tryeval_pop(void);
  * behavior (write `msg` to stderr, exit 1) -- never returns either way. */
 _Noreturn void ll_tryeval_raise_or_fatal(const char *msg, size_t len);
 
-/* M82: snapshot of `ll_inprogress_head` (stacklimits.S) -- call BEFORE
+/* Snapshot of `ll_inprogress_head` (stacklimits.S) -- call BEFORE
  * forcing the expression `tryEval` was asked to evaluate (alongside the
  * existing VALSTACK/RETSP-limit saves, builtins_tryeval.c), so a later
  * `ll_tryeval_unwind_inprogress` call knows exactly which thunks
@@ -91,7 +88,7 @@ _Noreturn void ll_tryeval_raise_or_fatal(const char *msg, size_t len);
  * extent. */
 int64_t ll_tryeval_save_inprogress_head(void);
 
-/* M82: walks `ll_inprogress_head`'s intrusive stack from its CURRENT
+/* Walks `ll_inprogress_head`'s intrusive stack from its CURRENT
  * value down to `saved_head` (as returned by
  * ll_tryeval_save_inprogress_head before the force that just got
  * caught), marking every thunk in that range LL_THUNK_STATE_FAILED
