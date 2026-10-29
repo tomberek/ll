@@ -722,7 +722,34 @@ void asnix_lazy_thunk_descriptor_set_self(void *desc_void, IrProgram *self) {
  * and defers the real compile to first-force. `value_scope` is whatever
  * ScopeFrame the eager path would have compiled `value` against. */
 static void emit_attrset_field_value(IrBuilder *b, Ast *value, ScopeFrame *value_scope) {
-    if (!asnix_lazy_thunk_enabled) {
+    /* `value->src_pos == 0` means this value has no real, verbatim,
+     * standalone-reparseable source span -- either lazy-thunk is off, or
+     * `value` is one of parser.c's synthetic nodes (attrpath-sugar's
+     * wrapper AST_ATTRSET from `a.b.c = v;`, or inherit(expr)'s hidden
+     * AST_SELECT/shared-source binding) that parse_binding_stmt_inner
+     * never stamped (only the ONE real RHS-of-`=` expression gets a
+     * stamp -- see that call site's own comment). Building a lazy-thunk
+     * stub for a src_pos==0 value can never be cached later anyway
+     * (bytecode.c's write_lazy_thunk_marker refuses it, and that failure
+     * propagates up and poisons the WHOLE containing file's cache-
+     * ability, not just this one field) -- so fall through to the eager
+     * compile path instead, same as if lazy-thunk were disabled. This
+     * costs ~nothing live: synthetic wrappers are themselves cheap to
+     * compile (a small nested-attrset construction or a plain select);
+     * whatever's expensive is reached THROUGH them and gets its own,
+     * separate, nested emit_attrset_field_value call when the wrapper's
+     * own construction is compiled (compile_expr's AST_ATTRSET case
+     * recurses into ITS OWN fields the same way, synthetic or not) --
+     * and that nested value, if it's the real hand-written leaf, DOES
+     * have a real span and can still defer-and-cache on its own.
+     * Crucially, "eager compile" here only changes WHEN the value is
+     * compiled to IR, never when it's EVALUATED: both paths end by
+     * wrapping the result in an ordinary Thunk (ib_mk_thunk) that is
+     * itself still forced lazily, so runtime laziness/evaluation order
+     * (including `rec{}`'s `__overrides` sibling-slot rewrite) is
+     * unaffected -- this is a compile-time-only, never user-observable
+     * change. */
+    if (!asnix_lazy_thunk_enabled || value->src_pos == 0) {
         IrBuilder *thunk_b = ib_new();
         compile_expr(thunk_b, value, value_scope);
         ib_ret(thunk_b);
