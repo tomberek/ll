@@ -430,10 +430,31 @@ static Value build_intersectAttrs(void) {
  * force to a string -- real Nix: "value is $type while a string was
  * expected"), preserving each bucket's original relative order.
  * Verified: `builtins.groupBy (n: if n < 0 then "neg" else "pos") [ -1 2
- * -3 4 ]` == `{ neg = [ -1 -3 ]; pos = [ 2 4 ]; }`. Not hot-path, so a
- * plain O(n * distinct-keys) linear bucket-search is fine for anything
- * this project's fixtures exercise.
- * --------------------------------------------------------------------- */
+ * -3 4 ]` == `{ neg = [ -1 -3 ]; pos = [ 2 4 ]; }`.
+ *
+ * perf: below ASNIX_GROUPBY_HASH_MIN, a plain linear bucket-search is
+ * fine (and faster than hashing, same small-N reasoning as
+ * attrs_find_flat_noresolve's <=8 linear-scan threshold and
+ * asnix_bshared_make_attrs's/json_encode_attrs_ctx's 32-entry stack-
+ * array thresholds elsewhere in this codebase) -- most real groupBy
+ * calls carry only a handful of items. This WAS an unconditional
+ * O(n * distinct-keys) scan with no size-based escape valve (the
+ * previous version of this comment called it "not hot-path" and
+ * assumed that was fine for every real call); a real profile of
+ * plasma-system-eval.nix found one single call with n=5234 and nearly
+ * all-distinct keys -- consistent with nixpkgs's own
+ * lib.tests.maintainers-style whole-list duplicate-field check
+ * (`groupBy (m: toString m.githubId) nixpkgs-maintainers-list`, keyed
+ * on each maintainer's near-unique numeric GitHub ID) -- costing
+ * ~13M wasted scan iterations and ~0.6-0.7% of total self-time on both
+ * `ll` and `asnix`. Above the threshold, an open-addressing hash index
+ * (keyed on the already-interned `sym`, sized once from `n` -- an
+ * upper bound on the eventual distinct-key count known before the loop
+ * starts, so no incremental grow is needed) gives O(1)-average lookup
+ * instead, the same bug class and same style of fix as
+ * prim_genericClosure's own O(n^2)-dedup-scan fix. */
+#define ASNIX_GROUPBY_HASH_MIN 32
+
 typedef struct {
     uint32_t sym;
     Value *items;
@@ -448,6 +469,20 @@ static Value groupBy2_impl(const Value *args, int64_t argc) {
     const Value *elems = asnix_bshared_list_elems(list);
     GroupBucket *buckets = NULL;
     size_t nbuckets = 0, bcap = 0;
+
+    int use_hash = n > ASNIX_GROUPBY_HASH_MIN;
+    size_t hcap = 0;
+    uint32_t *hsym = NULL;  /* hcap entries, parallel to hused/hbucket */
+    size_t *hbucket = NULL;
+    uint8_t *hused = NULL;
+    if (use_hash) {
+        hcap = 16;
+        while (hcap < (size_t)n * 2) hcap <<= 1;
+        hsym = malloc(hcap * sizeof(uint32_t));
+        hbucket = malloc(hcap * sizeof(size_t));
+        hused = calloc(hcap, 1);
+    }
+
     for (int64_t i = 0; i < n; i++) {
         Value key = asnix_apply(f, &elems[i], 1);
         key = asnix_force_for_print(key);
@@ -459,10 +494,23 @@ static Value groupBy2_impl(const Value *args, int64_t argc) {
         const char *kbytes = asnix_ptr_bytes(key, &klen);
         uint32_t sym = asnix_intern(kbytes, (size_t)klen);
         GroupBucket *b = NULL;
-        for (size_t j = 0; j < nbuckets; j++) {
-            if (buckets[j].sym == sym) {
-                b = &buckets[j];
-                break;
+        size_t hslot = 0;
+        if (use_hash) {
+            size_t mask = hcap - 1;
+            hslot = ((size_t)sym * 2654435761u) & mask;
+            while (hused[hslot]) {
+                if (hsym[hslot] == sym) {
+                    b = &buckets[hbucket[hslot]];
+                    break;
+                }
+                hslot = (hslot + 1) & mask;
+            }
+        } else {
+            for (size_t j = 0; j < nbuckets; j++) {
+                if (buckets[j].sym == sym) {
+                    b = &buckets[j];
+                    break;
+                }
             }
         }
         if (!b) {
@@ -470,17 +518,28 @@ static Value groupBy2_impl(const Value *args, int64_t argc) {
                 bcap = bcap ? bcap * 2 : 8;
                 buckets = realloc(buckets, bcap * sizeof(GroupBucket));
             }
+            size_t new_idx = nbuckets;
             b = &buckets[nbuckets++];
             b->sym = sym;
             b->items = NULL;
             b->len = 0;
             b->cap = 0;
+            if (use_hash) {
+                hused[hslot] = 1;
+                hsym[hslot] = sym;
+                hbucket[hslot] = new_idx;
+            }
         }
         if (b->len == b->cap) {
             b->cap = b->cap ? b->cap * 2 : 8;
             b->items = realloc(b->items, b->cap * sizeof(Value));
         }
         b->items[b->len++] = elems[i];
+    }
+    if (use_hash) {
+        free(hsym);
+        free(hbucket);
+        free(hused);
     }
     uint32_t *syms = nbuckets > 0 ? malloc(nbuckets * sizeof(uint32_t)) : NULL;
     Value *vals = nbuckets > 0 ? malloc(nbuckets * sizeof(Value)) : NULL;
