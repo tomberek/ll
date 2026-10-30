@@ -19,10 +19,13 @@
 #include "ll/ir.h"
 #include "ll/value.h"
 #include "ast.h"
+#include "builtins_shared.h"
 #include "compiler.h"
+#include "flake_eval.h"
 #include "ll_print.h"
 #include "parser.h"
 #include "root_env.h"
+#include "symtab.h"
 #include "value_util.h" /* ll_canon_path */
 
 static double ms_between(struct timespec *a, struct timespec *b) {
@@ -100,19 +103,49 @@ static void resolve_file_for_compile(const char *path, char **base_dir_out, char
 
 static void print_usage(FILE *out) {
     fprintf(out,
-        "usage: ll [-h | --help] [-E EXPR | FILE]\n"
+        "usage: ll [-h | --help] [-E EXPR | FILE | --flake DIR[#attr.path]] [-A attrpath]\n"
         "\n"
         "Evaluate a Nix expression and print the result.\n"
         "\n"
         "  -E, --expr EXPR   evaluate EXPR instead of FILE\n"
+        "  --flake DIR[#attr.path]   evaluate DIR as a flake and print its outputs\n"
+        "                            (or the attrpath fragment after '#', if given)\n"
+        "  -A attrpath       select attrpath out of the evaluated result\n"
         "  -h, --help        print this message and exit\n"
         "\n"
-        "With neither FILE nor -E, evaluates the literal expression \"42\".\n");
+        "With neither FILE, -E, nor --flake, evaluates the literal expression \"42\".\n");
+}
+
+/* Ported from asnix's own main.c select_attrpath -- a plain dotted-path
+ * walk, one attrset lookup per segment. Used by both -A and a --flake
+ * DIR#attr.path fragment. */
+static Value select_attrpath(Value v, const char *attrpath) {
+    const char *p = attrpath;
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        size_t seglen = dot ? (size_t)(dot - p) : strlen(p);
+        v = ll_force_for_print(v);
+        if (ll_tag_of(v) != LL_TAG_ATTRS) {
+            fprintf(stderr, "ll: -A: '%.*s' is not a set\n", (int)seglen, p);
+            exit(1);
+        }
+        uint32_t sym = ll_intern(p, seglen);
+        int64_t idx = ll_bshared_attrs_find(v, sym);
+        if (idx < 0) {
+            fprintf(stderr, "ll: -A: attribute '%.*s' missing\n", (int)seglen, p);
+            exit(1);
+        }
+        v = ll_bshared_attrs_value(v, idx);
+        p = dot ? dot + 1 : p + seglen;
+    }
+    return ll_force_for_print(v);
 }
 
 int main(int argc, char **argv) {
     const char *expr_flag = NULL;
     const char *file_arg = NULL;
+    const char *flake_ref = NULL;
+    const char *attrpath = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -125,8 +158,24 @@ int main(int argc, char **argv) {
                 return 1;
             }
             expr_flag = argv[++i];
+        } else if (strcmp(argv[i], "--flake") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ll: --flake requires an argument\n");
+                print_usage(stderr);
+                return 1;
+            }
+            flake_ref = argv[++i];
+        } else if (strcmp(argv[i], "-A") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ll: -A requires an argument\n");
+                print_usage(stderr);
+                return 1;
+            }
+            attrpath = argv[++i];
         } else if (argv[i][0] == '-' && strcmp(argv[i], "-") != 0) {
-            fprintf(stderr, "ll: unrecognized flag '%s' (only -E/--expr and -h/--help are supported)\n", argv[i]);
+            fprintf(stderr,
+                    "ll: unrecognized flag '%s' (only -E/--expr, --flake, -A, and -h/--help are supported)\n",
+                    argv[i]);
             print_usage(stderr);
             return 1;
         } else if (file_arg == NULL) {
@@ -138,10 +187,35 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (expr_flag && file_arg) {
-        fprintf(stderr, "ll: -E/--expr and a FILE argument are mutually exclusive\n");
+    if ((expr_flag ? 1 : 0) + (file_arg ? 1 : 0) + (flake_ref ? 1 : 0) > 1) {
+        fprintf(stderr, "ll: -E/--expr, --flake, and a FILE argument are mutually exclusive\n");
         print_usage(stderr);
         return 1;
+    }
+
+    if (flake_ref) {
+        const char *hash = strchr(flake_ref, '#');
+        char dir_buf[1024];
+        const char *fragment = NULL;
+        if (hash) {
+            size_t dirlen = (size_t)(hash - flake_ref);
+            if (dirlen >= sizeof(dir_buf)) {
+                fprintf(stderr, "ll: --flake: path '%s' is too long\n", flake_ref);
+                return 1;
+            }
+            memcpy(dir_buf, flake_ref, dirlen);
+            dir_buf[dirlen] = '\0';
+            fragment = hash + 1;
+        } else {
+            snprintf(dir_buf, sizeof(dir_buf), "%s", flake_ref);
+        }
+        ll_arena_init(0);
+        ll_lazy_thunk_enabled = getenv("LL_EAGER_THUNK") == NULL;
+        Value result = ll_eval_flake_outputs(dir_buf);
+        if (fragment && fragment[0]) result = select_attrpath(result, fragment);
+        if (attrpath) result = select_attrpath(result, attrpath);
+        ll_print_value(result);
+        return 0;
     }
 
     /* file_arg's own file-or-literal fallback (read_file_source returns
@@ -182,6 +256,7 @@ int main(int argc, char **argv) {
                 ms_between(&t0, &t4));
     }
 
+    if (attrpath) result = select_attrpath(result, attrpath);
     ll_print_value(result);
     return 0;
 }
