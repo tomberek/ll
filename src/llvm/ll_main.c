@@ -98,12 +98,62 @@ static void resolve_file_for_compile(const char *path, char **base_dir_out, char
     *resolved_path_out = canon;
 }
 
+static void print_usage(FILE *out) {
+    fprintf(out,
+        "usage: ll [-h | --help] [-E EXPR | FILE]\n"
+        "\n"
+        "Evaluate a Nix expression and print the result.\n"
+        "\n"
+        "  -E, --expr EXPR   evaluate EXPR instead of FILE\n"
+        "  -h, --help        print this message and exit\n"
+        "\n"
+        "With neither FILE nor -E, evaluates the literal expression \"42\".\n");
+}
+
 int main(int argc, char **argv) {
-    char *file_src = argc > 1 ? read_file_source(argv[1]) : NULL;
-    const char *src = file_src ? file_src : (argc > 1 ? argv[1] : "42");
+    const char *expr_flag = NULL;
+    const char *file_arg = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(stdout);
+            return 0;
+        } else if (strcmp(argv[i], "-E") == 0 || strcmp(argv[i], "--expr") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ll: %s requires an argument\n", argv[i]);
+                print_usage(stderr);
+                return 1;
+            }
+            expr_flag = argv[++i];
+        } else if (argv[i][0] == '-' && strcmp(argv[i], "-") != 0) {
+            fprintf(stderr, "ll: unrecognized flag '%s' (only -E/--expr and -h/--help are supported)\n", argv[i]);
+            print_usage(stderr);
+            return 1;
+        } else if (file_arg == NULL) {
+            file_arg = argv[i];
+        } else {
+            fprintf(stderr, "ll: unexpected extra argument '%s'\n", argv[i]);
+            print_usage(stderr);
+            return 1;
+        }
+    }
+
+    if (expr_flag && file_arg) {
+        fprintf(stderr, "ll: -E/--expr and a FILE argument are mutually exclusive\n");
+        print_usage(stderr);
+        return 1;
+    }
+
+    /* file_arg's own file-or-literal fallback (read_file_source returns
+     * NULL for a non-existent path, so a bare literal expression
+     * positional argument -- tests/difftest.sh's own convention --
+     * still works unchanged); -E always evaluates its argument as a
+     * literal expression, no file lookup. */
+    char *file_src = file_arg ? read_file_source(file_arg) : NULL;
+    const char *src = expr_flag ? expr_flag : (file_src ? file_src : (file_arg ? file_arg : "42"));
     char *base_dir, *resolved_path = NULL;
     if (file_src) {
-        resolve_file_for_compile(argv[1], &base_dir, &resolved_path);
+        resolve_file_for_compile(file_arg, &base_dir, &resolved_path);
     } else {
         base_dir = current_dir();
     }
