@@ -15,12 +15,70 @@ bin="${LL_BIN:-$root/ll}"
 
 case "$op" in
   eval)
-    # ll's CLI takes only a single file-or-expression argument (see
-    # src/llvm/ll_main.c) -- no nix-instantiate-style flags
-    # (--arg/--argstr/-A/--flake aren't implemented at all). Any case
-    # whose own .flags sidecar asks for one is honestly unsupported.
-    [ "$#" -eq 0 ] || exit 3
-    exec "$bin" "$file"
+    # The FLAGs are nix-instantiate's own, from a case's .flags sidecar.
+    # ll's CLI takes a single file-or-expression argument and nothing else
+    # (src/llvm/ll_main.c), so each one is either
+    #   - turned into the expression ll is given: --arg/--argstr/-A become
+    #     the file imported and applied the way nix-instantiate's auto-call
+    #     does (a function gets the arguments its formals name), then
+    #     selected with -A; -I is a NIX_PATH entry in front of the others;
+    #   - accepted because it changes nothing ll prints: --eval/--strict
+    #     are what this op is, --no-show-trace only changes the error text;
+    #   - a feature this build implements (--extra-experimental-features);
+    #   - or unsupported, and the case is skipped (exit 3), never guessed
+    #     at: --impure, --lint-*, --max-call-depth, any other feature.
+    binds=""
+    attr=""
+    nix_path=${NIX_PATH:-}
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --eval | --strict | --no-show-trace) shift ;;
+        --arg)
+          [ "$#" -ge 3 ] || exit 3
+          binds="$binds $2 = $3;"
+          shift 3
+          ;;
+        --argstr)
+          [ "$#" -ge 3 ] || exit 3
+          str=${3//\\/\\\\}
+          str=${str//\"/\\\"}
+          str=${str//\$\{/\\\$\{}
+          binds="$binds $2 = \"$str\";"
+          shift 3
+          ;;
+        -A)
+          [ "$#" -ge 2 ] || exit 3
+          attr=".$2"
+          shift 2
+          ;;
+        -I)
+          [ "$#" -ge 2 ] || exit 3
+          nix_path="$2${nix_path:+:$nix_path}"
+          shift 2
+          ;;
+        --extra-experimental-features)
+          [ "$#" -ge 2 ] || exit 3
+          for feature in $2; do
+            case "$feature" in
+              parse-toml-timestamps) ;;
+              *) exit 3 ;;
+            esac
+          done
+          shift 2
+          ;;
+        *) exit 3 ;;
+      esac
+    done
+    [ -z "$nix_path" ] || export NIX_PATH="$nix_path"
+    if [ -z "$binds$attr" ]; then
+      exec "$bin" "$file"
+    fi
+    # The file is imported by absolute path, so the wrapper does not depend
+    # on where ll resolves a relative one; a path that is not a plain Nix
+    # path literal is not guessed at.
+    abs=$(realpath "$file")
+    case "$abs" in *[!A-Za-z0-9_./+-]*) exit 3 ;; esac
+    exec "$bin" "let f = import $abs; in (if builtins.isFunction f then f (builtins.intersectAttrs (builtins.functionArgs f) {$binds }) else f)$attr"
     ;;
   *)
     # parse/check/nar/drv/flake/eval-xml/wire: not implemented.
