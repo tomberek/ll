@@ -4,10 +4,44 @@
 # intentional: it means this list is stale and must be trimmed, not that
 # something is wrong.
 #
-# All three are builtins.unsafeGetAttrPos/__curPos-style position
-# tracking: position info is a debug-build-only feature here (gated
-# behind LL_IRDUMP_LINE_TRACKING, see compiler.c's ll_ast_new_at),
+# To regenerate it for a new corpus commit: run ./run on the adapter
+# without --known and list the FAIL lines.
+
+# builtins.unsafeGetAttrPos/__curPos-style position tracking: position
+# info is a debug-build-only feature here (gated behind
+# LL_IRDUMP_LINE_TRACKING, see compiler.c's ll_ast_new_at),
 # deliberately not paid for in a normal build -- a real gap, not a typo.
 lang/eval-okay-getattrpos-functionargs.nix
 lang/eval-okay-getattrpos.nix
 lang/eval-okay-inherit-attr-pos.nix
+
+# builtins.fromTOML of a date or time. With --extra-experimental-features
+# parse-toml-timestamps Nix returns { _type = "timestamp"; value = "..."; };
+# toml.c refuses instead ("fromTOML: Dates and times are not supported").
+# The adapter passes that flag through because every other fromTOML case
+# passes with it; these sixteen are the ones with a timestamp in them.
+lang/eval-okay-fromTOML-062.nix
+lang/eval-okay-fromTOML-063.nix
+lang/eval-okay-fromTOML-064.nix
+lang/eval-okay-fromTOML-065.nix
+lang/eval-okay-fromTOML-066.nix
+lang/eval-okay-fromTOML-067.nix
+lang/eval-okay-fromTOML-068.nix
+lang/eval-okay-fromTOML-069.nix
+lang/eval-okay-fromTOML-070.nix
+lang/eval-okay-fromTOML-071.nix
+lang/eval-okay-fromTOML-072.nix
+lang/eval-okay-fromTOML-073.nix
+lang/eval-okay-fromTOML-074.nix
+lang/eval-okay-fromTOML-075.nix
+lang/eval-okay-fromTOML-076.nix
+lang/eval-okay-fromTOML-timestamps.nix
+
+# Search path given with -I, which the adapter turns into a $NIX_PATH
+# entry. A name=path entry is not honoured by compiler.c's
+# resolve_search_path: <dir5/c.nix> with dir5=lang/dir3 looks for
+# /lang/dir3/dir5/c.nix instead of lang/dir3/c.nix, and <a/b/a.nix> with
+# a/b=lang/dir3 is not found. eval-okay-search-path also reads
+# __nixPath, which is not defined.
+lang/eval-okay-search-path-prefix-slash.nix
+lang/eval-okay-search-path.nix
